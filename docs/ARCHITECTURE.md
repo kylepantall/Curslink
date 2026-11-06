@@ -162,6 +162,29 @@ window where the pointer lands: an expanding "pop" ring or a two-flash
 "blink". It is a separate process because Tk must own the main thread
 on macOS, while the host and agent run asyncio there.
 
+### The desktop app
+
+`curslink gui` (what the installers' Start menu entry, Curslink.app and the
+Linux menu entry open) is a Qt (PySide6) window plus a tray / menu bar
+icon. Closing the window leaves it in the tray, and it can start at sign-in
+(a per-user `Run` value on Windows, a LaunchAgent on macOS, an XDG autostart
+entry on Linux: `curslink/autostart.py`).
+
+The app does not run the host or agent itself. It starts the same
+`curslink host` / `curslink agent` the command line runs, with `--events`:
+the child prints one `@curslink {json}` line per event on stdout (running,
+agent connected, switch, gaze paused, log records) and takes commands on
+stdin (`home`, `gaze pause|resume|toggle`, `stop`), and it stops when stdin
+closes, so it never outlives the app (`curslink/events.py`). That keeps Qt
+on the main thread, asyncio, input capture and the camera in their own
+process, and a crash in one away from the other. The app also writes
+`curslink.toml` (with tomlkit, which keeps comments) for the layout editor,
+settings and first-run setup, and restarts the child to apply them.
+
+The icon masters are in `curslink/assets` (drawn on Apple's 824-in-1024
+grid); `packaging/icons/make_icons.py` turns them into the committed `.ico`,
+`.icns` and Linux PNGs.
+
 ## Code map
 
 | Module | Role |
@@ -177,6 +200,9 @@ on macOS, while the host and agent run asyncio there.
 | `curslink/pairing/` | Pairing store, code-confirmed handshake, mDNS discovery, pairing listener and window |
 | `curslink/overlay.py` | Pop/blink animation helper |
 | `curslink/app.py`, `cli.py` | Wiring and the `curslink` command |
+| `curslink/gui/` | The desktop app: window pages, tray, child process |
+| `curslink/events.py` | Status events and commands between the app and its child |
+| `curslink/configedit.py`, `autostart.py` | Writing `curslink.toml`; start at sign-in |
 
 The router, layout, gaze maths, protocol and networking have no platform
 dependencies and are covered by the test suite, including real TLS
@@ -189,11 +215,11 @@ connections between a host and an agent.
    a custom IME or accessibility actions. Alternative path: the host acts
    as a Bluetooth HID keyboard/mouse to the phone (Linux BlueZ can do
    this), which needs no app on the phone at all.
-2. **Pairing UX**: a paired agent added to the layout automatically from
-   the screens it reports, and pairing from a tray app instead of the
-   terminal. (Discovery and code pairing are done.)
-3. **Tray app / settings UI** with a drag-and-drop layout editor and a
-   live gaze preview.
+2. **Pairing UX**: answer incoming pairing requests in the app's window
+   rather than the Tk dialog. (Discovery, code pairing, pairing from the
+   app and adding a paired agent to the layout are done.)
+3. **App polish**: a live camera preview while calibrating, and signed,
+   notarised builds so the installers don't warn.
 4. **Linux Wayland** via uinput/evdev, **macOS** relative motion from
    event deltas instead of cursor parking.
 5. **Clipboard sharing** between devices.

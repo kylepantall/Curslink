@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Curslink
+GenericName=Input switcher
+Comment=Look at a device and your mouse and keyboard follow
+Exec=/opt/curslink/curslink gui
+Icon=curslink
+Terminal=false
+Categories=Utility;
+Keywords=mouse;keyboard;switch;gaze;kvm;
+StartupNotify=false
+StartupWMClass=Curslink

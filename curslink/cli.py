@@ -1,11 +1,10 @@
-"""``curslink host | agent | pair | unpair | relay | invite | calibrate | check | update | overlay-test``"""
+"""``curslink gui | host | agent | pair | unpair | relay | invite | calibrate | check | update | overlay-test``"""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
 import contextlib
-import itertools
 import logging
 import sys
 from pathlib import Path
@@ -53,10 +52,18 @@ def _updates(path: str, argv: list[str]) -> None:
     update.watch(raw)
 
 
+def _events(args) -> None:
+    if getattr(args, "events", False):
+        from curslink import events
+
+        events.enable()
+
+
 def cmd_host(args) -> int:
     from curslink.app import run_host
 
     cfg = _host_cfg(args.config)
+    _events(args)
     _updates(args.config, args.argv)
     asyncio.run(run_host(cfg))
     return 0
@@ -66,6 +73,7 @@ def cmd_agent(args) -> int:
     from curslink.app import run_agent
 
     _updates(args.config, args.argv)
+    _events(args)
     raw = load_raw(args.config)
     if args.host:
         raw.setdefault("agent", {})["host"] = args.host
@@ -238,7 +246,7 @@ def cmd_invite(args) -> int:
 
 
 def cmd_calibrate(args) -> int:
-    from curslink.app import calibrate
+    from curslink.app import calibrate, close_pairs
 
     cfg = _host_cfg(args.config)
     cal = calibrate(cfg)
@@ -248,14 +256,11 @@ def cmd_calibrate(args) -> int:
         return 1
     cal.save(cfg.gaze.calibration)
     print(f"\nSaved calibration for {len(centroids)} screen(s) to {cfg.gaze.calibration}")
-    warn = 2 * cfg.gaze.settings.switch_margin_deg
-    for (a, pa), (b, pb) in itertools.combinations(centroids.items(), 2):
-        gap = ((pa[0] - pb[0]) ** 2 + (pa[1] - pb[1]) ** 2) ** 0.5
-        if gap < warn:
-            print(
-                f"Warning: {a.key} and {b.key} are only {gap:.1f} deg apart; "
-                "gaze may struggle to tell them apart (consider gaze.within_device = false)."
-            )
+    for a, b, gap in close_pairs(cal, cfg.gaze.settings.switch_margin_deg):
+        print(
+            f"Warning: {a.key} and {b.key} are only {gap:.1f} deg apart; "
+            "gaze may struggle to tell them apart (consider gaze.within_device = false)."
+        )
     return 0
 
 
@@ -335,6 +340,34 @@ def cmd_update(args) -> int:
     return 0
 
 
+def cmd_gui(args) -> int:
+    try:
+        from curslink.gui.app import main as gui_main
+    except ImportError as exc:
+        print(f"The Curslink app needs Qt, which isn't installed ({exc}).\n"
+              'Install it with: pip install "curslink[gui]"', file=sys.stderr)
+        return 1
+    argv = ["--minimized"] if args.minimized else []
+    if args.config:
+        argv += ["--config", args.config]
+    return gui_main(argv)
+
+
+def wants_gui(argv: list[str]) -> bool:
+    """Opening the installed app (no arguments, no terminal) starts the GUI.
+
+    ``curslinkw`` is the Windows build without a console window; the macOS
+    app and Linux menu entry pass ``gui`` themselves, but a double-clicked
+    executable with no terminal attached gets the window too.
+    """
+    if argv or not getattr(sys, "frozen", False):
+        return False
+    if Path(sys.executable).stem.lower() == "curslinkw":
+        return True
+    stdin = sys.stdin
+    return stdin is None or not stdin.isatty()
+
+
 def cmd_overlay_test(args) -> int:
     import time
 
@@ -359,7 +392,25 @@ def _selftest() -> int:
     import tkinter  # noqa: F401
 
     mp.Image(image_format=mp.ImageFormat.SRGB, data=np.zeros((4, 4, 3), dtype=np.uint8))
-    print(f"curslink {__version__}: mediapipe {mp.__version__}, opencv {cv2.__version__}, tk {tkinter.TkVersion}")
+
+    # The app: Qt, its SVG and local-socket modules, and the icons as package data.
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    import PySide6
+    from PySide6.QtWidgets import QApplication
+
+    from curslink.gui.common import app_icon, tray_icon
+
+    qt = QApplication.instance() or QApplication(["curslink"])
+    if app_icon().isNull() or tray_icon("running", True).isNull():
+        raise SystemExit("the app icons didn't load")
+    import curslink.gui.window  # noqa: F401
+    import curslink.gui.tray  # noqa: F401
+    import PySide6.QtNetwork  # noqa: F401
+    del qt
+    print(f"curslink {__version__}: mediapipe {mp.__version__}, opencv {cv2.__version__}, "
+          f"tk {tkinter.TkVersion}, qt {PySide6.__version__}")
     return 0
 
 
@@ -369,13 +420,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-v", "--verbose", action="store_true")
     sub = parser.add_subparsers(dest="command", required=True)
 
+    p = sub.add_parser("gui", help="open the Curslink app (window and tray icon)")
+    p.add_argument("--minimized", action="store_true", help="start in the tray without opening the window")
+    p.add_argument("-c", "--config", help="use this curslink.toml (default: your user config folder)")
+    p.set_defaults(func=cmd_gui)
+
     p = sub.add_parser("host", help="run on the computer the keyboard and mouse are attached to")
     p.add_argument("-c", "--config", default="curslink.toml")
+    # Status events on stdout and commands on stdin, for the app (see curslink/events.py).
+    p.add_argument("--events", action="store_true", help=argparse.SUPPRESS)
     p.set_defaults(func=cmd_host)
 
     p = sub.add_parser("agent", help="run on each computer you want to control")
     p.add_argument("-c", "--config", default="curslink.toml")
     p.add_argument("--host", help="host LAN address (overrides [agent].host)")
+    p.add_argument("--events", action="store_true", help=argparse.SUPPRESS)
     p.set_defaults(func=cmd_agent)
 
     p = sub.add_parser("pair", help="find Curslink devices on the network and pair with one")
@@ -446,6 +505,8 @@ def main(argv: list[str] | None = None) -> int:
 
         print(install_kind() or "source")
         return 0
+    if wants_gui(argv):
+        argv = ["gui"]
     args = build_parser().parse_args(argv)
     args.argv = argv
     logging.basicConfig(

@@ -1,5 +1,5 @@
 #!/bin/sh
 # Remove the previous version first, so an update doesn't leave stale
 # libraries behind (a .pkg only adds and overwrites files).
-rm -rf /usr/local/lib/curslink
+rm -rf /usr/local/lib/curslink /Applications/Curslink.app
 exit 0
