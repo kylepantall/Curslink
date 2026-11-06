@@ -93,7 +93,7 @@ class CalibratePage(Page):
         col.addLayout(row)
         self.add(self.body)
         self.finish()
-        self.overlay = LookHere(self.overlay_record, self.cancel)
+        self.overlay = LookHere(self.overlay_record, self.cancel, self.skip)
         self.looking: str | None = None
 
         self.timer = QTimer(self)
@@ -313,14 +313,16 @@ class CalibratePage(Page):
         if self.state not in ("ready", "recording") or self.app.role != "host":
             self.overlay.hide()
             return
-        target, _name = self.targets[self.step]
+        target, name = self.targets[self.step]
         try:
             me = self.app.config().get("host", "device_id")
         except Exception:
             me = None
-        step = f"Step {self.step + 1} of {len(self.targets)}"
+        step = f"Step {self.step + 1} of {len(self.targets)} · {name.split(' / ')[0]}"
+        done = {i for i, (_t, n) in enumerate(self.targets) if n in self.results}
         if target.device_id == me:
-            self.overlay.show(target.screen_id, step, recording=self.state == "recording")
+            self.overlay.show(target.screen_id, step, recording=self.state == "recording",
+                              total=len(self.targets), current=self.step, done=done)
         else:
             # Another computer's screen: the map and the prompt here show it.
             self.overlay.hide()
