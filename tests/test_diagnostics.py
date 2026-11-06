@@ -61,7 +61,9 @@ def test_a_native_crash_is_reported_on_the_next_start(tmp_path):
     assert r.returncode == 0, r.stderr
     reports = list(tmp_path.glob("crash-*-host-native.txt"))
     assert len(reports) == 1
-    assert "Segmentation fault" in reports[0].read_text()
+    text = reports[0].read_text()
+    # faulthandler words it per platform: "Segmentation fault" or "access violation" (Windows).
+    assert "Segmentation fault" in text or "access violation" in text
     assert str(reports[0]) in r.stdout
     assert not (tmp_path / "fault-host.log").read_text().strip()  # handled once
 
