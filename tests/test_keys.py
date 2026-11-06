@@ -31,3 +31,17 @@ def test_hotkey_needs_all_parts():
     hk = Hotkey("ctrl+alt+g")
     assert not hk.feed("alt", True)
     assert not hk.feed("g", True)
+
+
+def test_windows_absolute_move_covers_the_virtual_desktop():
+    import ctypes
+
+    from curslink.inputs.pynput_backend import _INPUT, win_absolute
+
+    assert ctypes.sizeof(_INPUT) == (40 if ctypes.sizeof(ctypes.c_void_p) == 8 else 28)
+    assert win_absolute(0, 0, 0, 0, 1920, 1080) == (0, 0)
+    assert win_absolute(1919, 1079, 0, 0, 1920, 1080) == (65535, 65535)
+    # a monitor left of the primary starts the virtual desktop at -1920
+    assert win_absolute(-1920, 0, -1920, 0, 3840, 1080) == (0, 0)
+    assert win_absolute(0, 540, -1920, 0, 3840, 1080)[0] == round(1920 * 65535 / 3839)
+    assert win_absolute(99999, -5, 0, 0, 1920, 1080) == (65535, 0)  # clamped

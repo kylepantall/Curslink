@@ -12,6 +12,7 @@ Notes per platform:
 
 from __future__ import annotations
 
+import ctypes
 import logging
 import sys
 import threading
@@ -113,6 +114,7 @@ class PynputCapture:
             self._mouse_listener = self._key_listener = None
         if self._mac and self._grabbed:
             _mac_attach_cursor(True)
+            _mac_cursor_visible(True)
 
     def set_grab(self, grabbed: bool) -> None:
         if grabbed == self._grabbed:
@@ -120,7 +122,14 @@ class PynputCapture:
         self._grabbed = grabbed
         if self._mac:
             # The listeners keep running; the event taps read _grabbed.
+            # Detaching the cursor only works for the frontmost app, which
+            # this background service never is, so the cursor is also held
+            # at the park point (a warp: no event, so nothing here hovers)
+            # and hidden while input is on another computer.
             _mac_attach_cursor(not grabbed)
+            if grabbed:
+                _mac_warp(*self.park_at)
+            _mac_cursor_visible(not grabbed)
             return
         if grabbed and self._controller is not None:
             self._controller.position = self.park_at
@@ -168,6 +177,7 @@ class PynputCapture:
             dx, dy = _mac_delta(event)
             if dx or dy:
                 self._handler.on_motion(dx, dy)
+                _mac_warp(*self.park_at)
         return None  # suppressed: this Mac doesn't see it
 
     def _mac_key_tap(self, event_type, event):
@@ -282,15 +292,72 @@ def _mac_attach_cursor(attached: bool) -> None:
         log.warning("couldn't %s the cursor", "reattach" if attached else "detach", exc_info=True)
 
 
+class _CGPoint(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_double), ("y", ctypes.c_double)]
+
+
+_CG_PATH = "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices"
+_CF_PATH = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
+_mac_libs: dict = {}
+_mac_hidden = False
+
+
+def _mac_lib(path: str):
+    if path not in _mac_libs:
+        _mac_libs[path] = ctypes.CDLL(path)
+    return _mac_libs[path]
+
+
+def _mac_warp(x: float, y: float) -> None:
+    """Put the cursor at (x, y) without posting an event (no hover, nothing
+    for the tap to see)."""
+    try:
+        cg = _mac_lib(_CG_PATH)
+        cg.CGWarpMouseCursorPosition.argtypes = [_CGPoint]
+        cg.CGWarpMouseCursorPosition(_CGPoint(float(x), float(y)))
+    except Exception:  # pragma: no cover - macOS only
+        log.debug("couldn't warp the cursor", exc_info=True)
+
+
+def _mac_cursor_visible(visible: bool) -> None:
+    """Hide or show the Mac's cursor. A background process may only do that
+    after setting "SetsCursorInBackground" on its window server connection
+    (what Synergy and Barrier do)."""
+    global _mac_hidden
+    if visible != _mac_hidden:
+        return  # already that way (hiding counts, so never hide twice)
+    try:
+        cg, cf = _mac_lib(_CG_PATH), _mac_lib(_CF_PATH)
+        if not visible:
+            cg._CGSDefaultConnection.restype = ctypes.c_int
+            cid = cg._CGSDefaultConnection()
+            cf.CFStringCreateWithCString.restype = ctypes.c_void_p
+            cf.CFStringCreateWithCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32]
+            key = cf.CFStringCreateWithCString(None, b"SetsCursorInBackground", 0x08000100)
+            true = ctypes.c_void_p.in_dll(cf, "kCFBooleanTrue")
+            cg.CGSSetConnectionProperty.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p]
+            cg.CGSSetConnectionProperty(cid, cid, key, true)
+            cg.CGDisplayHideCursor(0)
+        else:
+            cg.CGDisplayShowCursor(0)
+        _mac_hidden = not visible
+    except Exception:  # pragma: no cover - macOS only
+        log.debug("couldn't %s the cursor", "show" if visible else "hide", exc_info=True)
+
+
 def _mac_no_event_suppression() -> None:
     """By default macOS ignores the real mouse for 0.25 s after a program
-    moves the cursor. Moving it is how input comes home, so don't."""
+    moves the cursor. Warping it is how it stays parked and how input comes
+    home, so don't."""
+    try:
+        cg = _mac_lib(_CG_PATH)
+        cg.CGSetLocalEventsSuppressionInterval.argtypes = [ctypes.c_double]
+        cg.CGSetLocalEventsSuppressionInterval(0.0)
+    except Exception:  # pragma: no cover - macOS only
+        log.debug("couldn't turn off local event suppression (C)", exc_info=True)
     try:
         import Quartz
 
-        fn = getattr(Quartz, "CGSetLocalEventsSuppressionInterval", None)
-        if fn is not None:
-            fn(0.0)
         source = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStateCombinedSessionState)
         if source is not None:
             Quartz.CGEventSourceSetLocalEventsSuppressionInterval(source, 0.0)
@@ -309,6 +376,8 @@ class PynputSink:
         self.modifier_map = modifier_map or {}
 
     def move_to(self, x: int, y: int) -> None:
+        if sys.platform == "win32" and _win_move(x, y):
+            return
         self._mouse.position = (x, y)
 
     def button(self, button: str, pressed: bool) -> None:
@@ -330,3 +399,63 @@ class PynputSink:
             log.debug("key %s not supported on this platform", key)
             return
         (self._keyboard.press if pressed else self._keyboard.release)(target)
+
+
+# ---------------------------------------------------------------- Windows bits
+# pynput moves the pointer with SetCursorPos, which jumps it: apps under it
+# get no mouse input, so nothing hovers, and some only catch up later. A real
+# mouse arrives through SendInput, so move it that way: absolute, over the
+# whole virtual desktop.
+
+class _MOUSEINPUT(ctypes.Structure):
+    _fields_ = [("dx", ctypes.c_int32), ("dy", ctypes.c_int32), ("mouseData", ctypes.c_uint32),
+                ("dwFlags", ctypes.c_uint32), ("time", ctypes.c_uint32), ("dwExtraInfo", ctypes.c_size_t)]
+
+
+class _INPUT(ctypes.Structure):
+    class _U(ctypes.Union):
+        # The union is as big as its largest member (KEYBDINPUT/HARDWAREINPUT are smaller).
+        _fields_ = [("mi", _MOUSEINPUT)]
+
+    _anonymous_ = ("u",)
+    _fields_ = [("type", ctypes.c_uint32), ("u", _U)]
+
+
+_MOUSEEVENTF_MOVE, _MOUSEEVENTF_ABSOLUTE, _MOUSEEVENTF_VIRTUALDESK = 0x0001, 0x8000, 0x4000
+_win_ready: list = []
+
+
+def _win_dpi_aware() -> None:
+    """Physical pixels, as the layout and screeninfo use, on every monitor."""
+    if _win_ready:
+        return
+    _win_ready.append(True)
+    try:
+        user32 = ctypes.windll.user32
+        if not user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):  # per monitor v2
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:
+        log.debug("couldn't make the process DPI aware (it may already be)", exc_info=True)
+
+
+def win_absolute(x: float, y: float, vx: int, vy: int, vw: int, vh: int) -> tuple[int, int]:
+    """A virtual-desktop pixel -> SendInput's 0..65535 absolute coordinates."""
+    nx = round((x - vx) * 65535 / max(1, vw - 1))
+    ny = round((y - vy) * 65535 / max(1, vh - 1))
+    return min(max(nx, 0), 65535), min(max(ny, 0), 65535)
+
+
+def _win_move(x: int, y: int) -> bool:
+    try:
+        _win_dpi_aware()
+        user32 = ctypes.windll.user32
+        vx, vy = user32.GetSystemMetrics(76), user32.GetSystemMetrics(77)
+        vw, vh = user32.GetSystemMetrics(78), user32.GetSystemMetrics(79)
+        nx, ny = win_absolute(x, y, vx, vy, vw, vh)
+        inp = _INPUT(type=0)
+        inp.mi = _MOUSEINPUT(nx, ny, 0, _MOUSEEVENTF_MOVE | _MOUSEEVENTF_ABSOLUTE | _MOUSEEVENTF_VIRTUALDESK, 0, 0)
+        if user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT)) == 1:
+            return True
+    except Exception:
+        log.debug("SendInput move failed; falling back to SetCursorPos", exc_info=True)
+    return False
