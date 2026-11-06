@@ -152,6 +152,19 @@ def set_dock_icon(visible: bool) -> None:
             app.setActivationPolicy_(policy)
             if visible:
                 app.activateIgnoringOtherApps_(True)
-            log.debug("Dock icon %s", "shown" if visible else "hidden")
+            log.info("Dock icon %s", "shown" if visible else "hidden")
     except Exception:
-        log.debug("couldn't change the Dock icon", exc_info=True)
+        log.warning("couldn't change the Dock icon", exc_info=True)
+
+
+def dock_icon_visible() -> bool:
+    """macOS: whether the app is in the Dock right now (True elsewhere)."""
+    if sys.platform != "darwin":
+        return True
+    try:
+        import AppKit
+
+        policy = AppKit.NSApplication.sharedApplication().activationPolicy()
+        return policy == AppKit.NSApplicationActivationPolicyRegular
+    except Exception:
+        return True  # can't tell: assume it is, so a click still opens the window

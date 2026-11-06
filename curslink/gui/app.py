@@ -301,6 +301,18 @@ def main(argv: list[str] | None = None) -> int:
     app.window = MainWindow(app)
     app.tray = Tray(app)
     tray_ok = app.tray.available()
+    if sys.platform == "darwin":
+        # Clicking the Dock icon re-activates the app: show the window, so
+        # an icon in the Dock always leads somewhere.
+        def on_state(state) -> None:
+            from PySide6.QtCore import Qt
+
+            if (state == Qt.ApplicationState.ApplicationActive and not app.window.isVisible()
+                    and native.dock_icon_visible()):
+                log.info("Dock icon clicked with the window hidden; showing it")
+                app.show_window()
+
+        qt.applicationStateChanged.connect(on_state)
     if tray_ok:
         app.tray.show()
 
@@ -311,6 +323,9 @@ def main(argv: list[str] | None = None) -> int:
             app.start_linking()
         # Agents have nothing to look at once paired, so they start hidden.
         hidden = args.minimized or prefs.start_minimized or app.agent_paired()
+        log.info("starting %s (minimized flag %s, start minimised %s, %s, tray %s)",
+                 "hidden in the tray" if hidden and tray_ok else "with the window open", args.minimized,
+                 prefs.start_minimized, app.role, "available" if tray_ok else "unavailable")
         if not hidden or not tray_ok:
             app.show_window()
         else:

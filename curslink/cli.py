@@ -407,6 +407,11 @@ def _selftest() -> int:
     qt = QApplication.instance() or QApplication(["curslink"])
     if app_icon().isNull() or tray_icon("running", True).isNull():
         raise SystemExit("the app icons didn't load")
+    if sys.platform == "darwin":
+        # The window glass, the Dock icon and camera names need pyobjc.
+        import AppKit  # noqa: F401
+        import AVFoundation  # noqa: F401
+        import objc  # noqa: F401
     import curslink.gui.window  # noqa: F401
     import curslink.gui.tray  # noqa: F401
     import PySide6.QtNetwork  # noqa: F401
