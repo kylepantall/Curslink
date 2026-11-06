@@ -11,8 +11,17 @@ from typing import Any
 from curslink.gaze.zones import GazeSettings
 from curslink.layout import Device, Layout, Screen
 from curslink.pairing.service import DEFAULT_PAIRING_PORT
+from curslink.net.relay import (
+    DEFAULT_RELAY_PORT,
+    MIN_RELAY_KEY_LENGTH,
+    RelayTarget,
+    decode_pairing_code,
+    parse_address,
+    room_id,
+)
 from curslink.protocol import DEFAULT_PORT
 from curslink.router import RouterSettings
+from curslink.security import WeakSecretError, derive_key
 
 
 class ConfigError(ValueError):
@@ -42,6 +51,8 @@ class HostConfig:
     layout: Layout
     listen: str = "0.0.0.0"
     port: int = DEFAULT_PORT
+    lan: bool = True
+    relay: RelayTarget | None = None
     router: RouterSettings = field(default_factory=RouterSettings)
     gaze: GazeConfig = field(default_factory=GazeConfig)
     pairing: PairingConfig = field(default_factory=PairingConfig)
@@ -61,12 +72,13 @@ class AgentConfig:
     host_id: str = ""                # which paired host to use if there are several
     modifier_map: dict[str, str] = field(default_factory=dict)
     animations: bool = True
+    relay: RelayTarget | None = None
     pairing: PairingConfig = field(default_factory=PairingConfig)
 
 
 def _secret(raw: dict[str, Any]) -> str | None:
     """The optional shared secret. Without one, devices must be paired."""
-    secret = os.environ.get("CURSLINK_SECRET") or raw.get("secret")
+    secret = os.environ.get("CURSLINK_SECRET") or raw.get("secret") or (_pairing_code(raw) or {}).get("secret")
     if secret is None or secret == "":
         return None
     if not isinstance(secret, str):
@@ -83,6 +95,73 @@ def pairing_config(raw: dict[str, Any], base_dir: Path = Path(".")) -> PairingCo
         enabled=bool(p.get("enabled", True)),
         port=_int(p, "port", DEFAULT_PAIRING_PORT),
         store=(base_dir / Path(store).expanduser()) if store else None,
+    )
+
+
+@dataclass
+class RelayServerConfig:
+    key: str
+    listen: str = "0.0.0.0"
+    port: int = DEFAULT_RELAY_PORT
+    max_connections: int = 256
+    max_rooms: int = 64
+
+
+def _pairing_code(raw: dict[str, Any]) -> dict[str, str] | None:
+    code = os.environ.get("CURSLINK_PAIRING_CODE") or raw.get("relay", {}).get("code")
+    if not code:
+        return None
+    try:
+        return decode_pairing_code(code)
+    except ValueError as exc:
+        raise ConfigError(f"invalid pairing code: {exc}") from exc
+
+
+def relay_target(raw: dict[str, Any], secret: str | None) -> RelayTarget | None:
+    """The ``[relay]`` table a host or agent uses to meet over the internet.
+
+    Either ``address`` + ``key``, or a single ``code`` from ``curslink invite``.
+    """
+    table = raw.get("relay", {})
+    code = _pairing_code(raw) or {}
+    address = table.get("address") or code.get("relay")
+    key = os.environ.get("CURSLINK_RELAY_KEY") or table.get("key") or code.get("relay_key")
+    if not address and not key:
+        return None
+    if not address or not key:
+        raise ConfigError("[relay] needs both `address` and `key` (or a `code`)")
+    try:
+        parse_address(address)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
+    # Without a shared secret the room comes from each pair's link key at
+    # runtime (see relay.paired_room_id), so it is left empty here.
+    room = ""
+    if secret:
+        try:
+            room = room_id(derive_key(secret))
+        except WeakSecretError as exc:
+            raise ConfigError(str(exc)) from exc
+    return RelayTarget(address=address, key=key, room=room)
+
+
+def relay_server_config(raw: dict[str, Any]) -> RelayServerConfig:
+    table = raw.get("relay", {})
+    key = os.environ.get("CURSLINK_RELAY_KEY") or table.get("key")
+    if not isinstance(key, str) or len(key) < MIN_RELAY_KEY_LENGTH:
+        raise ConfigError(
+            f"[relay].key (or CURSLINK_RELAY_KEY) must be at least {MIN_RELAY_KEY_LENGTH} characters; "
+            "`curslink relay --init` writes a config with a random one"
+        )
+    port = _int(table, "port", DEFAULT_RELAY_PORT)
+    if not 0 < port < 65536:
+        raise ConfigError("[relay].port must be 1-65535")
+    return RelayServerConfig(
+        key=key,
+        listen=table.get("listen", "0.0.0.0"),
+        port=port,
+        max_connections=_int(table, "max_connections", 256),
+        max_rooms=_int(table, "max_rooms", 64),
     )
 
 
@@ -164,12 +243,19 @@ def host_config(raw: dict[str, Any], base_dir: Path = Path(".")) -> HostConfig:
             pitch_weight=float(g.get("pitch_weight", defaults.pitch_weight)),
         ),
     )
+    secret = _secret(raw)
+    relay = relay_target(raw, secret)
+    lan = host.get("lan", True)
+    if not lan and relay is None:
+        raise ConfigError("[host].lan = false needs a [relay] to connect through")
     return HostConfig(
         device_id=device_id,
-        secret=_secret(raw),
+        secret=secret,
         layout=layout,
         listen=host.get("listen", "0.0.0.0"),
         port=_int(host, "port", DEFAULT_PORT),
+        lan=lan,
+        relay=relay,
         router=router,
         gaze=gaze,
         pairing=pairing_config(raw, base_dir),
@@ -180,10 +266,13 @@ def agent_config(raw: dict[str, Any], base_dir: Path = Path(".")) -> AgentConfig
     agent = raw.get("agent", {})
     if not agent.get("device_id"):
         raise ConfigError("[agent].device_id is required")
+    secret = _secret(raw)
+    relay = relay_target(raw, secret)
     cfg = AgentConfig(
         device_id=agent["device_id"],
-        secret=_secret(raw),
+        secret=secret,
         host=agent.get("host", ""),
+        relay=relay,
         port=_int(agent, "port", DEFAULT_PORT),
         name=agent.get("name", agent["device_id"]),
         host_id=agent.get("host_id", ""),
@@ -191,6 +280,6 @@ def agent_config(raw: dict[str, Any], base_dir: Path = Path(".")) -> AgentConfig
         animations=agent.get("animations", True),
         pairing=pairing_config(raw, base_dir),
     )
-    if not cfg.host and not cfg.pairing.enabled:
-        raise ConfigError("set [agent].host, or leave [pairing] enabled so the host can be found")
+    if not cfg.host and not cfg.relay and not cfg.pairing.enabled:
+        raise ConfigError("set [agent].host (LAN), a [relay] (internet), or leave [pairing] enabled")
     return cfg

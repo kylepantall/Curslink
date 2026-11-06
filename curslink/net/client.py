@@ -12,10 +12,14 @@ from typing import Awaitable, Callable
 
 from curslink.inputs.base import InputSink
 from curslink.net.framing import STREAM_LIMIT, read_message
+from curslink.net.relay import RelayError, RelayTarget, agent_connect
 from curslink.protocol import PROTOCOL_VERSION, Message, ProtocolError, encode
 from curslink.security import channel_binding, hello_auth
 
 log = logging.getLogger(__name__)
+
+# With a relay configured too, give up on the LAN address this quickly.
+LAN_ATTEMPT_TIMEOUT_S = 2.0
 
 
 class AgentSession:
@@ -84,10 +88,11 @@ def detect_screens() -> list[dict]:
 class Target:
     """Where and how to connect: what :class:`AgentClient`'s resolver returns."""
 
-    host: str
+    host: str                      # "" = relay only
     port: int
     ssl_context: ssl.SSLContext | None
     auth_key: bytes | None = None  # proves our identity in hello
+    relay: RelayTarget | None = None
 
 
 class NotReady(Exception):
@@ -106,7 +111,10 @@ class AgentClient:
         max_backoff_s: float = 10.0,
         auth_key: bytes | None = None,
         resolve: Callable[[], Awaitable[Target]] | None = None,
+        relay: RelayTarget | None = None,
     ):
+        if not host and relay is None and resolve is None:
+            raise ValueError("an agent needs a host address, a relay, or both")
         self.device_id = device_id
         self.name = name
         self.host = host
@@ -118,16 +126,37 @@ class AgentClient:
         # Re-run before every connection attempt, so pairing or a host that
         # moved to a new address is picked up without a restart.
         self.resolve = resolve
+        self.relay = relay
+        self.via = ""
         self.connected = asyncio.Event()
+
+    async def _open(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        """LAN first (fast, direct); fall back to the relay when there is one."""
+        if self.host:
+            try:
+                streams = await asyncio.wait_for(
+                    asyncio.open_connection(self.host, self.port, ssl=self.ssl_context, limit=STREAM_LIMIT),
+                    LAN_ATTEMPT_TIMEOUT_S if self.relay else None,
+                )
+                self.via = f"{self.host}:{self.port}"
+                return streams
+            except (OSError, asyncio.TimeoutError) as exc:
+                if self.relay is None:
+                    raise
+                log.debug("host not reachable on the LAN (%s); trying the relay", exc)
+        assert self.relay is not None
+        if self.ssl_context is None:
+            raise ValueError("relay connections need the pairing secret")
+        streams = await agent_connect(self.relay.address, self.relay.key, self.relay.room, self.ssl_context)
+        self.via = f"relay {self.relay.address}"
+        return streams
 
     async def run_once(self) -> None:
         if self.resolve is not None:
             target = await self.resolve()
-            self.host, self.port = target.host, target.port
+            self.host, self.port, self.relay = target.host, target.port, target.relay
             self.ssl_context, self.auth_key = target.ssl_context, target.auth_key
-        reader, writer = await asyncio.open_connection(
-            self.host, self.port, ssl=self.ssl_context, limit=STREAM_LIMIT
-        )
+        reader, writer = await self._open()
         try:
             hello = dict(
                 v=PROTOCOL_VERSION,
@@ -143,7 +172,7 @@ class AgentClient:
             welcome = await asyncio.wait_for(read_message(reader), 5)
             if welcome is None or welcome.t != "welcome":
                 raise ProtocolError("host did not welcome us")
-            log.info("connected to host %s:%d", self.host, self.port)
+            log.info("connected to host via %s", self.via)
             self.connected.set()
             while True:
                 msg = await read_message(reader)
@@ -175,7 +204,7 @@ class AgentClient:
                     log.info("%s", exc)
                 await asyncio.sleep(2.0)
                 continue
-            except (OSError, ProtocolError, asyncio.TimeoutError) as exc:
-                log.info("host %s:%d unavailable: %s", self.host, self.port, exc)
+            except (OSError, ProtocolError, RelayError, asyncio.TimeoutError) as exc:
+                log.info("host unavailable: %s", exc)
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, self.max_backoff_s)

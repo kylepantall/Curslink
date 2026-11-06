@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from dataclasses import replace
 
 from curslink.config import AgentConfig, HostConfig, PairingConfig
 from curslink.gaze.zones import Calibration, GazeClassifier, Target
 from curslink.net.client import AgentClient, AgentSession, NotReady
 from curslink.net.client import Target as ConnectTarget
+from curslink.net.relay import HostRelayLink, RelayTarget, paired_room_id
 from curslink.net.server import HostServer
 from curslink.pairing.handshake import DeviceInfo
 from curslink.pairing.store import PairingStore
@@ -86,6 +88,56 @@ class Pairing:
             await self.listener.close()
 
 
+class HostRelays:
+    """The host's links to the relay: one room for the shared secret (if
+    any) plus one room per paired agent, kept in step with the pairing store."""
+
+    def __init__(self, target: RelayTarget, host_id: str, shared_room: bool, store: PairingStore, tls, handle,
+                 refresh_s: float = 5.0):
+        self.target = target
+        self.host_id = host_id
+        self.shared_room = shared_room
+        self.store = store
+        self.tls = tls
+        self.handle = handle
+        self.refresh_s = refresh_s
+        self.links: dict[str, HostRelayLink] = {}
+        self._task: asyncio.Task | None = None
+
+    def rooms(self) -> set[str]:
+        rooms = {paired_room_id(p.key, self.host_id) for p in self.store.peers("agent")}
+        if self.shared_room and self.target.room:
+            rooms.add(self.target.room)
+        return rooms
+
+    async def sync(self) -> None:
+        wanted = self.rooms()
+        for room in set(self.links) - wanted:  # unpaired or re-paired
+            await self.links.pop(room).close()
+        for room in wanted - set(self.links):
+            link = HostRelayLink(replace(self.target, room=room), self.tls, self.handle)
+            link.start()
+            self.links[room] = link
+
+    def start(self) -> None:
+        async def loop():
+            while True:
+                try:
+                    await self.sync()
+                except ValueError as exc:  # unreadable pairing store
+                    log.warning("%s", exc)
+                await asyncio.sleep(self.refresh_s)
+
+        self._task = asyncio.create_task(loop())
+
+    async def close(self) -> None:
+        if self._task:
+            self._task.cancel()
+        for link in self.links.values():
+            await link.close()
+        self.links.clear()
+
+
 async def run_host(cfg: HostConfig) -> None:
     from curslink.inputs.pynput_backend import PynputCapture, PynputSink
     from curslink.overlay import OverlayProcess
@@ -93,9 +145,10 @@ async def run_host(cfg: HostConfig) -> None:
     loop = asyncio.get_running_loop()
     remote_ids = {d for d in cfg.layout.devices if d != cfg.device_id}
     store = PairingStore(cfg.pairing.store)
+    tls = server_context(cfg.secret, store.key)
     server = HostServer(
         remote_ids,
-        server_context(cfg.secret, store.key),
+        tls,
         host=cfg.listen,
         port=cfg.port,
         verify_hello=HelloVerifier(cfg.secret, store.key),
@@ -116,9 +169,16 @@ async def run_host(cfg: HostConfig) -> None:
         settings=cfg.router,
     )
     server.on_disconnect = router.on_disconnect
-    await server.start()
-    pairing = Pairing(cfg.pairing, DeviceInfo(cfg.device_id, cfg.name, "host"), store, server.port)
+    if cfg.lan:
+        await server.start()
+    pairing = Pairing(cfg.pairing, DeviceInfo(cfg.device_id, cfg.name, "host"), store,
+                      server.port if cfg.lan else None)
     await pairing.start()
+    relay = None
+    if cfg.relay:
+        relay = HostRelays(cfg.relay, cfg.device_id, cfg.secret is not None, store, tls, server.handle_streams)
+        relay.start()
+        log.info("waiting for agents via relay %s", cfg.relay.address)
     capture.start(LoopBridge(loop, router))
 
     tracker = None
@@ -139,6 +199,8 @@ async def run_host(cfg: HostConfig) -> None:
         capture.stop()
         overlay.close()
         await pairing.close()
+        if relay:
+            await relay.close()
         await server.close()
 
 
@@ -212,22 +274,28 @@ def paired_host(cfg: AgentConfig, store: PairingStore):
 async def resolve_host(cfg: AgentConfig, store: PairingStore) -> ConnectTarget:
     """Which key to use and where the host is, worked out again before every connection."""
     peer = paired_host(cfg, store)
+    relay = cfg.relay
     if peer is not None:
         ctx, auth_key = client_context(device_id=cfg.device_id, key=peer.key), peer.key
+        if relay:
+            relay = replace(relay, room=paired_room_id(peer.key, peer.device_id))
     elif cfg.secret:
         ctx, auth_key = client_context(cfg.secret), None
     else:
         raise NotReady("waiting to be paired: run `curslink pair` on the host or here")
     if cfg.host:
-        return ConnectTarget(cfg.host, cfg.port, ctx, auth_key)
-    if peer is None:
-        raise NotReady("set [agent].host, or pair with the host so it can be found on the LAN")
-    from curslink.pairing.discovery import find
+        return ConnectTarget(cfg.host, cfg.port, ctx, auth_key, relay)
+    if peer is not None:
+        from curslink.pairing.discovery import find
 
-    found = await find(peer.device_id, timeout=2.0)
-    if found is None or not found.control_port:
-        raise NotReady(f"looking for {peer.name} on the LAN...")
-    return ConnectTarget(found.address, found.control_port, ctx, auth_key)
+        found = await find(peer.device_id, timeout=2.0)
+        if found is not None and found.control_port:
+            return ConnectTarget(found.address, found.control_port, ctx, auth_key, relay)
+    if relay:
+        return ConnectTarget("", cfg.port, ctx, auth_key, relay)
+    if peer is None:
+        raise NotReady("set [agent].host, a [relay], or pair with the host so it can be found on the LAN")
+    raise NotReady(f"looking for {peer.name} on the LAN...")
 
 
 def calibrate(cfg: HostConfig, seconds: float = 1.5) -> Calibration:

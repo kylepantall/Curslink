@@ -1,0 +1,16 @@
+# Curslink relay server: `curslink relay -c relay.toml`
+#
+# Run it on a machine every device can reach (e.g. a VPS behind a DNS name)
+# and open the TCP port. `curslink relay --init` writes a file like this one
+# with a fresh random key.
+#
+# The relay matches devices up and forwards their end-to-end encrypted
+# traffic. It never learns the pairing secret, so it can't read keystrokes.
+
+[relay]
+listen = "0.0.0.0"       # "::" for IPv6 too
+port = 24852
+# Devices need this to use the relay (or set CURSLINK_RELAY_KEY). Make it long.
+key = "change-me-to-a-long-random-relay-key"
+max_connections = 256
+max_rooms = 64           # one room per Curslink setup
