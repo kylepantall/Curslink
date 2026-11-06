@@ -185,3 +185,28 @@ def test_input_stays_home_while_it_cant_be_captured(parts):
     router.blocked = lambda: ""
     router.on_gaze(Target("laptop", "main"))
     assert router.active_device == "laptop"
+
+
+def test_coming_home_onto_the_edge_doesnt_bounce_straight_back(parts):
+    router, _, _, transport, overlay = parts
+    router.on_pointer(3839, 500)                 # pushed off the right edge
+    assert router.active_device == "laptop"
+    router.on_gaze(Target("desktop", "right"))   # look back: lands where it left, on the edge
+    assert router.is_local
+    router.on_pointer(3839, 500)                 # still resting on that edge
+    assert router.is_local
+    router.on_pointer(3700, 500)                 # moved away...
+    router.on_pointer(3839, 500)                 # ...and pushed again
+    assert router.active_device == "laptop"
+
+
+def test_switching_to_where_input_already_is_does_nothing(parts):
+    router, _, sink, transport, overlay = parts
+    router.on_gaze(Target("laptop", "main"))
+    sent = len(transport.sent)
+    router.switch_to(router.screen, router.x, router.y, "gaze")
+    assert len(transport.sent) == sent           # no second enter, no animation
+    router.on_gaze(Target("desktop", "left"))
+    shown = len(overlay.shown)
+    router.go_home("app")
+    assert len(overlay.shown) == shown
