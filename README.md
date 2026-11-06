@@ -55,6 +55,30 @@ pip install "curslink[gaze] @ git+https://github.com/kylepantall/Curslink"
    look at each screen when asked)
 5. Run the host: `curslink host`
 
+### Over the internet (self-hosted relay)
+
+When the devices aren't on the same network, run a relay somewhere they
+can all reach, for example a small VPS with a DNS name. The relay only
+matches devices up and forwards encrypted bytes; it never sees your
+pairing secret, so it can't read or inject keystrokes.
+
+1. On the server: `curslink relay --init` writes `relay.toml` with a random
+   relay key. Open TCP port 24852, then run `curslink relay -c relay.toml`
+   (see [`examples/relay.toml`](examples/relay.toml)).
+2. Make a pairing code:
+   `curslink invite --relay relay.example.com:24852 --relay-key <key>`
+3. Put the code in `curslink.toml` on the host **and** every agent, in place
+   of `secret`:
+   ```toml
+   [relay]
+   code = "curslink1-..."
+   ```
+   (or set `CURSLINK_PAIRING_CODE`). `[relay] address` and `key` with a
+   normal `secret` work too.
+4. Start `curslink host` and `curslink agent` as usual. Agents can drop
+   `[agent].host`; if they keep it they try the LAN first and fall back to
+   the relay. Set `[host] lan = false` to only accept agents via the relay.
+
 Hotkeys on the host:
 
 | Keys | Action |
@@ -81,6 +105,11 @@ All traffic is encrypted and mutually authenticated with TLS-PSK (ECDHE,
 forward secret) keyed from the shared `secret`. A device without the
 secret can neither connect to the host nor impersonate it. Use a long,
 random secret, since anyone with it can send keystrokes to your agents.
+
+Through a relay the same TLS runs end to end between host and agent; the
+relay only forwards ciphertext. The relay key just controls who may use
+your relay. A pairing code contains the pairing secret, so share it like a
+password.
 
 ## Development
 

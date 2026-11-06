@@ -17,6 +17,19 @@ gap_tolerance_px = 64        # bridge small gaps between screens in the layout
 return_hotkey = "ctrl+alt+home"
 gaze_toggle_hotkey = "ctrl+alt+g"
 
+lan = true                   # accept agents on the LAN; false = relay only
+
+# --- Over the internet ----------------------------------------------------
+# Meet through your own `curslink relay` server (same values on the host and
+# every agent). Either paste the code from `curslink invite`, which also
+# holds the pairing secret:
+# [relay]
+# code = "curslink1-..."
+# or give the relay explicitly and keep `secret` above:
+# [relay]
+# address = "relay.example.com:24852"
+# key = "the key from the relay's relay.toml"
+
 [gaze]
 enabled = true               # camera-based switching
 camera = 0
@@ -70,7 +83,8 @@ name = "Work laptop"
 # Only the [agent] table (and `secret`) is read by `curslink agent`.
 [agent]
 device_id = "laptop"
-host = "192.168.1.10"        # the host's LAN address
+host = "192.168.1.10"        # the host's LAN address (optional with a [relay];
+                             # with both, the LAN is tried first)
 port = 24850
 animations = true
 # Remap modifiers when the host and agent use different OSes, e.g. a

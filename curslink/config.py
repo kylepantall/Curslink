@@ -10,8 +10,17 @@ from typing import Any
 
 from curslink.gaze.zones import GazeSettings
 from curslink.layout import Device, Layout, Screen
+from curslink.net.relay import (
+    DEFAULT_RELAY_PORT,
+    MIN_RELAY_KEY_LENGTH,
+    RelayTarget,
+    decode_pairing_code,
+    parse_address,
+    room_id,
+)
 from curslink.protocol import DEFAULT_PORT
 from curslink.router import RouterSettings
+from curslink.security import WeakSecretError, derive_key
 
 
 class ConfigError(ValueError):
@@ -34,6 +43,8 @@ class HostConfig:
     layout: Layout
     listen: str = "0.0.0.0"
     port: int = DEFAULT_PORT
+    lan: bool = True
+    relay: RelayTarget | None = None
     router: RouterSettings = field(default_factory=RouterSettings)
     gaze: GazeConfig = field(default_factory=GazeConfig)
 
@@ -47,13 +58,80 @@ class AgentConfig:
     name: str = ""
     modifier_map: dict[str, str] = field(default_factory=dict)
     animations: bool = True
+    relay: RelayTarget | None = None
+
+
+@dataclass
+class RelayServerConfig:
+    key: str
+    listen: str = "0.0.0.0"
+    port: int = DEFAULT_RELAY_PORT
+    max_connections: int = 256
+    max_rooms: int = 64
+
+
+def _pairing_code(raw: dict[str, Any]) -> dict[str, str] | None:
+    code = os.environ.get("CURSLINK_PAIRING_CODE") or raw.get("relay", {}).get("code")
+    if not code:
+        return None
+    try:
+        return decode_pairing_code(code)
+    except ValueError as exc:
+        raise ConfigError(f"invalid pairing code: {exc}") from exc
 
 
 def _secret(raw: dict[str, Any]) -> str:
-    secret = os.environ.get("CURSLINK_SECRET") or raw.get("secret")
+    code = _pairing_code(raw)
+    secret = os.environ.get("CURSLINK_SECRET") or raw.get("secret") or (code or {}).get("secret")
     if not isinstance(secret, str) or not secret:
-        raise ConfigError("set `secret` in the config file or the CURSLINK_SECRET env var")
+        raise ConfigError(
+            "set `secret` in the config file, the CURSLINK_SECRET env var, or a [relay].code pairing code"
+        )
     return secret
+
+
+def relay_target(raw: dict[str, Any], secret: str) -> RelayTarget | None:
+    """The ``[relay]`` table a host or agent uses to meet over the internet.
+
+    Either ``address`` + ``key``, or a single ``code`` from ``curslink invite``.
+    """
+    table = raw.get("relay", {})
+    code = _pairing_code(raw) or {}
+    address = table.get("address") or code.get("relay")
+    key = os.environ.get("CURSLINK_RELAY_KEY") or table.get("key") or code.get("relay_key")
+    if not address and not key:
+        return None
+    if not address or not key:
+        raise ConfigError("[relay] needs both `address` and `key` (or a `code`)")
+    try:
+        parse_address(address)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
+    try:
+        room = room_id(derive_key(secret))
+    except WeakSecretError as exc:
+        raise ConfigError(str(exc)) from exc
+    return RelayTarget(address=address, key=key, room=room)
+
+
+def relay_server_config(raw: dict[str, Any]) -> RelayServerConfig:
+    table = raw.get("relay", {})
+    key = os.environ.get("CURSLINK_RELAY_KEY") or table.get("key")
+    if not isinstance(key, str) or len(key) < MIN_RELAY_KEY_LENGTH:
+        raise ConfigError(
+            f"[relay].key (or CURSLINK_RELAY_KEY) must be at least {MIN_RELAY_KEY_LENGTH} characters; "
+            "`curslink relay --init` writes a config with a random one"
+        )
+    port = _int(table, "port", DEFAULT_RELAY_PORT)
+    if not 0 < port < 65536:
+        raise ConfigError("[relay].port must be 1-65535")
+    return RelayServerConfig(
+        key=key,
+        listen=table.get("listen", "0.0.0.0"),
+        port=port,
+        max_connections=_int(table, "max_connections", 256),
+        max_rooms=_int(table, "max_rooms", 64),
+    )
 
 
 def _int(table: dict[str, Any], key: str, default: int | None = None) -> int:
@@ -134,12 +212,19 @@ def host_config(raw: dict[str, Any], base_dir: Path = Path(".")) -> HostConfig:
             pitch_weight=float(g.get("pitch_weight", defaults.pitch_weight)),
         ),
     )
+    secret = _secret(raw)
+    relay = relay_target(raw, secret)
+    lan = host.get("lan", True)
+    if not lan and relay is None:
+        raise ConfigError("[host].lan = false needs a [relay] to connect through")
     return HostConfig(
         device_id=device_id,
-        secret=_secret(raw),
+        secret=secret,
         layout=layout,
         listen=host.get("listen", "0.0.0.0"),
         port=_int(host, "port", DEFAULT_PORT),
+        lan=lan,
+        relay=relay,
         router=router,
         gaze=gaze,
     )
@@ -147,13 +232,17 @@ def host_config(raw: dict[str, Any], base_dir: Path = Path(".")) -> HostConfig:
 
 def agent_config(raw: dict[str, Any]) -> AgentConfig:
     agent = raw.get("agent", {})
-    for key in ("device_id", "host"):
-        if not agent.get(key):
-            raise ConfigError(f"[agent].{key} is required")
+    if not agent.get("device_id"):
+        raise ConfigError("[agent].device_id is required")
+    secret = _secret(raw)
+    relay = relay_target(raw, secret)
+    if not agent.get("host") and relay is None:
+        raise ConfigError("set [agent].host (LAN), a [relay] (internet), or both")
     return AgentConfig(
         device_id=agent["device_id"],
-        secret=_secret(raw),
-        host=agent["host"],
+        secret=secret,
+        host=agent.get("host", ""),
+        relay=relay,
         port=_int(agent, "port", DEFAULT_PORT),
         name=agent.get("name", agent["device_id"]),
         modifier_map=dict(agent.get("modifier_map", {})),

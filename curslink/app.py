@@ -9,6 +9,7 @@ import time
 from curslink.config import AgentConfig, HostConfig
 from curslink.gaze.zones import Calibration, GazeClassifier, Target
 from curslink.net.client import AgentClient, AgentSession
+from curslink.net.relay import HostRelayLink
 from curslink.net.server import HostServer
 from curslink.router import Router, SwitchEvent
 from curslink.security import client_context, server_context
@@ -45,9 +46,10 @@ async def run_host(cfg: HostConfig) -> None:
 
     loop = asyncio.get_running_loop()
     remote_ids = {d for d in cfg.layout.devices if d != cfg.device_id}
+    tls = server_context(cfg.secret)
     server = HostServer(
         remote_ids,
-        server_context(cfg.secret),
+        tls,
         host=cfg.listen,
         port=cfg.port,
     )
@@ -65,7 +67,13 @@ async def run_host(cfg: HostConfig) -> None:
         settings=cfg.router,
     )
     server.on_disconnect = router.on_disconnect
-    await server.start()
+    if cfg.lan:
+        await server.start()
+    relay = None
+    if cfg.relay:
+        relay = HostRelayLink(cfg.relay, tls, server.handle_streams)
+        relay.start()
+        log.info("waiting for agents via relay %s", cfg.relay.address)
     capture.start(LoopBridge(loop, router))
 
     tracker = None
@@ -85,6 +93,8 @@ async def run_host(cfg: HostConfig) -> None:
             tracker.stop()
         capture.stop()
         overlay.close()
+        if relay:
+            await relay.close()
         await server.close()
 
 
@@ -131,7 +141,7 @@ async def run_agent(cfg: AgentConfig) -> None:
         overlay.show if overlay else (lambda effect, x, y: None),
     )
     client = AgentClient(
-        cfg.device_id, cfg.name, cfg.host, cfg.port, client_context(cfg.secret), session
+        cfg.device_id, cfg.name, cfg.host, cfg.port, client_context(cfg.secret), session, relay=cfg.relay
     )
     try:
         await client.run_forever()

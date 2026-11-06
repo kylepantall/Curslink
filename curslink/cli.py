@@ -1,16 +1,39 @@
-"""``curslink host | agent | calibrate | check | overlay-test``"""
+"""``curslink host | agent | relay | invite | calibrate | check | overlay-test``"""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import itertools
 import logging
 import sys
 from pathlib import Path
 
 from curslink import __version__
-from curslink.config import ConfigError, agent_config, host_config, load_raw
+from curslink.config import (
+    ConfigError,
+    agent_config,
+    host_config,
+    load_raw,
+    relay_server_config,
+)
+
+RELAY_CONFIG_TEMPLATE = """\
+# Curslink relay server. Run it somewhere your devices can all reach, such as
+# a small VPS with a DNS name, then: curslink relay -c relay.toml
+#
+# The relay only matches devices up and forwards encrypted bytes. It never
+# sees your pairing secret, so it cannot read or inject keystrokes.
+
+[relay]
+listen = "0.0.0.0"     # use "::" to listen on IPv6 as well
+port = {port}
+# Devices need this key to use the relay. Keep it private.
+key = "{key}"
+max_connections = 256
+max_rooms = 64          # one room per Curslink setup
+"""
 
 
 def _host_cfg(path: str):
@@ -32,6 +55,55 @@ def cmd_agent(args) -> int:
     if args.host:
         raw.setdefault("agent", {})["host"] = args.host
     asyncio.run(run_agent(agent_config(raw)))
+    return 0
+
+
+def cmd_relay(args) -> int:
+    from curslink.net.relay import DEFAULT_RELAY_PORT, RelayServer, generate_key
+
+    path = Path(args.config)
+    if args.init:
+        if path.exists():
+            print(f"{path} already exists; not overwriting it", file=sys.stderr)
+            return 1
+        key = generate_key()
+        path.write_text(RELAY_CONFIG_TEMPLATE.format(port=DEFAULT_RELAY_PORT, key=key))
+        with contextlib.suppress(OSError):
+            path.chmod(0o600)
+        print(f"Wrote {path} with a new relay key.")
+        print(f"Start it with: curslink relay -c {path}")
+        print(f"Then make a pairing code: curslink invite --relay <your-dns-name>:{DEFAULT_RELAY_PORT} --relay-key {key}")
+        return 0
+    cfg = relay_server_config(load_raw(path))
+    server = RelayServer(
+        cfg.key,
+        host=cfg.listen,
+        port=cfg.port,
+        max_connections=cfg.max_connections,
+        max_rooms=cfg.max_rooms,
+    )
+    asyncio.run(server.serve_forever())
+    return 0
+
+
+def cmd_invite(args) -> int:
+    from curslink.net.relay import encode_pairing_code, generate_key, parse_address
+    from curslink.security import MIN_SECRET_LENGTH
+
+    try:
+        parse_address(args.relay)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
+    secret = args.secret or generate_key()
+    if len(secret) < MIN_SECRET_LENGTH:
+        raise ConfigError(f"the pairing secret must be at least {MIN_SECRET_LENGTH} characters")
+    code = encode_pairing_code(args.relay, args.relay_key, secret)
+    print("Pairing code (treat it like a password; it holds the pairing secret):\n")
+    print(code)
+    print("\nPut it in curslink.toml on the host AND every agent, replacing `secret`:\n")
+    print("[relay]")
+    print(f'code = "{code}"')
+    print("\nor set the CURSLINK_PAIRING_CODE environment variable.")
     return 0
 
 
@@ -59,7 +131,12 @@ def cmd_calibrate(args) -> int:
 
 def cmd_check(args) -> int:
     cfg = _host_cfg(args.config)
-    print(f"Host device: {cfg.device_id}, listening on {cfg.listen}:{cfg.port}")
+    if cfg.lan:
+        print(f"Host device: {cfg.device_id}, listening on {cfg.listen}:{cfg.port}")
+    else:
+        print(f"Host device: {cfg.device_id}, LAN listener off")
+    if cfg.relay:
+        print(f"Relay: {cfg.relay.address} (room {cfg.relay.room[:8]})")
     for device in cfg.layout.devices.values():
         print(f"- {device.id} ({device.name})")
         for s in device.screens:
@@ -121,8 +198,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("agent", help="run on each computer you want to control")
     p.add_argument("-c", "--config", default="curslink.toml")
-    p.add_argument("--host", help="host address (overrides [agent].host)")
+    p.add_argument("--host", help="host LAN address (overrides [agent].host)")
     p.set_defaults(func=cmd_agent)
+
+    p = sub.add_parser("relay", help="run a relay server so devices can link over the internet")
+    p.add_argument("-c", "--config", default="relay.toml")
+    p.add_argument("--init", action="store_true", help="write a new relay config with a random key")
+    p.set_defaults(func=cmd_relay)
+
+    p = sub.add_parser("invite", help="make a pairing code for linking devices through a relay")
+    p.add_argument("--relay", required=True, help="relay address, e.g. relay.example.com:24852")
+    p.add_argument("--relay-key", required=True, help="the key from the relay's config")
+    p.add_argument("--secret", help="reuse an existing pairing secret (default: a new random one)")
+    p.set_defaults(func=cmd_invite)
 
     p = sub.add_parser("calibrate", help="teach Curslink where each screen is relative to your head")
     p.add_argument("-c", "--config", default="curslink.toml")
