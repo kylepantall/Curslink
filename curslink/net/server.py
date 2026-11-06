@@ -1,0 +1,152 @@
+"""Host side: accepts agent connections and sends them input."""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import logging
+import ssl
+from dataclasses import dataclass, field
+from typing import Callable
+
+from curslink.net.framing import STREAM_LIMIT, read_message
+from curslink.protocol import Message, ProtocolError, encode
+
+log = logging.getLogger(__name__)
+
+HELLO_TIMEOUT_S = 5.0
+PING_INTERVAL_S = 2.0
+DEAD_AFTER_S = 7.0
+# If an agent stops reading, don't buffer more than this before dropping it.
+MAX_BUFFER_BYTES = 256 * 1024
+
+
+@dataclass
+class AgentConnection:
+    device_id: str
+    name: str
+    platform: str
+    writer: asyncio.StreamWriter
+    screens: list = field(default_factory=list)
+    last_seen: float = 0.0
+
+
+class HostServer:
+    """Implements the router's ``Transport`` over TLS-PSK TCP connections."""
+
+    def __init__(
+        self,
+        known_devices: set[str],
+        ssl_context: ssl.SSLContext | None,
+        on_connect: Callable[[AgentConnection], None] = lambda c: None,
+        on_disconnect: Callable[[str], None] = lambda d: None,
+        host: str = "0.0.0.0",
+        port: int = 0,
+    ):
+        self.known_devices = known_devices
+        self.ssl_context = ssl_context
+        self.on_connect = on_connect
+        self.on_disconnect = on_disconnect
+        self.host = host
+        self.port = port
+        self.connections: dict[str, AgentConnection] = {}
+        self._server: asyncio.base_events.Server | None = None
+
+    async def start(self) -> None:
+        self._server = await asyncio.start_server(
+            self._handle, self.host, self.port, ssl=self.ssl_context, limit=STREAM_LIMIT
+        )
+        sock = self._server.sockets[0]
+        self.port = sock.getsockname()[1]
+        log.info("listening on %s:%d", self.host, self.port)
+
+    async def close(self) -> None:
+        for conn in list(self.connections.values()):
+            conn.writer.close()
+        if self._server:
+            self._server.close()
+            await self._server.wait_closed()
+
+    # -------------------------------------------------------- Transport API
+    def is_connected(self, device_id: str) -> bool:
+        return device_id in self.connections
+
+    def send(self, device_id: str, t: str, **data) -> None:
+        conn = self.connections.get(device_id)
+        if conn is None:
+            return
+        transport = conn.writer.transport
+        if transport.is_closing():
+            return
+        if transport.get_write_buffer_size() > MAX_BUFFER_BYTES:
+            log.warning("%s is not keeping up; dropping connection", device_id)
+            transport.abort()
+            return
+        conn.writer.write(encode(t, **data))
+
+    # ------------------------------------------------------------ internals
+    async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        peer = writer.get_extra_info("peername")
+        conn: AgentConnection | None = None
+        loop = asyncio.get_running_loop()
+        try:
+            hello = await asyncio.wait_for(read_message(reader), HELLO_TIMEOUT_S)
+            if hello is None or hello.t != "hello":
+                raise ProtocolError("expected hello")
+            device_id = hello.data["device_id"]
+            if device_id not in self.known_devices:
+                raise ProtocolError(f"unknown device {device_id!r}; add it to [[devices]]")
+            old = self.connections.get(device_id)
+            if old is not None:
+                log.info("%s reconnected; replacing old connection", device_id)
+                old.writer.close()
+            conn = AgentConnection(
+                device_id=device_id,
+                name=str(hello.get("name", device_id)),
+                platform=str(hello.get("platform", "?")),
+                writer=writer,
+                screens=list(hello.get("screens", []) or []),
+                last_seen=loop.time(),
+            )
+            self.connections[device_id] = conn
+            writer.write(encode("welcome", device_id=device_id))
+            log.info("agent %s (%s, %s) connected from %s", device_id, conn.name, conn.platform, peer)
+            self.on_connect(conn)
+            pinger = asyncio.create_task(self._ping(conn))
+            try:
+                while True:
+                    msg = await read_message(reader)
+                    if msg is None:
+                        break
+                    conn.last_seen = loop.time()
+                    self._on_message(conn, msg)
+            finally:
+                pinger.cancel()
+        except (asyncio.TimeoutError, ProtocolError) as exc:
+            log.warning("rejecting %s: %s", peer, exc)
+        except (ConnectionError, ssl.SSLError, OSError) as exc:
+            log.info("connection from %s ended: %s", peer, exc)
+        finally:
+            if conn is not None and self.connections.get(conn.device_id) is conn:
+                del self.connections[conn.device_id]
+                log.info("agent %s disconnected", conn.device_id)
+                self.on_disconnect(conn.device_id)
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+
+    def _on_message(self, conn: AgentConnection, msg: Message) -> None:
+        if msg.t == "bye":
+            conn.writer.close()
+
+    async def _ping(self, conn: AgentConnection) -> None:
+        loop = asyncio.get_running_loop()
+        n = 0
+        while True:
+            await asyncio.sleep(PING_INTERVAL_S)
+            if loop.time() - conn.last_seen > DEAD_AFTER_S:
+                log.warning("agent %s timed out", conn.device_id)
+                conn.writer.transport.abort()
+                return
+            n += 1
+            self.send(conn.device_id, "ping", n=n)

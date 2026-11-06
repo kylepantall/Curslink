@@ -1,0 +1,78 @@
+# Curslink example: a desktop with two monitors, plus a laptop to the right.
+#
+# Copy this to curslink.toml on the HOST (the computer your keyboard and
+# mouse are plugged into / paired with) and on every AGENT.
+
+# Same secret on every device (or set the CURSLINK_SECRET env var).
+# It encrypts and authenticates all traffic, so make it long.
+secret = "change-me-to-something-long-and-random"
+
+[host]
+device_id = "desktop"        # which [[devices]] entry is this machine
+listen = "0.0.0.0"
+port = 24850
+effect = "pop"               # pop | blink | none (played where the pointer lands)
+edge_switching = true        # push the pointer off a screen edge to switch
+gap_tolerance_px = 64        # bridge small gaps between screens in the layout
+return_hotkey = "ctrl+alt+home"
+gaze_toggle_hotkey = "ctrl+alt+g"
+
+[gaze]
+enabled = true               # camera-based switching
+camera = 0
+calibration = "calibration.json"   # written by `curslink calibrate`
+dwell_ms = 350               # how long you must look before it switches
+max_distance_deg = 12        # further than this from every screen = looking elsewhere
+switch_margin_deg = 3        # hysteresis between neighbouring screens
+within_device = false        # also jump between the host's own monitors
+preview = false              # show the camera with head angles overlaid
+
+# --- The layout ----------------------------------------------------------
+# Place every screen of every device in ONE shared coordinate space, arranged
+# like your real desk. x/y/width/height are in pixels in that shared space.
+# os_x/os_y are where that monitor sits in its OWN computer's display
+# settings (0, 0 for the primary monitor).
+
+[[devices]]
+id = "desktop"
+name = "Main PC"
+
+  [[devices.screens]]
+  id = "left"
+  x = 0
+  y = 0
+  width = 1920
+  height = 1080
+  os_x = 0
+  os_y = 0
+
+  [[devices.screens]]
+  id = "right"
+  x = 1920
+  y = 0
+  width = 2560
+  height = 1440
+  os_x = 1920
+  os_y = 0
+
+[[devices]]
+id = "laptop"
+name = "Work laptop"
+
+  [[devices.screens]]
+  id = "main"
+  x = 4480                   # directly to the right of the desktop's right monitor
+  y = 300
+  width = 1512
+  height = 982
+
+# --- On an agent ---------------------------------------------------------
+# Only the [agent] table (and `secret`) is read by `curslink agent`.
+[agent]
+device_id = "laptop"
+host = "192.168.1.10"        # the host's LAN address
+port = 24850
+animations = true
+# Remap modifiers when the host and agent use different OSes, e.g. a
+# Windows keyboard driving a Mac:
+# modifier_map = { ctrl_l = "cmd", ctrl_r = "cmd_r" }
