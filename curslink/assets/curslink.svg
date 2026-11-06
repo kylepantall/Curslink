@@ -27,17 +27,13 @@
       <stop stop-color="#122845"/>
       <stop offset="1" stop-color="#204A76"/>
     </linearGradient>
-    <linearGradient id="pointer" x1=".15" y1="1" x2=".82" y2="0">
-      <stop stop-color="#B6DFFF"/>
-      <stop offset=".55" stop-color="#EAF2FD"/>
-      <stop offset="1" stop-color="#FFF"/>
+    <linearGradient id="handoff" gradientUnits="userSpaceOnUse" x1="310" y1="602" x2="698" y2="370">
+      <stop stop-color="#3588D5"/>
+      <stop offset=".28" stop-color="#3FA9FF"/>
+      <stop offset=".50" stop-color="#76C7FF"/>
+      <stop offset=".72" stop-color="#EAF2FD"/>
+      <stop offset="1" stop-color="#FCFEFF"/>
     </linearGradient>
-    <linearGradient id="trail" gradientUnits="userSpaceOnUse" x1="310" y1="603" x2="589" y2="479">
-      <stop stop-color="#3FA9FF" stop-opacity=".30"/>
-      <stop offset=".6" stop-color="#3FA9FF"/>
-      <stop offset="1" stop-color="#A4E0FF"/>
-    </linearGradient>
-    <path id="cursor" d="M700 363Q711 359 709 371L667 514Q664 523 656 518L621 493L596 531Q592 538 585 534L557 515Q550 510 555 503L581 465L539 449Q530 445 539 438Z"/>
   </defs>
 
   <rect x="100" y="100" width="824" height="824" rx="192" fill="url(#rim)"/>
@@ -51,11 +47,6 @@
     <rect x="457" y="294" width="339" height="248" rx="55" fill="url(#glass)" stroke="url(#target)" stroke-width="35"/>
   </g>
 
-  <g fill="none" stroke-linecap="round">
-    <path d="M310 600C410 608 493 558 573 492" stroke="#112641" stroke-width="43"/>
-    <path d="M310 600C410 608 493 558 573 492" stroke="url(#trail)" stroke-width="25"/>
-    <path d="M712 330L714 319M738 346L749 338M743 373L756 375" stroke="#79D1FF" stroke-width="9"/>
-  </g>
-  <use href="#cursor" xmlns:xlink="http://www.w3.org/1999/xlink" xlink:href="#cursor" fill="#0B1E35" stroke="#0B1E35" stroke-linejoin="round" stroke-width="15" transform="translate(0 6)"/>
-  <use href="#cursor" xmlns:xlink="http://www.w3.org/1999/xlink" xlink:href="#cursor" fill="url(#pointer)"/>
+  <path d="M311 588C409 595 492 541 576 466L539 452Q530 448 539 442L700 363Q711 359 709 371L667 514Q664 523 656 518L621 494C524 576 422 626 309 613C291 612 293 587 311 588Z" fill="url(#handoff)" stroke="#112641" stroke-width="16" stroke-linejoin="round" paint-order="stroke fill"/>
+  <path d="M712 330L714 319M738 346L749 338M743 373L756 375" fill="none" stroke="#79D1FF" stroke-width="9" stroke-linecap="round"/>
 </svg>
