@@ -83,6 +83,38 @@ scrypt. This gives encryption, mutual authentication and forward secrecy
 with no certificates to manage. It needs Python 3.13+ (stdlib TLS-PSK).
 JSON keeps the protocol easy to implement in Kotlin for Android.
 
+### Linking over the internet: the relay
+
+`curslink relay` is a small self-hosted rendezvous server
+(`curslink/net/relay.py`). The host and agents both dial *out* to it,
+usually by a DNS name, so no ports need opening at home and nobody needs
+to know anyone's IP address.
+
+* **Who may use the relay**: clients and relay prove to each other that
+  they know the relay key with an HMAC challenge-response. The key never
+  crosses the network, and a fake relay is caught.
+* **Matching**: each client sends a room id, a one-way HMAC of the
+  stretched pairing secret, so host and agents with the same secret meet
+  without the relay learning the secret.
+* **End-to-end encryption**: once paired the relay only copies bytes, and
+  host and agent run the same TLS-PSK handshake they use on a LAN through
+  it (the host acts as TLS server on its outgoing socket). The relay sees
+  ciphertext only and cannot read or inject input; a device with the wrong
+  secret never completes the handshake.
+* **Latency**: one TCP hop through the relay with Nagle off and no
+  re-encryption, so the added delay is the extra network distance. Pick a
+  relay close to your devices. On loopback the relay adds well under a
+  millisecond.
+* **Several agents**: the host keeps one spare connection parked at the
+  relay (pinged every 20 s to keep NATs open) and opens another each time
+  an agent takes it.
+* **Fallback**: an agent with both a LAN address and a relay tries the LAN
+  first for 2 s, so a laptop uses the direct path at home and the relay
+  elsewhere.
+
+`curslink invite` packs the relay address, relay key and a fresh pairing
+secret into one `curslink1-...` code to paste into every device's config.
+
 ### The animation
 
 A small helper process (`python -m curslink.overlay`) owns a hidden Tk
@@ -101,7 +133,7 @@ on macOS, while the host and agent run asyncio there.
 | `curslink/gaze/zones.py` | Calibration file, gaze classifier |
 | `curslink/gaze/tracker.py` | Webcam + MediaPipe thread |
 | `curslink/inputs/` | pynput capture (host) and injection (agent), key names |
-| `curslink/net/` | Host server and agent client |
+| `curslink/net/` | Host server, agent client, relay server and relay client |
 | `curslink/security.py` | TLS-PSK contexts |
 | `curslink/overlay.py` | Pop/blink animation helper |
 | `curslink/app.py`, `cli.py` | Wiring and the `curslink` command |

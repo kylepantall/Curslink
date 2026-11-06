@@ -54,7 +54,7 @@ class HostServer:
 
     async def start(self) -> None:
         self._server = await asyncio.start_server(
-            self._handle, self.host, self.port, ssl=self.ssl_context, limit=STREAM_LIMIT
+            self.handle_streams, self.host, self.port, ssl=self.ssl_context, limit=STREAM_LIMIT
         )
         sock = self._server.sockets[0]
         self.port = sock.getsockname()[1]
@@ -85,7 +85,9 @@ class HostServer:
         conn.writer.write(encode(t, **data))
 
     # ------------------------------------------------------------ internals
-    async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    async def handle_streams(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        """Serve one agent connection that is already end-to-end encrypted
+        (accepted on the LAN listener, or paired through a relay)."""
         peer = writer.get_extra_info("peername")
         conn: AgentConnection | None = None
         loop = asyncio.get_running_loop()
