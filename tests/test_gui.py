@@ -229,5 +229,7 @@ def test_a_config_without_devices_goes_back_to_setup(desktop):
     desktop.config_path.parent.mkdir(parents=True, exist_ok=True)
     desktop.config_path.write_text('[host]\neffect = "pop"\n')
     assert not desktop.has_config()
+    desktop.config_path.write_text("[agent]\nanimations = false\n")
+    assert not desktop.has_config()
     desktop.window.pages["setup"].create()
     assert desktop.has_config() and desktop.check_config() is None

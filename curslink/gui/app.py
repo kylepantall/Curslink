@@ -19,7 +19,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 
 from curslink import __version__, diagnostics, update
 from curslink.config import ConfigError, agent_config, host_config, load_raw
-from curslink.configedit import ConfigFile
+from curslink.configedit import ConfigFile, is_whole, role_of
 from curslink.gui.common import Status, app_icon, call_on_main, in_background, main_thread
 from curslink.gui.prefs import Prefs
 from curslink.gui.service import FAILED, RUNNING, STARTING, STOPPED, Service
@@ -63,13 +63,14 @@ class Curslink(QObject):
         return self.prefs.config_path
 
     def has_config(self) -> bool:
-        """A config to run from. A file with no devices in it (left by
-        deleting the real one while the app ran) counts as none, so the app
-        goes back to setup instead of failing to link."""
+        """A config to run from. A stray setting left in a deleted config's
+        place counts as none, so the app goes back to setup instead of
+        failing to link."""
         if not self.config_path.exists():
             return False
         try:
-            return "devices" in load_raw(self.config_path)
+            raw = load_raw(self.config_path)
+            return role_of(raw) is None or is_whole(raw)  # no role: check_config explains
         except Exception:
             return True  # there, but broken: check_config says what's wrong
 

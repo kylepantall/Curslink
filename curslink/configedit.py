@@ -49,6 +49,18 @@ def role_of(raw: dict[str, Any]) -> str | None:
     return "host" if has_host else "agent"
 
 
+def is_whole(raw: dict[str, Any]) -> bool:
+    """More than a stray setting: a host with its [[devices]], or an agent
+    with its device_id. (A page saving one setting into a deleted config
+    used to leave just ``[host] effect = "pop"``.)"""
+    role = role_of(raw)
+    if role == "host":
+        return "devices" in raw
+    if role == "agent":
+        return "device_id" in raw["agent"]
+    return False
+
+
 def _screens_aot(screens: list[dict[str, Any]]) -> AoT:
     aot = tomlkit.aot()
     for s in screens:
@@ -130,7 +142,7 @@ class ConfigFile:
         return role_of(self.raw())
 
     def save(self) -> None:
-        if not self.path.exists() and "devices" not in self.doc:
+        if not self.path.exists() and not is_whole(self.raw()):
             # The file went (deleted by hand) and this is one setting, not a
             # whole config: writing it would leave a config that can't load.
             log.warning("config not saved: the file is gone and this isn't a whole config")
