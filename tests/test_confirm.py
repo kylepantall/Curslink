@@ -1,6 +1,7 @@
 """Two-camera gaze confirmation: agent facing detector, host arbiter, wire."""
 
 import asyncio
+import time
 
 import pytest
 
@@ -131,23 +132,100 @@ def test_agent_facing_ignored_while_host_sees_you_at_its_screen():
     assert router.switches == []
 
 
-def test_host_face_lost_counts_as_turned_away_but_not_dead_camera():
+def test_host_face_lost_counts_as_turned_away():
     arb, router = make_arbiter(host_fresh_s=0.5, host_alive_s=10)
     arb.set_camera("right", True)
     feed(arb, 2, 1, 0.0, 0.3)
     arb.on_facing(3.0, "right", True)  # host camera lost your face 2.7 s ago
     assert router.switches == [RIGHT]
 
+
+def test_dead_or_silent_host_camera_leaves_it_to_the_agents():
     arb, router = make_arbiter(host_alive_s=10)
     arb.set_camera("right", True)
     feed(arb, 2, 1, 0.0, 0.3)
     arb.on_facing(60.0, "right", True)  # host camera silent for a minute
-    assert router.switches == []
+    assert router.switches == [RIGHT]
 
     arb, router = make_arbiter()
     arb.set_camera("right", True)
     arb.on_facing(1.0, "right", True)  # host camera never saw anyone
+    assert router.switches == [RIGHT]
+
+
+# ------------------------------------------- facing only: no calibrated host
+def facing_only(local_camera=False, **confirm):
+    router = FakeRouter()
+    screens = {"desktop": ["main"], "left": ["main"], "right": ["main"]}
+    arb = GazeArbiter(None, "desktop", router.switch, lambda: router.current,
+                      lambda d: screens.get(d, []), ConfirmSettings(**confirm))
+    arb.set_camera("left", True)
+    arb.set_camera("right", True)
+    if local_camera:
+        arb.set_camera("desktop", True)
+    return arb, router
+
+
+def test_agent_camera_alone_switches_there_and_back():
+    arb, router = facing_only()
+    arb.on_facing(0.0, "left", True)
+    assert router.switches == [LEFT]
+    arb.on_facing(0.5, "left", True)  # the once-a-second refresh: nothing new
+    assert router.switches == [LEFT]
+    arb.on_facing(2.0, "left", False)  # turned back to the host, which has no camera
+    assert router.switches == [LEFT, MONITOR]
+    arb.on_facing(2.5, "right", False)  # not on it: nothing to do
+    assert router.switches == [LEFT, MONITOR]
+
+
+def test_turning_away_goes_to_another_device_that_sees_you():
+    arb, router = facing_only()
+    arb.on_facing(0.0, "left", True)
+    arb.on_facing(0.1, "right", True)
+    assert router.switches == [LEFT, RIGHT]
+    arb.on_facing(0.2, "right", False)
+    assert router.switches == [LEFT, RIGHT, LEFT]  # "left" still sees you
+    arb.on_facing(5.0, "left", False)
+    assert router.switches[-1] == MONITOR  # "right"'s report is stale by now
+
+
+def test_host_camera_uncalibrated_reports_like_an_agent():
+    arb, router = facing_only(local_camera=True)
+    arb.on_facing(0.0, "left", True)
+    arb.on_facing(1.0, "left", False)  # the host's camera has a say: nobody sees you
+    assert router.switches == [LEFT]
+    arb.on_facing(1.2, "desktop", True)
+    assert router.switches == [LEFT, MONITOR]
+    arb.on_facing(2.0, "left", True)
+    assert router.switches == [LEFT, MONITOR, LEFT]
+    arb.on_facing(2.5, "desktop", True)  # both still see you: refreshes don't ping-pong
+    arb.on_facing(3.0, "left", True)
+    assert router.switches == [LEFT, MONITOR, LEFT]
+
+
+def test_refresh_does_not_undo_bring_input_home():
+    arb, router = facing_only()
+    arb.on_facing(0.0, "left", True)
+    router.current = MONITOR  # the return hotkey
+    arb.on_facing(1.0, "left", True)
+    assert router.switches == [LEFT]
+    arb.on_facing(2.0, "left", False)
+    arb.on_facing(3.0, "left", True)  # looked away and back
+    assert router.switches == [LEFT, LEFT]
+
+
+def test_facing_only_respects_confirm_off_and_suspend():
+    arb, router = facing_only(enabled=False)
+    arb.on_facing(0.0, "left", True)
     assert router.switches == []
+    arb, router = facing_only()
+    arb.suspended = True
+    arb.on_facing(0.0, "left", True)
+    assert router.switches == []
+    arb.suspended = False
+    arb.on_facing(0.1, "left", False)
+    arb.on_facing(0.2, "left", True)
+    assert router.switches == [LEFT]
 
 
 def test_confirmation_can_be_turned_off():
@@ -198,12 +276,13 @@ device_id = "laptop"
 [agent.gaze]
 enabled = true
 camera = 1
+camera_name = "FaceTime HD Camera"
 facing_deg = 20
 center_pitch_deg = -10
 dwell_ms = 200
 """)
     cfg = agent_config(raw)
-    assert cfg.gaze.enabled and cfg.gaze.camera == 1
+    assert cfg.gaze.enabled and cfg.gaze.camera == 1 and cfg.gaze.camera_name == "FaceTime HD Camera"
     assert cfg.gaze.settings.facing_deg == 20
     assert cfg.gaze.settings.center_pitch_deg == -10
     assert cfg.gaze.settings.dwell_s == pytest.approx(0.2)
@@ -219,6 +298,9 @@ def test_host_confirm_config():
     assert host_config(tomllib.loads(base)).gaze.confirm.enabled
     off = tomllib.loads('[gaze]\nconfirm_with_agents = false\n' + base)
     assert not host_config(off).gaze.confirm.enabled
+    facing = host_config(tomllib.loads('[gaze]\ndwell_ms = 500\nfacing_deg = 25\nfacing_dwell_ms = 100\n' + base))
+    assert facing.gaze.settings.dwell_s == pytest.approx(0.5)  # the calibrated classifier's
+    assert facing.gaze.facing.facing_deg == 25 and facing.gaze.facing.dwell_s == pytest.approx(0.1)
 
 
 # ------------------------------------------------------------------ the wire
@@ -307,3 +389,54 @@ def test_app_wiring_with_router(layout, tmp_path):
 
     server.on_disconnect("laptop")
     assert gone == ["laptop"] and "laptop" not in arbiter.cameras
+
+
+def test_app_agent_camera_alone_drives_router(layout):
+    """Host gaze off (no camera, no calibration): the laptop's camera alone
+    moves the keyboard and mouse there and back."""
+    from types import SimpleNamespace
+
+    from conftest import FakeCapture, FakeOverlay, FakeTransport
+    from curslink.app import make_arbiter as app_arbiter, wire_agent_cameras
+    from curslink.config import HostConfig
+    from curslink.router import Router, RouterSettings
+
+    cfg = HostConfig("desktop", None, layout)  # [gaze] off
+    router = Router(layout, "desktop", FakeCapture(), FakeSink(), FakeTransport(connected={"laptop"}),
+                    FakeOverlay(), RouterSettings(gaze_switching=True))
+    arbiter = app_arbiter(cfg, router)
+    assert arbiter.classifier is None
+    server = SimpleNamespace(on_connect=lambda c: None, on_disconnect=lambda d: None,
+                             on_facing=None, connections={})
+    wire_agent_cameras(server, arbiter)
+    server.on_connect(SimpleNamespace(device_id="laptop", camera=True))
+
+    server.on_facing("laptop", True)
+    assert router.active_device == "laptop"
+    server.on_facing("laptop", False)
+    assert router.active_device == "desktop"
+    router.set_gaze_paused(True)
+    server.on_facing("laptop", True)
+    assert router.active_device == "desktop"
+
+
+async def test_facing_camera_refreshes_and_reports_changes():
+    from curslink.app import FacingCamera
+
+    class Tracker:
+        def start(self): pass
+        def stop(self): pass
+
+    reports = []
+    det = FacingDetector(FacingSettings(dwell_s=0, lost_after_s=10))
+    cam = FacingCamera(det, reports.append, Tracker(), asyncio.get_running_loop(), refresh_s=0.15)
+    cam.TICK_S = 0.05
+    cam.start()
+    try:
+        cam.on_sample(time.monotonic(), 0, 0)
+        assert reports == [True]
+        await asyncio.sleep(0.4)
+        assert reports.count(True) >= 2  # refreshed while nothing changed
+    finally:
+        cam.stop()
+

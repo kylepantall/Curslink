@@ -127,6 +127,16 @@ class SettingsPage(Page):
         self.animations.clicked.connect(lambda on: self.set_config("agent", "animations", on))
         self.agent_card.add_row(text_block("Play the switch animation here",
                                            "Show the pop where the pointer lands on this screen."), self.animations)
+        self.agent_camera = Toggle("Use this computer's camera")
+        self.agent_camera.clicked.connect(self.set_agent_camera)
+        self.agent_card.add_row(text_block(
+            "Use this computer's camera",
+            "Switch here when this camera sees you facing the screen, on its own or together "
+            "with the host's camera. No calibration needed."), self.agent_camera)
+        self.agent_camera_picker = CameraPicker()
+        self.agent_camera_picker.picked.connect(self.set_agent_camera_device)
+        self.agent_camera_row = self.agent_card.add_row(
+            text_block("Camera", "The one that faces you when you use this screen."), self.agent_camera_picker)
         self.add(self.agent_card)
 
         # -- updates --------------------------------------------------------------
@@ -186,8 +196,9 @@ class SettingsPage(Page):
         self.load()
 
     def shown(self) -> None:
-        if not self.camera.loaded:
-            self.camera.refresh()
+        for picker in (self.camera, self.agent_camera_picker):
+            if not picker.loaded:
+                picker.refresh()
         self.load()
         self.load_diagnostics()
 
@@ -236,6 +247,12 @@ class SettingsPage(Page):
             self.hotkeys.setText(f"Bring input home: {host.get('return_hotkey', 'ctrl+alt+home')}\n"
                                  f"Pause gaze: {host.get('gaze_toggle_hotkey', 'ctrl+alt+g')}")
             self.animations.setChecked(bool(raw.get("agent", {}).get("animations", True)))
+            agent_gaze = raw.get("agent", {}).get("gaze", {})
+            agent_gaze = agent_gaze if isinstance(agent_gaze, dict) else {}
+            self.agent_camera.setChecked(bool(agent_gaze.get("enabled", False)))
+            self.agent_camera_row.setVisible(self.agent_camera.isChecked())
+            self.agent_camera_picker.set_current(int(agent_gaze.get("camera", 0) or 0),
+                                                 str(agent_gaze.get("camera_name", "") or ""))
             u = raw.get("update", {})
             self.upd_check.setChecked(bool(u.get("check", True)))
             self.upd_auto.setChecked(bool(u.get("auto", True)))
@@ -277,6 +294,19 @@ class SettingsPage(Page):
         cfg = self.app.config()
         cfg.set("gaze", "camera", index)
         cfg.set("gaze", "camera_name", name)
+        cfg.save()
+        self.app.config_saved()
+
+    def set_agent_camera(self, on: bool) -> None:
+        self.agent_camera_row.setVisible(on)
+        self.set_config("agent.gaze", "enabled", on)
+
+    def set_agent_camera_device(self, index: int, name: str) -> None:
+        if self._loading:
+            return
+        cfg = self.app.config()
+        cfg.set("agent.gaze", "camera", index)
+        cfg.set("agent.gaze", "camera_name", name)
         cfg.save()
         self.app.config_saved()
 

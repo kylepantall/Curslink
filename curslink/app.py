@@ -9,6 +9,7 @@ import math
 import threading
 import time
 from dataclasses import replace
+from typing import Callable
 
 from curslink import events
 from curslink.config import AgentConfig, HostConfig, PairingConfig
@@ -245,9 +246,11 @@ async def run_host(cfg: HostConfig) -> None:
     capture.start(LoopBridge(loop, router))
     router.blocked = input_blocked_reason()
 
-    tracker = None
-    if cfg.gaze.enabled:
-        tracker = start_gaze(cfg, router, loop, server)
+    # Gaze can come from this computer's camera, the agents' own cameras,
+    # or both, so the arbiter runs even when this camera is off.
+    arbiter = make_arbiter(cfg, router)
+    wire_agent_cameras(server, arbiter)
+    tracker = start_gaze(cfg, arbiter, loop) if cfg.gaze.enabled else None
 
     log.info(
         "Curslink host running as %r. Return hotkey: %s, gaze toggle: %s",
@@ -269,6 +272,7 @@ async def run_host(cfg: HostConfig) -> None:
         app restarts us afterwards, which brings gaze back."""
         if not router.is_local:
             router.go_home("app")
+        arbiter.suspended = True  # agents' cameras mustn't take the pointer mid-calibration
         running, gaze["tracker"] = gaze["tracker"], None
         if running is not None:
             await loop.run_in_executor(None, running.stop)
@@ -360,19 +364,33 @@ def look_command(server: HostServer, payload: str) -> None:
             server.send(device_id, "look", hide=True)
 
 
-def start_gaze(cfg: HostConfig, router: Router, loop: asyncio.AbstractEventLoop, server: HostServer | None = None):
-    from curslink.gaze.cameras import resolve
-    from curslink.gaze.tracker import HeadPoseTracker
-
-    if not cfg.gaze.calibration.exists():
-        log.error(
-            "gaze is enabled but %s does not exist; run `curslink calibrate` first",
-            cfg.gaze.calibration,
-        )
+def start_gaze(cfg: HostConfig, arbiter: GazeArbiter, loop: asyncio.AbstractEventLoop):
+    """This computer's camera. Calibrated, it tells which screen you look
+    at; not calibrated, it still tells whether you face this computer, the
+    way an agent's camera does, which is enough alongside agents' cameras."""
+    try:
+        from curslink.gaze.cameras import resolve
+        from curslink.gaze.tracker import HeadPoseTracker
+    except ImportError as exc:  # pragma: no cover - the gaze extra is missing
+        log.error("gaze needs the gaze extra (pip install curslink[gaze]): %s", exc)
         return None
-    arbiter = make_arbiter(cfg, router)
-    if server is not None:
-        wire_agent_cameras(server, arbiter)
+    camera = resolve(cfg.gaze.camera, cfg.gaze.camera_name)
+    if arbiter.classifier is None:
+        log.info("%s isn't calibrated: camera %d only tells when you face this computer",
+                 cfg.gaze.calibration, cfg.gaze.camera)
+        detector = FacingDetector(cfg.gaze.facing)
+        arbiter.set_camera(cfg.device_id, True)
+        facing: FacingCamera
+
+        def on_facing_sample(t: float, yaw: float, pitch: float) -> None:  # tracker thread
+            loop.call_soon_threadsafe(facing.on_sample, t, yaw, pitch)
+
+        tracker = HeadPoseTracker(on_facing_sample, camera=camera, preview=cfg.gaze.preview)
+        facing = FacingCamera(
+            detector, lambda f: arbiter.on_facing(time.monotonic(), cfg.device_id, f), tracker, loop,
+            refresh_s=1.0)
+        facing.start()
+        return facing
 
     looking = LookingReporter(arbiter.classifier)
 
@@ -382,7 +400,7 @@ def start_gaze(cfg: HostConfig, router: Router, loop: asyncio.AbstractEventLoop,
 
     tracker = HeadPoseTracker(
         lambda t, yaw, pitch: loop.call_soon_threadsafe(on_sample, t, yaw, pitch),
-        camera=resolve(cfg.gaze.camera, cfg.gaze.camera_name),
+        camera=camera,
         preview=cfg.gaze.preview,
     )
     tracker.start()
@@ -409,8 +427,13 @@ class LookingReporter:
 
 
 def make_arbiter(cfg: HostConfig, router: Router) -> GazeArbiter:
-    """The host's gaze classifier, checked against agents' own cameras."""
-    classifier = GazeClassifier(Calibration.load(cfg.gaze.calibration), cfg.gaze.settings)
+    """The host's gaze classifier (when this camera is on and calibrated),
+    checked against agents' own cameras, or those cameras on their own."""
+    classifier = None
+    if cfg.gaze.enabled and cfg.gaze.calibration.exists():
+        classifier = GazeClassifier(Calibration.load(cfg.gaze.calibration), cfg.gaze.settings)
+    elif cfg.gaze.enabled:
+        log.warning("%s does not exist; calibrate for the best gaze switching", cfg.gaze.calibration)
     arbiter = GazeArbiter(
         classifier,
         cfg.device_id,
@@ -420,11 +443,12 @@ def make_arbiter(cfg: HostConfig, router: Router) -> GazeArbiter:
         settings=cfg.gaze.confirm,
     )
 
-    def on_switch(event: SwitchEvent) -> None:
-        classifier.force(Target(event.to_device, event.screen.id))
+    if classifier is not None:
+        def on_switch(event: SwitchEvent) -> None:
+            classifier.force(Target(event.to_device, event.screen.id))
 
-    router.listeners.append(on_switch)
-    classifier.force(Target(router.active_device, router.screen.id))
+        router.listeners.append(on_switch)
+        classifier.force(Target(router.active_device, router.screen.id))
     arbiter.on_blocked = lambda target: log.debug(
         "gaze: waiting for %s's camera to confirm you're facing it", target.device_id)
     return arbiter
@@ -435,15 +459,24 @@ def wire_agent_cameras(server: HostServer, arbiter: GazeArbiter) -> None:
     existing connect/disconnect callbacks."""
     connected, disconnected = server.on_connect, server.on_disconnect
 
+    def cameras_changed() -> None:
+        events.emit("cameras", devices=sorted(d for d in arbiter.cameras if d != arbiter.local_id))
+
     def on_connect(conn) -> None:
+        had = conn.device_id in arbiter.cameras
         arbiter.set_camera(conn.device_id, conn.camera)
         if conn.camera:
-            log.info("%s will confirm gaze switches with its own camera", conn.device_id)
+            log.info("%s's own camera will help decide when you're looking at it", conn.device_id)
         connected(conn)
+        if had != conn.camera:
+            cameras_changed()
 
     def on_disconnect(device_id: str) -> None:
+        had = device_id in arbiter.cameras
         arbiter.forget(device_id)
         disconnected(device_id)
+        if had:
+            cameras_changed()
 
     def on_facing(device_id: str, facing: bool) -> None:
         arbiter.on_facing(time.monotonic(), device_id, facing)
@@ -452,6 +485,8 @@ def wire_agent_cameras(server: HostServer, arbiter: GazeArbiter) -> None:
     server.on_connect, server.on_disconnect, server.on_facing = on_connect, on_disconnect, on_facing
     for conn in server.connections.values():  # connected before gaze started
         arbiter.set_camera(conn.device_id, conn.camera)
+    if server.connections:
+        cameras_changed()
 
 
 async def run_agent(cfg: AgentConfig) -> None:
@@ -502,15 +537,20 @@ async def run_agent(cfg: AgentConfig) -> None:
 
 
 class FacingCamera:
-    """Agent side: this device's own camera, watching for the user facing it."""
+    """A device's own camera, watching for the user facing it. ``report``
+    gets each change (an agent sends it to the host; the host's own
+    uncalibrated camera hands it to the arbiter), and the current state
+    again every ``refresh_s`` when that's set."""
 
     TICK_S = 0.1
 
-    def __init__(self, detector: FacingDetector, client: AgentClient, tracker, loop: asyncio.AbstractEventLoop):
+    def __init__(self, detector: FacingDetector, report: Callable[[bool], None], tracker,
+                 loop: asyncio.AbstractEventLoop, refresh_s: float | None = None):
         self.detector = detector
-        self.client = client
+        self.report = report
         self.tracker = tracker
         self.loop = loop
+        self.refresh_s = refresh_s
         self._ticker: asyncio.Task | None = None
 
     def on_sample(self, t: float, yaw: float, pitch: float) -> None:  # on the loop
@@ -521,20 +561,28 @@ class FacingCamera:
             return
         log.debug("camera: you are %sfacing this device", "" if changed else "not ")
         events.emit("facing", facing=changed)
-        self.client.report_facing(changed)
+        self.report(changed)
 
     async def _tick(self) -> None:
+        refreshed = time.monotonic()
         while True:
             await asyncio.sleep(self.TICK_S)
-            self._report(self.detector.tick(time.monotonic()))
+            now = time.monotonic()
+            changed = self.detector.tick(now)
+            if changed is not None:
+                self._report(changed)
+                refreshed = now
+            elif self.refresh_s is not None and now - refreshed >= self.refresh_s:
+                self.report(self.detector.facing)
+                refreshed = now
 
     def start(self) -> None:
         self.tracker.start()
         self._ticker = self.loop.create_task(self._tick())
 
-    def stop(self) -> None:
+    def stop(self) -> None:  # from any thread
         if self._ticker:
-            self._ticker.cancel()
+            self.loop.call_soon_threadsafe(self._ticker.cancel)
         self.tracker.stop()
 
 
@@ -553,10 +601,10 @@ def start_facing(cfg: AgentConfig, client: AgentClient, loop: asyncio.AbstractEv
 
     tracker = HeadPoseTracker(on_sample, camera=resolve(cfg.gaze.camera, cfg.gaze.camera_name),
                               preview=cfg.gaze.preview)
-    camera = FacingCamera(detector, client, tracker, loop)
+    camera = FacingCamera(detector, client.report_facing, tracker, loop)
     client.facing_source = lambda: detector.facing
     camera.start()
-    log.info("using camera %d to confirm when you're facing this device", cfg.gaze.camera)
+    log.info("using camera %d to tell the host when you're facing this device", cfg.gaze.camera)
     return camera
 
 

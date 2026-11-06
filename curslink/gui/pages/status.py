@@ -111,13 +111,16 @@ class StatusPage(Page):
 
     def gaze_clicked(self, on: bool) -> None:
         status = self.app.status
-        if self.app.service.state == RUNNING and status.gaze:
+        if self.app.service.state == RUNNING and (status.gaze or status.cameras):
+            # Something is following your gaze (this camera or an agent's): pause or resume it.
             self.app.service.send("gaze resume" if on else "gaze pause")
             return
         # Gaze isn't running: switch it on in the config (or send them to calibrate).
         cfg = self.app.config()
         cal = self.app.config_path.parent / str(cfg.get("gaze", "calibration", "calibration.json"))
-        if on and not cal.exists():
+        if on and not cal.exists() and not status.cameras:
+            # Nothing else to work with: an uncalibrated camera alone can't
+            # tell which device you look at. With an agent's camera it can.
             self.gaze_toggle.setChecked(False)
             self.app.show_window("calibrate")
             return
@@ -202,13 +205,21 @@ class StatusPage(Page):
         if role == "host":
             cfg = app.config().raw() if app.has_config() else {}
             gaze_on_in_config = bool(cfg.get("gaze", {}).get("enabled", False))
+            cameras = [names.get(d, d) for d in status.cameras] if state == RUNNING else []
             if state == RUNNING and status.gaze:
                 self.gaze_toggle.setChecked(not status.gaze_paused)
                 hint = "Switch when you look at another screen. Ctrl+Alt+G pauses it."
+            elif cameras:
+                # This camera is off, but an agent's own camera still switches.
+                self.gaze_toggle.setChecked(not status.gaze_paused)
+                hint = (f"Using {', '.join(cameras)}'s camera. Calibrate to use this "
+                        "computer's camera too.")
             else:
                 self.gaze_toggle.setChecked(gaze_on_in_config)
                 hint = ("Switch when you look at another screen. Calibrate first."
                         if not gaze_on_in_config else "Switch when you look at another screen.")
+            if state == RUNNING and status.gaze and cameras:
+                hint = f"Using this camera and {', '.join(cameras)}'s. Ctrl+Alt+G pauses it."
             self.gaze_text.detail_label.setText(hint)
             self.gaze_text.detail_label.show()
             self.edge_toggle.setChecked(bool(cfg.get("host", {}).get("edge_switching", True)))
