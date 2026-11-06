@@ -1,0 +1,27 @@
+Curslink
+Copyright (c) 2026 Kyle Pantall. All rights reserved.
+
+The source code is published so people can see how Curslink works. It is
+not open source.
+
+You may:
+  * download, install and use the official Curslink releases from
+    https://github.com/kylepantall/Curslink/releases on any number of your
+    own devices, for personal or work use;
+  * build and run it from this source code for your own use.
+
+You may not, without written permission from the copyright holder:
+  * copy, modify, merge or reuse any part of the source code in other
+    software;
+  * distribute, sublicense or sell Curslink, modified or not, or offer it
+    as a hosted service.
+
+Contributions (issues, pull requests) are welcome; by submitting one you
+agree it may be used in Curslink under these terms.
+
+CURSLINK IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH CURSLINK OR THE USE OF IT.

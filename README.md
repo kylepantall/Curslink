@@ -211,7 +211,7 @@ password.
 
 ## Contributing
 
-Issues and pull requests are welcome. To work on Curslink:
+Bug reports and ideas are welcome in [issues](https://github.com/kylepantall/Curslink/issues). To work on Curslink:
 
 
 ```bash
@@ -231,3 +231,8 @@ linux-x64 out` (needs Inno Setup on Windows, Xcode tools on macOS, `dpkg-deb`
 on Linux).
 
 Design notes and the roadmap live in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+## License
+
+Curslink is free to download, install and use, but it isn't open source:
+the code may not be reused or redistributed. See [LICENSE](LICENSE).
