@@ -206,7 +206,10 @@ def stylesheet(th: Theme) -> str:
                     if plat == "win" else "")
     side_edge = f"border-right: 1px solid {t['stroke']};" if plat == "linux" else ""
     if plat == "mac":
-        side_round = "border-radius: 14px; margin: 8px;" if th.glass else ""
+        # A glass pane floating over the body (see window.py), with a fine
+        # light edge like macOS's own glass.
+        edge = "rgba(255,255,255,.12)" if th.dark else "rgba(255,255,255,.65)"
+        side_round = f"border-radius: 14px; border: 1px solid {edge};"
     else:
         side_round = ""
     # Segmented controls: a recessed track with a raised thumb (macOS look,
