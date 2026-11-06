@@ -69,6 +69,14 @@ The installers aren't code-signed yet. On Windows, click **More info**, then
 
 ### 2. Set it up
 
+**With the app:** open **Curslink** from the Start menu, Applications, or
+your app menu (or run `curslink gui`). It asks whether this computer is the
+host or an agent, then helps you pair devices, arrange screens and
+calibrate the camera. Close the window and it keeps running in the tray or
+menu bar.
+
+**From the command line:**
+
 1. Copy [`examples/curslink.toml`](examples/curslink.toml) to each device and
    edit it: describe every device's screens in one shared layout (arranged
    like your desk) on the host, and set `[agent]` `device_id` and `name` on

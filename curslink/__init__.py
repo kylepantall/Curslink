@@ -1,3 +1,3 @@
 """Curslink: gaze and edge based mouse and keyboard switching between devices."""
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
