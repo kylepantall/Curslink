@@ -67,13 +67,13 @@ TOKENS: dict[str, dict[str, dict[str, str]]] = {
                      navsel="rgba(255,255,255,.06)", plot="#1C1C1C"),
     },
     "mac": {
-        "light": dict(win="#F6F6F8", glass="transparent", side="#ECECEF", side_glass="rgba(255,255,255,.42)",
+        "light": dict(win="#F6F6F8", glass="transparent", side="#ECECEF", side_glass="rgba(255,255,255,.12)",
                       content="#F6F6F8", content_glass="rgba(246,246,248,.92)", card_glass="rgba(255,255,255,.78)", card="#FFFFFF", card2="#F0F0F2",
                       stroke="rgba(0,0,0,.10)", ink="#1D1D1F", ink2="#6E6E73", ink3="#8E8E93", accent="#007AFF",
                       accent_ink="#FFFFFF", accent_soft="rgba(0,122,255,.12)", ctl="#FFFFFF",
                       ctl_stroke="rgba(0,0,0,.16)", ctl_bottom="rgba(0,0,0,.16)", navsel="rgba(0,0,0,.08)",
                       plot="#EFEFF2"),
-        "dark": dict(win="#1E1E20", glass="transparent", side="#28282B", side_glass="rgba(60,60,67,.36)",
+        "dark": dict(win="#1E1E20", glass="transparent", side="#28282B", side_glass="rgba(255,255,255,.03)",
                      content="#1E1E20", content_glass="rgba(30,30,32,.90)", card_glass="rgba(255,255,255,.06)", card="#2A2A2D", card2="#252528",
                      stroke="rgba(255,255,255,.10)", ink="#F5F5F7", ink2="#A1A1A6", ink3="#8E8E93", accent="#0A84FF",
                      accent_ink="#FFFFFF", accent_soft="rgba(10,132,255,.22)", ctl="#3A3A3D",
@@ -206,10 +206,9 @@ def stylesheet(th: Theme) -> str:
                     if plat == "win" else "")
     side_edge = f"border-right: 1px solid {t['stroke']};" if plat == "linux" else ""
     if plat == "mac":
-        # A glass pane floating over the body (see window.py), with a fine
-        # light edge like macOS's own glass.
-        edge = "rgba(255,255,255,.12)" if th.dark else "rgba(255,255,255,.65)"
-        side_round = f"border-radius: 14px; border: 1px solid {edge};"
+        # The sidebar is the window's vibrancy, flush to the edges, with a
+        # hairline where the body starts.
+        side_round = f"border-right: 1px solid {t['stroke']};" if th.glass else ""
     else:
         side_round = ""
     # Segmented controls: a recessed track with a raised thumb (macOS look,
