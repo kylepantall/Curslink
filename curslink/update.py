@@ -312,11 +312,13 @@ def install(path: Path, kind: str, version: str, relaunch: list[str] | None = No
     if kind == "windows-setup":
         script = path.with_suffix(".cmd")
         script.write_text(_windows_script(path, _relaunch_argv(relaunch), os.getpid()))
-        flags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
-        subprocess.Popen(["cmd", "/c", str(script)], creationflags=flags, close_fds=True)
+        # No console window: the setup runs silently and Curslink restarts by itself.
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200)
+        subprocess.Popen(["cmd", "/c", str(script)], creationflags=flags, close_fds=True,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         # The setup can't replace curslink.exe while it runs: exit now.
         log.info("Curslink %s is installing; it will start again when done", version)
-        sys.stdout.flush()
+        _flush_streams()
         os._exit(0)
     if kind == "macos-pkg":
         _run(_as_admin(["/usr/sbin/installer", "-pkg", str(path), "-target", "/"]))
@@ -329,6 +331,22 @@ def install(path: Path, kind: str, version: str, relaunch: list[str] | None = No
     if relaunch is not None:
         _relaunch(_relaunch_argv(relaunch), version)
     return f"Installed Curslink {version}."
+
+
+def _flush_streams() -> None:
+    """Flush what's printed and logged before exiting. The windowed app
+    (curslinkw.exe, the macOS app) has no console: ``sys.stdout`` is None."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            if stream is not None:
+                stream.flush()
+        except Exception:
+            pass
+    for handler in logging.getLogger().handlers:
+        try:
+            handler.flush()
+        except Exception:
+            pass
 
 
 def _run(cmd: list[str]) -> None:
