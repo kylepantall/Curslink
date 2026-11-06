@@ -15,7 +15,8 @@ Writes, next to this script:
     curslink.ico            Windows (16-256 px, tile enlarged to fill the square)
     png/curslink-<N>.png    Linux hicolor sizes (filled like the .ico)
 
-and docs/images/icon.png for the README. The outputs are committed, so builds
+and docs/images/icon.png for the README. (packaging/icons/make_icons_macos.py
+makes the same set, plus the tray state PNGs in tray/, with sips and iconutil.) The outputs are committed, so builds
 don't need to run this; run it again whenever a master changes.
 """
 
@@ -32,7 +33,7 @@ ASSETS = ROOT / "curslink" / "assets"
 
 ICO_SIZES = (16, 24, 32, 48, 64, 128, 256)
 ICNS_SIZES = (16, 32, 64, 128, 256, 512, 1024)
-PNG_SIZES = (16, 24, 32, 48, 64, 128, 256, 512)
+PNG_SIZES = (16, 22, 24, 32, 48, 64, 128, 256, 512)
 SMALL_MAX = 24
 TILE_SPAN = 824 / 1024   # share of the master the tile covers
 TILE_FILL = 0.94         # share of the square it covers in .ico / PNGs

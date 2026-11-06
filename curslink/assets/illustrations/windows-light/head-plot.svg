@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="250" viewBox="0 0 720 250" role="img" aria-label="Head tracking plot with example targets and position" >
+
+<rect width="720" height="250" rx="8" fill="#F5F7FA"/>
+<path d="M28 125h664M360 20v210" fill="none" stroke="#E5E5E5" stroke-width="1"/>
+<g fill="#FFFFFF" stroke-width="2">
+  <rect x="141" y="116" width="26" height="18" rx="4" stroke="#0F7B0F"/>
+  <rect x="553" y="116" width="26" height="18" rx="4" stroke="#5F5F5F"/>
+  <rect x="347" y="49" width="26" height="18" rx="4" stroke="#0F7B0F"/>
+  <rect x="347" y="183" width="26" height="18" rx="4" stroke="#5F5F5F"/>
+</g>
+<circle cx="389" cy="110" r="14" fill="none" stroke="#005FB8" stroke-width="2"/>
+<circle cx="389" cy="110" r="7" fill="#005FB8"/>
+<g font-family="Cascadia Mono, Consolas, monospace" font-size="12" fill="#5F5F5F">
+  <text x="28" y="114">−50°</text><text x="692" y="114" text-anchor="end">+50°</text>
+  <text x="371" y="27">+32°</text><text x="371" y="231">−32°</text>
+</g>
+</svg>

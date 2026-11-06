@@ -1,52 +1,26 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-labelledby="title">
-  <title id="title">Curslink</title>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-label="CursLink">
   <defs>
-    <linearGradient id="rim" x1="0" y1="0" x2="0.7" y2="1">
-      <stop stop-color="#47658E"/>
-      <stop offset=".5" stop-color="#203B60"/>
-      <stop offset="1" stop-color="#0A1423"/>
+    <linearGradient id="tile" x2=".85" y2="1" gradientUnits="objectBoundingBox">
+      <stop stop-color="#1D3A66"/><stop offset="1" stop-color="#0F1B2D"/>
     </linearGradient>
-    <linearGradient id="tile" x1=".24" y1="1" x2=".72" y2="0">
-      <stop stop-color="#0F1B2D"/>
-      <stop offset=".56" stop-color="#142843"/>
-      <stop offset="1" stop-color="#1F3B63"/>
+    <linearGradient id="screens" x1="0" y1="1" x2=".8" y2="0">
+      <stop stop-color="#3182CA"/><stop offset=".58" stop-color="#3FA9FF"/><stop offset="1" stop-color="#B6DFFF"/>
     </linearGradient>
-    <radialGradient id="light" cx=".68" cy=".29" r=".63">
-      <stop stop-color="#3FA9FF" stop-opacity=".19"/>
-      <stop offset="1" stop-color="#3FA9FF" stop-opacity="0"/>
-    </radialGradient>
-    <linearGradient id="source" x1="0" y1="1" x2=".7" y2="0">
-      <stop stop-color="#3679C5"/>
-      <stop offset="1" stop-color="#6AC6FF"/>
-    </linearGradient>
-    <linearGradient id="target" x1="0" y1="1" x2=".8" y2="0">
-      <stop stop-color="#3FA9FF"/>
-      <stop offset="1" stop-color="#B7E8FF"/>
-    </linearGradient>
-    <linearGradient id="glass" x1="0" y1="1" x2=".7" y2="0">
-      <stop stop-color="#122845"/>
-      <stop offset="1" stop-color="#204A76"/>
-    </linearGradient>
-    <linearGradient id="handoff" gradientUnits="userSpaceOnUse" x1="310" y1="602" x2="698" y2="370">
-      <stop stop-color="#3588D5"/>
-      <stop offset=".28" stop-color="#3FA9FF"/>
-      <stop offset=".50" stop-color="#76C7FF"/>
-      <stop offset=".72" stop-color="#EAF2FD"/>
-      <stop offset="1" stop-color="#FCFEFF"/>
+    <linearGradient id="pointer" x2=".2" y2="1">
+      <stop stop-color="#FFFFFF"/><stop offset="1" stop-color="#B6DFFF"/>
     </linearGradient>
   </defs>
-
-  <rect x="100" y="100" width="824" height="824" rx="192" fill="url(#rim)"/>
-  <rect x="104" y="104" width="816" height="814" rx="189" fill="url(#tile)"/>
-  <rect x="104" y="104" width="816" height="814" rx="189" fill="url(#light)"/>
-
-  <g stroke-linejoin="round">
-    <rect x="226" y="472" width="329" height="234" rx="53" fill="#0A1729" stroke="#0A1729" stroke-width="35" opacity=".72"/>
-    <rect x="226" y="458" width="329" height="234" rx="53" fill="#142D50" stroke="url(#source)" stroke-width="35"/>
-    <rect x="457" y="302" width="339" height="248" rx="55" fill="#0C1E34" stroke="#0C1E34" stroke-width="62"/>
-    <rect x="457" y="294" width="339" height="248" rx="55" fill="url(#glass)" stroke="url(#target)" stroke-width="35"/>
+  <rect x="101" y="101" width="822" height="822" rx="182" fill="url(#tile)" stroke="#315781" stroke-width="2"/>
+  <g fill="none" stroke="#0B1728" stroke-width="54">
+    <rect x="229" y="463" width="327" height="232" rx="56"/>
+    <rect x="454" y="301" width="340" height="247" rx="59" fill="#142943"/>
   </g>
-
-  <path d="M311 588C409 595 492 541 576 466L539 452Q530 448 539 442L700 363Q711 359 709 371L667 514Q664 523 656 518L621 494C524 576 422 626 309 613C291 612 293 587 311 588Z" fill="url(#handoff)" stroke="#112641" stroke-width="16" stroke-linejoin="round" paint-order="stroke fill"/>
-  <path d="M712 330L714 319M738 346L749 338M743 373L756 375" fill="none" stroke="#79D1FF" stroke-width="9" stroke-linecap="round"/>
+  <g fill="none" stroke="url(#screens)" stroke-width="35">
+    <rect x="229" y="458" width="327" height="232" rx="56"/>
+    <rect x="454" y="294" width="340" height="247" rx="59" fill="#162D49"/>
+  </g>
+  <path d="M309 602c99 8 176-35 245-99" fill="none" stroke="#101D30" stroke-width="42" stroke-linecap="round"/>
+  <path d="M309 600c99 8 176-35 245-99" fill="none" stroke="url(#screens)" stroke-width="25" stroke-linecap="round"/>
+  <path d="m538 448 166-81-48 155-36-24-34 40-35-30 32-40z" fill="url(#pointer)" stroke="#0B1728" stroke-width="11" stroke-linejoin="round"/>
+  <path d="m715 338 1-14m18 21 12-8m-7 28 14 2" fill="none" stroke="#3FA9FF" stroke-width="8" stroke-linecap="round"/>
 </svg>

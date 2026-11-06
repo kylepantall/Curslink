@@ -39,7 +39,7 @@ curslink = "curslink.cli:main"
 include = ["curslink*"]
 
 [tool.setuptools.package-data]
-"curslink.assets" = ["*.svg", "*.png"]
+"curslink.assets" = ["*.svg", "*.png", "navigation/*.svg", "illustrations/*.svg", "illustrations/*/*.svg"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

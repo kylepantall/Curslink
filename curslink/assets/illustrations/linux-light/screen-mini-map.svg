@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="150" height="96" viewBox="0 0 150 96" role="img" aria-label="Screen mini map with the right screen active" >
+
+<style>
+  .halo { transform-origin: 102px 43px; animation: pulse 2.4s ease-in-out infinite; }
+  @keyframes pulse { 0%, 100% { transform: scale(.6); opacity: .3; } 50% { transform: scale(1); opacity: .15; } }
+  @media (prefers-reduced-motion: reduce) { .halo { display: none; } }
+</style>
+<rect x="5" y="34" width="53" height="40" rx="5" fill="#F6F6F7" stroke="rgba(0,0,6,.45)" stroke-width="2"/>
+<rect x="66" y="17" width="72" height="52" rx="5" fill="none" stroke="#3584E4" stroke-width="8" stroke-opacity=".18"/>
+<rect x="66" y="17" width="72" height="52" rx="5" fill="rgba(53,132,228,.14)" stroke="#3584E4" stroke-width="2"/>
+<circle class="halo" cx="102" cy="43" r="10" fill="#3584E4" opacity=".18"/>
+<circle cx="102" cy="43" r="5" fill="#3584E4"/>
+</svg>

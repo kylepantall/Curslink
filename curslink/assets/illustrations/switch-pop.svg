@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="180" height="180" viewBox="0 0 180 180" role="img" aria-label="Cursor switch pop" >
+
+<style>
+  .ring { transform-origin: 90px 90px; animation: ring 380ms cubic-bezier(.215,.61,.355,1) both; }
+  .dot { animation: dot 380ms cubic-bezier(.215,.61,.355,1) both; }
+  @keyframes ring { from { r: 10px; stroke-width: 9px; opacity: 1; } to { r: 76px; stroke-width: 1px; opacity: 0; } }
+  @keyframes dot { from { opacity: 1; } to { opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) { .ring, .dot { animation: none; } }
+</style>
+<circle class="ring" cx="90" cy="90" r="34" fill="none" stroke="#3FA9FF" stroke-width="6"/>
+<circle class="dot" cx="90" cy="90" r="7" fill="#3FA9FF"/>
+</svg>

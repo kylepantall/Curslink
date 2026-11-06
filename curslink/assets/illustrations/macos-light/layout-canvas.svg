@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="300" viewBox="0 0 720 300" role="img" aria-label="Example layout connecting this computer and work laptop" >
+
+<defs><pattern id="grid" width="16" height="16" patternUnits="userSpaceOnUse"><circle cx="8" cy="8" r="1" fill="rgba(0,0,0,.08)"/></pattern></defs>
+<rect width="720" height="300" rx="12" fill="rgba(0,0,0,.04)"/>
+<rect width="720" height="300" rx="12" fill="url(#grid)"/>
+<rect x="392" y="53" width="215" height="142" rx="6" fill="#8E6BD8" fill-opacity=".14" stroke="#8E6BD8" stroke-opacity=".60" stroke-width="2"/>
+<rect x="102" y="99" width="290" height="156" rx="6" fill="none" stroke="#007AFF" stroke-width="8" stroke-opacity=".18"/>
+<rect x="102" y="99" width="290" height="156" rx="6" fill="rgba(255,255,255,.78)" stroke="#007AFF" stroke-width="2"/>
+<path d="M392 113v69" stroke="#248A3D" stroke-width="4" stroke-linecap="round"/>
+<g font-family="-apple-system, sans-serif" font-size="14" font-weight="600" fill="#1D1D1F" text-anchor="middle">
+  <text x="247" y="181">This computer</text>
+  <text x="499.5" y="129">Work laptop</text>
+</g>
+</svg>

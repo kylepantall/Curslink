@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="180" height="180" viewBox="0 0 180 180" role="img" aria-label="Cursor switch blink" >
+
+<style>
+  .blink { animation: blink 380ms steps(1, end) both; }
+  @keyframes blink { 0%, 50% { opacity: 1; } 25%, 75%, 100% { opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) { .blink { animation: none; } }
+</style>
+<g class="blink">
+  <circle cx="90" cy="90" r="34" fill="none" stroke="#3FA9FF" stroke-width="6"/>
+  <circle cx="90" cy="90" r="9" fill="#3FA9FF"/>
+</g>
+</svg>
