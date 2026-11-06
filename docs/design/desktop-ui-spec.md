@@ -140,7 +140,7 @@ Status dot (sidebar footer, tray): good `#2EC27E`, warning `#E5A50A`, off `ink3`
 | Row detail, small | 12.5 px | 12.5 px | 12.5 px | 400 |
 | Eyebrow (uppercase, 0.06 em tracking) | 11.5 px | 11.5 px | 11.5 px | 600 |
 | Pairing code (0.14 em tracking) | 38 px mono | 38 px mono | 38 px mono | 500 |
-| Mono (log, angles, paths) | 12 to 12.5 px | same | same | 400 |
+| Mono (log, paths) | 12 to 12.5 px | same | same | 400 |
 | Title bar text | 12 px | none | 14 px bold (header bar) | 400 |
 
 ---
@@ -237,7 +237,7 @@ On macOS, SF Symbols: `display`, `laptopcomputer.and.iphone`,
 |---|---|---|
 | Screen mini map | Status hero | 150 × 96 px area. Each screen is a rect with 5 px radius and 2 px `ink3` border on `card2`. The active one has an `accent` border, `accent-soft` fill, a 4 px `accent` glow at 18%, and a 10 px `accent` dot that pulses (6 to 10 px halo, 2.4 s, off with reduced motion). |
 | Layout canvas | Layout | 300 px tall, `plot` fill with a 16 px dot grid (`stroke` in light, `rgba(255,255,255,.08)` in dark). Screens: 6 px radius, 2 px border. This computer `ink3` on `card`; other devices `#8E6BD8` at 60% border and 14% fill; selected `accent` with 4 px glow. A connected edge is a 4 px good-colour bar on the shared edge. |
-| Head plot | Calibrate | 250 px tall, `plot` fill, 1 px `stroke` axes through the centre. Ranges: yaw ±50°, pitch ±32°. Targets 26 × 18 px, 4 px radius, 2 px `ink2` border, good colour when recorded. Your head: 30 px `accent` ring with an 14 px dot. |
+| Calibration map | Calibrate | Your real layout, drawn like the layout canvas (260 px tall). No yaw or pitch numbers anywhere. The screen you're looking at gets an `accent` border, `accent-soft` fill, a 6 px glow and the pointer on it. Recorded screens get a good-colour border and a 20 px tick badge top right. The next screen to record pulses (12 px halo, 1.8 s, off with reduced motion) and carries a "Look here" pill. Under the map: a status dot and "You're looking at <device>", and the Show camera toggle. The step list says "Recorded" or "Look here", never angles. |
 | Pairing code card | Devices | `accent-soft` card, code in 38 px mono split 3 + 3. |
 | Switch animation | On the target screen | 180 px square, colour `#3FA9FF`, 380 ms. Pop: ring grows from 10 px to 76 px radius, stroke 9 px to 1 px, with a 7 px dot fading out. Blink: 34 px ring, 6 px stroke, plus 9 px dot, flashed twice. |
 
@@ -279,8 +279,9 @@ action button 16 px below.
 | `background` | Menu bar with the Curslink menu open | First-launch notice when Curslink starts hidden; the no-tray fallback window | "Curslink is running in the background" |
 
 The platform illustrations from Kyle's asset set (`illustrations/<platform>-<theme>/`:
-screen mini map, layout canvas, head plot, pairing card) are the reference for
-the live widgets in 5.3, which draw real data instead.
+screen mini map, layout canvas, pairing card) are the reference for the live
+widgets in 5.3, which draw real data instead. The head plot is no longer used:
+calibration shows the layout, not angles.
 
 ---
 
