@@ -1,4 +1,4 @@
-"""``curslink host | agent | calibrate | check | overlay-test``"""
+"""``curslink host | agent | pair | unpair | calibrate | check | overlay-test``"""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 from curslink import __version__
-from curslink.config import ConfigError, agent_config, host_config, load_raw
+from curslink.config import ConfigError, PairingConfig, agent_config, host_config, load_raw, pairing_config
 
 
 def _host_cfg(path: str):
@@ -31,7 +31,122 @@ def cmd_agent(args) -> int:
     raw = load_raw(args.config)
     if args.host:
         raw.setdefault("agent", {})["host"] = args.host
-    asyncio.run(run_agent(agent_config(raw)))
+    asyncio.run(run_agent(agent_config(raw, base_dir=Path(args.config).parent)))
+    return 0
+
+
+def _this_device(args):
+    """(DeviceInfo, PairingConfig) for the device this config describes."""
+    from curslink.pairing.handshake import DeviceInfo
+
+    path = Path(args.config)
+    raw = load_raw(path)
+    role = args.role
+    if role is None:
+        has_host, has_agent = "host" in raw, "agent" in raw
+        if has_host == has_agent:
+            raise ConfigError("this config has both [host] and [agent] (or neither); pass --as host or --as agent")
+        role = "host" if has_host else "agent"
+    if role == "host":
+        cfg = host_config(raw, base_dir=path.parent)
+        return DeviceInfo(cfg.device_id, cfg.name, "host"), cfg.pairing
+    cfg = agent_config(raw, base_dir=path.parent)
+    return DeviceInfo(cfg.device_id, cfg.name, "agent"), cfg.pairing
+
+
+def _pick(found, store) -> object | None:
+    print("Curslink devices on this network:\n")
+    for i, f in enumerate(found, 1):
+        paired = " (paired)" if store.get(f.device_id) else ""
+        print(f"  {i}. {f.name} [{f.role}, id {f.device_id}] at {f.address}{paired}")
+    while True:
+        choice = input("\nPair with which device? Number, or Enter to cancel: ").strip()
+        if not choice:
+            return None
+        if choice.isdigit() and 1 <= int(choice) <= len(found):
+            return found[int(choice) - 1]
+        print("  not one of the numbers above")
+
+
+async def _pair(me, pcfg: PairingConfig, args) -> int:
+    from curslink.pairing.discovery import browse
+    from curslink.pairing.handshake import PairingError, initiate
+    from curslink.pairing.service import DEFAULT_PAIRING_PORT
+    from curslink.pairing.store import PairingStore
+
+    store = PairingStore(pcfg.store)
+    if args.address:
+        host, _, port = args.address.partition(":")
+        address, port, label = host, int(port or DEFAULT_PAIRING_PORT), args.address
+    else:
+        print("Looking for Curslink devices on the network...")
+        try:
+            found = await browse(args.timeout, exclude=me.device_id)
+        except Exception as exc:
+            print(f"Network discovery failed ({exc}). Use --address HOST to pair directly.", file=sys.stderr)
+            return 1
+        found = [f for f in found if f.role != me.role]
+        want = "an agent" if me.role == "host" else "a host"
+        if not found:
+            print(f"No {want} found. Is `curslink {'agent' if me.role == 'host' else 'host'}` running "
+                  "on the other device, on the same network? You can also use --address HOST.")
+            return 1
+        target = await asyncio.get_running_loop().run_in_executor(None, _pick, found, store)
+        if target is None:
+            return 1
+        address, port, label = target.address, target.pairing_port, target.name
+
+    def show_code(code, peer):
+        print(f"\nOn {peer.name}, enter this code to pair:\n\n        {code}\n")
+        print("Waiting for it to be entered...")
+
+    try:
+        reader, writer = await asyncio.wait_for(asyncio.open_connection(address, port), 5)
+    except (OSError, asyncio.TimeoutError) as exc:
+        print(f"Can't reach {label}: {exc}", file=sys.stderr)
+        return 1
+    try:
+        result = await initiate(reader, writer, me, show_code)
+    except PairingError as exc:
+        print(f"Pairing failed: {exc}", file=sys.stderr)
+        return 1
+    except (ConnectionError, OSError) as exc:
+        print(f"Pairing failed: lost the connection ({exc})", file=sys.stderr)
+        return 1
+    finally:
+        writer.close()
+    store.add(result.peer.device_id, result.peer.name, result.peer.role, result.key)
+    print(f"Paired with {result.peer.name}. Keys saved to {store.path}")
+    if me.role == "host":
+        print(f"Make sure [[devices]] in your config has an entry with id = \"{result.peer.device_id}\".")
+    return 0
+
+
+def cmd_pair(args) -> int:
+    me, pcfg = _this_device(args)
+    if args.list:
+        from curslink.pairing.store import PairingStore
+
+        store = PairingStore(pcfg.store)
+        peers = store.peers()
+        if not peers:
+            print(f"Not paired with anything yet ({store.path})")
+        for p in peers:
+            print(f"{p.device_id}: {p.name} ({p.role})")
+        return 0
+    return asyncio.run(_pair(me, pcfg, args))
+
+
+def cmd_unpair(args) -> int:
+    from curslink.pairing.store import PairingStore
+
+    path = Path(args.config)
+    pcfg = pairing_config(load_raw(path), path.parent) if path.exists() else PairingConfig()
+    store = PairingStore(pcfg.store)
+    if not store.remove(args.device_id):
+        print(f"Not paired with {args.device_id!r}", file=sys.stderr)
+        return 1
+    print(f"Removed {args.device_id}. Unpair on that device too, or it will keep its old key.")
     return 0
 
 
@@ -124,6 +239,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--host", help="host address (overrides [agent].host)")
     p.set_defaults(func=cmd_agent)
 
+    p = sub.add_parser("pair", help="find Curslink devices on the network and pair with one")
+    p.add_argument("-c", "--config", default="curslink.toml")
+    p.add_argument("--as", dest="role", choices=["host", "agent"],
+                   help="which role this device plays, if the config has both [host] and [agent]")
+    p.add_argument("--address", help="pair with HOST[:PORT] directly instead of searching the network")
+    p.add_argument("--timeout", type=float, default=3.0, help="seconds to search the network")
+    p.add_argument("--list", action="store_true", help="show the devices this one is paired with")
+    p.set_defaults(func=cmd_pair)
+
+    p = sub.add_parser("unpair", help="forget a paired device")
+    p.add_argument("device_id")
+    p.add_argument("-c", "--config", default="curslink.toml")
+    p.set_defaults(func=cmd_unpair)
+
     p = sub.add_parser("calibrate", help="teach Curslink where each screen is relative to your head")
     p.add_argument("-c", "--config", default="curslink.toml")
     p.set_defaults(func=cmd_calibrate)
@@ -148,6 +277,10 @@ def main(argv: list[str] | None = None) -> int:
 
         run_helper()
         return 0
+    if argv[:1] == ["_pair-dialog"]:
+        from curslink.pairing.dialog import main as dialog_main
+
+        return dialog_main(argv[1:])
     if argv[:1] == ["_selftest"]:
         return _selftest()
     args = build_parser().parse_args(argv)

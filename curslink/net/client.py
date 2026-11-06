@@ -7,11 +7,13 @@ import contextlib
 import logging
 import platform
 import ssl
-from typing import Callable
+from dataclasses import dataclass
+from typing import Awaitable, Callable
 
 from curslink.inputs.base import InputSink
 from curslink.net.framing import STREAM_LIMIT, read_message
 from curslink.protocol import PROTOCOL_VERSION, Message, ProtocolError, encode
+from curslink.security import channel_binding, hello_auth
 
 log = logging.getLogger(__name__)
 
@@ -78,6 +80,20 @@ def detect_screens() -> list[dict]:
     ]
 
 
+@dataclass
+class Target:
+    """Where and how to connect: what :class:`AgentClient`'s resolver returns."""
+
+    host: str
+    port: int
+    ssl_context: ssl.SSLContext | None
+    auth_key: bytes | None = None  # proves our identity in hello
+
+
+class NotReady(Exception):
+    """The resolver has nowhere to connect yet (not paired, host not found)."""
+
+
 class AgentClient:
     def __init__(
         self,
@@ -88,31 +104,42 @@ class AgentClient:
         ssl_context: ssl.SSLContext | None,
         session: AgentSession,
         max_backoff_s: float = 10.0,
+        auth_key: bytes | None = None,
+        resolve: Callable[[], Awaitable[Target]] | None = None,
     ):
         self.device_id = device_id
         self.name = name
         self.host = host
         self.port = port
         self.ssl_context = ssl_context
+        self.auth_key = auth_key
         self.session = session
         self.max_backoff_s = max_backoff_s
+        # Re-run before every connection attempt, so pairing or a host that
+        # moved to a new address is picked up without a restart.
+        self.resolve = resolve
         self.connected = asyncio.Event()
 
     async def run_once(self) -> None:
+        if self.resolve is not None:
+            target = await self.resolve()
+            self.host, self.port = target.host, target.port
+            self.ssl_context, self.auth_key = target.ssl_context, target.auth_key
         reader, writer = await asyncio.open_connection(
             self.host, self.port, ssl=self.ssl_context, limit=STREAM_LIMIT
         )
         try:
-            writer.write(
-                encode(
-                    "hello",
-                    v=PROTOCOL_VERSION,
-                    device_id=self.device_id,
-                    name=self.name,
-                    platform=f"{platform.system()} {platform.release()}",
-                    screens=detect_screens(),
-                )
+            hello = dict(
+                v=PROTOCOL_VERSION,
+                device_id=self.device_id,
+                name=self.name,
+                platform=f"{platform.system()} {platform.release()}",
+                screens=detect_screens(),
             )
+            if self.auth_key is not None:
+                binding = channel_binding(writer.get_extra_info("ssl_object"))
+                hello["auth"] = hello_auth(self.auth_key, binding, self.device_id)
+            writer.write(encode("hello", **hello))
             welcome = await asyncio.wait_for(read_message(reader), 5)
             if welcome is None or welcome.t != "welcome":
                 raise ProtocolError("host did not welcome us")
@@ -134,13 +161,20 @@ class AgentClient:
 
     async def run_forever(self) -> None:
         backoff = 0.5
+        waiting = ""
         while True:
             try:
                 await self.run_once()
                 backoff = 0.5
                 log.info("disconnected from host; reconnecting")
             except ssl.SSLError as exc:
-                log.error("TLS handshake failed (is the pairing secret the same on both sides?): %s", exc)
+                log.error("TLS handshake failed (are these devices paired, or is the secret the same on both?): %s", exc)
+            except NotReady as exc:
+                if str(exc) != waiting:  # say it once, not every retry
+                    waiting = str(exc)
+                    log.info("%s", exc)
+                await asyncio.sleep(2.0)
+                continue
             except (OSError, ProtocolError, asyncio.TimeoutError) as exc:
                 log.info("host %s:%d unavailable: %s", self.host, self.port, exc)
             await asyncio.sleep(backoff)

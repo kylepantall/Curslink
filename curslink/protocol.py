@@ -16,8 +16,17 @@ Host -> agent
     ping         {n}
 
 Agent -> host
-    hello        {v, device_id, name, platform, screens}
+    hello        {v, device_id, name, platform, screens, auth}
     pong         {n}
+
+``hello.auth`` proves which key the agent holds (see
+:func:`curslink.security.hello_auth`); agents older than pairing omit it.
+
+Pairing (its own plain TCP connection, see :mod:`curslink.pairing.handshake`)
+    pair_hello   {v, device_id, name, role, commit}     initiator
+    pair_key     {device_id, name, role, pub}           recipient
+    pair_reveal  {pub}                                  initiator
+    pair_done    {ok, mac | reason}                     recipient
 """
 
 from __future__ import annotations
@@ -43,6 +52,10 @@ MESSAGE_TYPES = frozenset(
         "ping",
         "pong",
         "bye",
+        "pair_hello",
+        "pair_key",
+        "pair_reveal",
+        "pair_done",
     }
 )
 

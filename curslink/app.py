@@ -6,12 +6,15 @@ import asyncio
 import logging
 import time
 
-from curslink.config import AgentConfig, HostConfig
+from curslink.config import AgentConfig, HostConfig, PairingConfig
 from curslink.gaze.zones import Calibration, GazeClassifier, Target
-from curslink.net.client import AgentClient, AgentSession
+from curslink.net.client import AgentClient, AgentSession, NotReady
+from curslink.net.client import Target as ConnectTarget
 from curslink.net.server import HostServer
+from curslink.pairing.handshake import DeviceInfo
+from curslink.pairing.store import PairingStore
 from curslink.router import Router, SwitchEvent
-from curslink.security import client_context, server_context
+from curslink.security import HelloVerifier, client_context, server_context
 
 log = logging.getLogger(__name__)
 
@@ -39,18 +42,66 @@ class LoopBridge:
         self._loop.call_soon_threadsafe(self._router.on_key, key, pressed)
 
 
+class Pairing:
+    """The pairing listener plus the LAN advertisement, for a running host or agent."""
+
+    def __init__(self, cfg: PairingConfig, me: DeviceInfo, store: PairingStore, control_port: int | None = None):
+        self.cfg = cfg
+        self.me = me
+        self.store = store
+        self.control_port = control_port
+        self.listener = None
+        self.advertiser = None
+
+    async def start(self) -> None:
+        if not self.cfg.enabled:
+            return
+        from curslink.pairing.discovery import Advertiser
+        from curslink.pairing.service import PairingListener, ask_in_dialog
+
+        # The advert carries the real port, so if ours is taken (say a host and
+        # an agent on one machine) any free port will do.
+        for port in (self.cfg.port, 0):
+            self.listener = PairingListener(self.me, self.store, ask_in_dialog, port=port)
+            try:
+                await self.listener.start()
+                break
+            except OSError as exc:
+                log.info("can't listen for pairing on port %d (%s)", port, exc)
+                self.listener = None
+        if self.listener is None:
+            log.warning("pairing unavailable on this device")
+            return
+        self.advertiser = Advertiser(self.me, self.listener.port, self.control_port)
+        try:
+            await self.advertiser.start()
+        except Exception as exc:  # no multicast, no mDNS: pairing by address still works
+            log.warning("can't advertise on the LAN (%s); pair with `curslink pair --address`", exc)
+            self.advertiser = None
+
+    async def close(self) -> None:
+        if self.advertiser:
+            await self.advertiser.close()
+        if self.listener:
+            await self.listener.close()
+
+
 async def run_host(cfg: HostConfig) -> None:
     from curslink.inputs.pynput_backend import PynputCapture, PynputSink
     from curslink.overlay import OverlayProcess
 
     loop = asyncio.get_running_loop()
     remote_ids = {d for d in cfg.layout.devices if d != cfg.device_id}
+    store = PairingStore(cfg.pairing.store)
     server = HostServer(
         remote_ids,
-        server_context(cfg.secret),
+        server_context(cfg.secret, store.key),
         host=cfg.listen,
         port=cfg.port,
+        verify_hello=HelloVerifier(cfg.secret, store.key),
     )
+    if not cfg.secret and not store.peers("agent"):
+        log.info("no devices paired yet: run `curslink pair` here or on an agent")
     home = next(iter(cfg.layout.screens(cfg.device_id)))
     capture = PynputCapture(park_at=home.to_os(*home.center))
     overlay = OverlayProcess()
@@ -66,6 +117,8 @@ async def run_host(cfg: HostConfig) -> None:
     )
     server.on_disconnect = router.on_disconnect
     await server.start()
+    pairing = Pairing(cfg.pairing, DeviceInfo(cfg.device_id, cfg.name, "host"), store, server.port)
+    await pairing.start()
     capture.start(LoopBridge(loop, router))
 
     tracker = None
@@ -85,6 +138,7 @@ async def run_host(cfg: HostConfig) -> None:
             tracker.stop()
         capture.stop()
         overlay.close()
+        await pairing.close()
         await server.close()
 
 
@@ -130,14 +184,50 @@ async def run_agent(cfg: AgentConfig) -> None:
         PynputSink(cfg.modifier_map),
         overlay.show if overlay else (lambda effect, x, y: None),
     )
+    store = PairingStore(cfg.pairing.store)
     client = AgentClient(
-        cfg.device_id, cfg.name, cfg.host, cfg.port, client_context(cfg.secret), session
+        cfg.device_id, cfg.name, cfg.host, cfg.port, None, session,
+        resolve=lambda: resolve_host(cfg, store),
     )
+    pairing = Pairing(cfg.pairing, DeviceInfo(cfg.device_id, cfg.name, "agent"), store)
+    await pairing.start()
     try:
         await client.run_forever()
     finally:
+        await pairing.close()
         if overlay:
             overlay.close()
+
+
+def paired_host(cfg: AgentConfig, store: PairingStore):
+    hosts = store.peers("host")
+    if cfg.host_id:
+        return next((p for p in hosts if p.device_id == cfg.host_id), None)
+    if len(hosts) > 1:
+        names = ", ".join(p.device_id for p in hosts)
+        raise NotReady(f"paired with several hosts ({names}); set [agent].host_id to pick one")
+    return hosts[0] if hosts else None
+
+
+async def resolve_host(cfg: AgentConfig, store: PairingStore) -> ConnectTarget:
+    """Which key to use and where the host is, worked out again before every connection."""
+    peer = paired_host(cfg, store)
+    if peer is not None:
+        ctx, auth_key = client_context(device_id=cfg.device_id, key=peer.key), peer.key
+    elif cfg.secret:
+        ctx, auth_key = client_context(cfg.secret), None
+    else:
+        raise NotReady("waiting to be paired: run `curslink pair` on the host or here")
+    if cfg.host:
+        return ConnectTarget(cfg.host, cfg.port, ctx, auth_key)
+    if peer is None:
+        raise NotReady("set [agent].host, or pair with the host so it can be found on the LAN")
+    from curslink.pairing.discovery import find
+
+    found = await find(peer.device_id, timeout=2.0)
+    if found is None or not found.control_port:
+        raise NotReady(f"looking for {peer.name} on the LAN...")
+    return ConnectTarget(found.address, found.control_port, ctx, auth_key)
 
 
 def calibrate(cfg: HostConfig, seconds: float = 1.5) -> Calibration:

@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "pynput>=1.7",
+    "zeroconf>=0.132",
 ]
 
 [project.optional-dependencies]

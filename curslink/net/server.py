@@ -42,6 +42,7 @@ class HostServer:
         on_disconnect: Callable[[str], None] = lambda d: None,
         host: str = "0.0.0.0",
         port: int = 0,
+        verify_hello: Callable[[str, object, bytes | None], bool] | None = None,
     ):
         self.known_devices = known_devices
         self.ssl_context = ssl_context
@@ -49,6 +50,8 @@ class HostServer:
         self.on_disconnect = on_disconnect
         self.host = host
         self.port = port
+        # (device_id, hello.auth, TLS channel binding) -> allowed? See security.HelloVerifier.
+        self.verify_hello = verify_hello
         self.connections: dict[str, AgentConnection] = {}
         self._server: asyncio.base_events.Server | None = None
 
@@ -96,6 +99,11 @@ class HostServer:
             device_id = hello.data["device_id"]
             if device_id not in self.known_devices:
                 raise ProtocolError(f"unknown device {device_id!r}; add it to [[devices]]")
+            if self.verify_hello is not None:
+                ssl_object = writer.get_extra_info("ssl_object")
+                binding = ssl_object.get_channel_binding("tls-unique") if ssl_object else None
+                if not self.verify_hello(device_id, hello.get("auth"), binding):
+                    raise ProtocolError(f"{device_id!r} did not prove it holds that device's key")
             old = self.connections.get(device_id)
             if old is not None:
                 log.info("%s reconnected; replacing old connection", device_id)
