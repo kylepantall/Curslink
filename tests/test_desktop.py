@@ -47,6 +47,67 @@ async def test_commands_end_with_stop_when_stdin_closes():
     assert seen == ["home", "gaze pause", "stop"]
 
 
+async def test_look_commands_keep_their_json():
+    seen = []
+    done = asyncio.Event()
+
+    def handle(command):
+        seen.append(command)
+        if command == "stop":
+            done.set()
+
+    events.read_commands(asyncio.get_running_loop(), handle,
+                         io.StringIO('LOOK {"device": "Kyles_PC", "screen": "\\\\.\\DISPLAY1"}\n'))
+    await asyncio.wait_for(done.wait(), 2)
+    assert seen[0] == 'look {"device": "Kyles_PC", "screen": "\\\\.\\DISPLAY1"}'
+
+
+def test_look_command_goes_only_to_agents_that_understand_it():
+    from curslink.app import look_command
+
+    class Server:
+        def __init__(self):
+            self.connections = {"pc": object(), "old": object(), "tab": object()}
+            self.sent = []
+
+        def supports(self, device_id, feature):
+            return device_id != "old" and feature == "look"
+
+        def send(self, device_id, t, **data):
+            self.sent.append((device_id, t, data))
+
+    server = Server()
+    look_command(server, '{"device": "pc", "screen": "main", "step": "Step 1"}')
+    assert ("pc", "look", {"screen": "main", "step": "Step 1"}) in server.sent
+    assert ("tab", "look", {"hide": True}) in server.sent
+    assert not [s for s in server.sent if s[0] == "old"]
+    server.sent.clear()
+    look_command(server, '{"hide": true}')
+    assert sorted(s[0] for s in server.sent) == ["pc", "tab"]
+    look_command(server, "not json")  # ignored
+
+
+async def test_loop_bridge_adds_up_motion_and_keeps_clicks_in_order():
+    from curslink.app import LoopBridge
+
+    calls = []
+
+    class Router:
+        def on_motion(self, dx, dy):
+            calls.append(("motion", dx, dy))
+
+        def on_button(self, button, pressed):
+            calls.append(("button", button, pressed))
+
+    bridge = LoopBridge(asyncio.get_running_loop(), Router())
+    for _ in range(10):
+        bridge.on_motion(1, 2)
+    bridge.on_button("left", True)
+    bridge.on_motion(5, 0)
+    await asyncio.sleep(0.05)
+    assert calls == [("motion", 10, 20), ("button", "left", True), ("motion", 5, 0)]
+
+
 def test_host_commands_drive_the_router(layout):
     from curslink.app import host_command
     from curslink.router import Router
@@ -284,3 +345,44 @@ def test_config_edit_doesnt_recreate_a_deleted_config(tmp_path):
     cfg.set("host", "effect", "blink")
     cfg.save()
     assert load_raw(path)["host"]["effect"] == "blink"
+
+
+def test_macos_capture_reads_deltas_and_survives_a_disabled_tap(monkeypatch):
+    import types
+
+    from curslink.inputs import pynput_backend as pb
+
+    calls = []
+    fields = {pb._MAC_DELTA_X: 3, pb._MAC_DELTA_Y: -2, pb._MAC_SOURCE_PID: 0}
+    quartz = types.SimpleNamespace(
+        CGEventGetIntegerValueField=lambda event, field: event[field],
+        CGEventTapEnable=lambda tap, on: calls.append(("enable", tap, on)),
+    )
+    monkeypatch.setitem(sys.modules, "Quartz", quartz)
+
+    class Handler:
+        def on_motion(self, dx, dy):
+            calls.append(("motion", dx, dy))
+
+    capture = pb.PynputCapture()
+    capture._mac, capture._handler = True, Handler()
+    assert capture._mac_mouse_tap(5, fields) is fields  # not grabbed: the Mac gets it
+    capture._grabbed = True
+    assert capture._mac_mouse_tap(5, fields) is None
+    assert capture._mac_mouse_tap(6, {**fields, pb._MAC_SOURCE_PID: 99}) is None  # ours: no motion
+    assert capture._mac_key_tap(10, "key") is None
+    assert calls == [("motion", 3, -2)]
+
+    class Base:
+        def _create_event_tap(self):
+            return "tap"
+
+        def _handler(self, proxy, event_type, event, refcon):
+            calls.append(("pynput", event_type))
+            return event
+
+    listener = pb._mac_listener(Base)()
+    listener._create_event_tap()
+    assert listener._handler(None, 0xFFFFFFFE, None, None) is None
+    assert listener._handler(None, 5, "ev", None) == "ev"
+    assert calls[1:] == [("enable", "tap", True), ("pynput", 5)]

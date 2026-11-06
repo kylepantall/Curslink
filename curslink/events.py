@@ -8,7 +8,9 @@ confused with anything else printed there::
     @curslink {"event": "switch", "from": "desktop", "to": "laptop", ...}
 
 and reads one command per line on stdin (``home``, ``gaze pause``,
-``gaze resume``, ``gaze toggle``, ``stop``). The child stops when stdin
+``gaze resume``, ``gaze toggle``, ``stop``; on a host also ``calibrate on``,
+which frees the camera for the app's calibration, and ``look {json}``, which
+asks an agent to show or hide the calibration's "Look here" card). The child stops when stdin
 closes, so it never outlives the app that started it.
 
 Without ``--events`` nothing is printed and :func:`emit` does nothing.
@@ -25,7 +27,7 @@ from typing import Any, Callable, TextIO
 
 PREFIX = "@curslink "
 
-COMMANDS = ("home", "gaze pause", "gaze resume", "gaze toggle", "stop")
+COMMANDS = ("home", "gaze pause", "gaze resume", "gaze toggle", "calibrate on", "look {...}", "stop")
 
 
 class EventChannel:
@@ -120,6 +122,8 @@ def read_commands(loop: asyncio.AbstractEventLoop, handle: Callable[[str], None]
         try:
             for line in stream:
                 command = " ".join(line.split()).lower()
+                if command.startswith("look "):
+                    command = "look " + line.strip()[5:].strip()  # JSON: keep its case
                 if command:
                     send(command)
         except (OSError, ValueError):

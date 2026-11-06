@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import time
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QTimer, Qt
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import QHBoxLayout, QProgressBar, QVBoxLayout, QWidget
 
 from curslink.gui.camerapicker import CameraPicker
@@ -26,7 +29,7 @@ class CalibratePage(Page):
         super().__init__(
             "Calibrate gaze",
             "Look at the centre of each screen in turn so Curslink learns where it sits relative to your head. "
-            "Linking pauses while the camera is in use here.",
+            "Gaze switching pauses while the camera is in use here.",
         )
         self.app = app
         self.calibrator = None
@@ -34,6 +37,9 @@ class CalibratePage(Page):
         self.step = 0
         self.results: dict[str, tuple[float, float] | None] = {}
         self.was_linking = False
+        # Linking stayed up (gaze off) so paired computers show "Look here" too.
+        self.kept_linking = False
+        self._look_sent: str | None = None
 
         self.agent_note = label("Gaze runs on the host, the computer with the camera and the keyboard and mouse. "
                                 "Calibrate there.", "warn", wrap=True)
@@ -105,6 +111,11 @@ class CalibratePage(Page):
         self.finish()
         self.overlay = LookHere(self.overlay_record, self.cancel, self.skip)
         self.looking: str | None = None
+        # The card on another computer has no buttons: you press Space here.
+        for key, fn in ((Qt.Key.Key_Space, self.record), (Qt.Key.Key_Escape, self.escape)):
+            shortcut = QShortcut(QKeySequence(key), self)
+            shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+            shortcut.activated.connect(fn)
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.tick)
@@ -162,7 +173,14 @@ class CalibratePage(Page):
         if not self.targets:
             return
         self.was_linking = self.app.service.state in (RUNNING, STARTING)
-        if self.was_linking:
+        # Running: keep linking so the other computers can show "Look here",
+        # and ask the host to hand over the camera. Still starting: stop it.
+        self.kept_linking = self.app.service.state == RUNNING
+        self._look_sent = None
+        if self.kept_linking:
+            self.app.calibrating = False
+            self.app.service.send("calibrate on")
+        elif self.was_linking:
             self.app.stop_linking()  # the host holds the camera
         cfg = self.app.config()
         index, name = self.camera.current()
@@ -176,6 +194,8 @@ class CalibratePage(Page):
         self.state = "warming"
         self.show_state()
 
+        kept = self.kept_linking
+
         def warm():
             from curslink.gaze.tracker import default_model_path, ensure_model
 
@@ -183,6 +203,9 @@ class CalibratePage(Page):
                 call_on_main(lambda: self.show_download(0, 0))
                 ensure_model(progress=lambda done, total: call_on_main(lambda: self.show_download(done, total)))
             call_on_main(self.show_starting)
+            deadline = time.monotonic() + 8.0
+            while kept and not self.app.calibrating and time.monotonic() < deadline:
+                time.sleep(0.05)  # the host is letting go of the camera
             from curslink import macperms
 
             if not macperms.ensure_camera():
@@ -316,7 +339,20 @@ class CalibratePage(Page):
             cal, self.calibrator = self.calibrator, None
             in_background(cal.stop)
 
+    def escape(self) -> None:
+        if self.state in ("warming", "ready", "recording"):
+            self.cancel()
+
     def resume_linking(self, force: bool = False) -> None:
+        if self.kept_linking:
+            # Take the cards down, then restart linking: that brings gaze back
+            # with whatever calibration was just saved.
+            self.send_look(None)
+            self.kept_linking = self.was_linking = False
+            self._look_sent = None
+            self.app.calibrating = False
+            QTimer.singleShot(300, self.app.service.restart)
+            return
         if self.was_linking or (force and self.app.prefs.start_linking):
             QTimer.singleShot(800, self.app.start_linking)
         self.was_linking = False
@@ -388,9 +424,33 @@ class CalibratePage(Page):
             states[target.key] = st
         self.map.set_states(states)
 
+    def send_look(self, payload: dict | None) -> None:
+        """Show "Look here" on another computer (or take it down everywhere)."""
+        if not self.kept_linking:
+            return
+        text = json.dumps(payload if payload is not None else {"hide": True}, separators=(",", ":"))
+        if text == self._look_sent:
+            return
+        self._look_sent = text
+        self.app.service.send("look " + text)
+
+    def screen_os_rect(self, device_id: str, screen_id: str) -> list[int] | None:
+        try:
+            for d in self.app.config().devices():
+                if d.get("id") != device_id:
+                    continue
+                for i, s in enumerate(d.get("screens", [])):
+                    if str(s.get("id", f"screen{i}")) == screen_id:
+                        return [int(s.get("os_x", 0)), int(s.get("os_y", 0)),
+                                int(s.get("width", 0)), int(s.get("height", 0))]
+        except Exception:
+            log.debug("couldn't read the screen's position", exc_info=True)
+        return None
+
     def update_overlay(self) -> None:
         if self.state not in ("ready", "recording") or self.app.role != "host":
             self.overlay.hide()
+            self.send_look(None)
             return
         target, name = self.targets[self.step]
         try:
@@ -400,11 +460,19 @@ class CalibratePage(Page):
         step = f"Step {self.step + 1} of {len(self.targets)} · {name.split(' / ')[0]}"
         done = {i for i, (_t, n) in enumerate(self.targets) if n in self.results}
         if target.device_id == me:
+            self.send_look(None)
             self.overlay.show(target.screen_id, step, recording=self.state == "recording",
                               total=len(self.targets), current=self.step, done=done)
         else:
-            # Another computer's screen: the map and the prompt here show it.
+            # Another computer's screen: that computer shows the card (if it's
+            # linked), and the map and the prompt here show it too.
             self.overlay.hide()
+            self.send_look({
+                "device": target.device_id, "screen": target.screen_id, "step": step,
+                "recording": self.state == "recording", "total": len(self.targets),
+                "current": self.step, "done": sorted(done), "host": self.app.device_name(),
+                "os": self.screen_os_rect(target.device_id, target.screen_id),
+            })
 
     def show_state(self) -> None:
         s, n = self.state, len(self.targets)

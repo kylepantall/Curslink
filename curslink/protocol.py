@@ -59,6 +59,7 @@ MESSAGE_TYPES = frozenset(
         "ping",
         "pong",
         "facing",
+        "look",
         "bye",
         "pair_hello",
         "pair_key",
@@ -71,6 +72,10 @@ BUTTONS = frozenset({"left", "right", "middle", "x1", "x2"})
 EFFECTS = frozenset({"pop", "blink", "none"})
 # What this host understands beyond the base protocol, sent in welcome.features.
 HOST_FEATURES = ("facing",)
+# What this agent understands beyond the base protocol, sent in hello.features.
+# An agent without "look" would reject a look frame as unknown and drop the
+# connection, so the host only sends one to agents that list it.
+AGENT_FEATURES = ("look",)
 
 
 class ProtocolError(ValueError):
@@ -142,6 +147,9 @@ def _validate(msg: Message) -> None:
     elif t == "facing":
         if not isinstance(msg.data.get("facing"), bool):
             raise ProtocolError("facing.facing must be a boolean")
+    elif t == "look":
+        if msg.data.get("hide") is not True and not isinstance(msg.data.get("screen"), str):
+            raise ProtocolError("look needs a screen, or hide")
     elif t == "hello":
         if msg.data.get("v") != PROTOCOL_VERSION:
             raise ProtocolError(

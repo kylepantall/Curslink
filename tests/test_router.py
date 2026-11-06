@@ -152,7 +152,7 @@ def test_gaze_back_home_lands_where_you_left_it_not_on_the_monitor_looked_at(par
 
 
 def test_gaze_to_another_device_ignores_which_of_its_monitors(parts):
-    router, _, sink, transport, _ = parts
+    router, _, sink, _, _ = parts
     router.on_pointer(2500, 300)                # right monitor
     router.on_gaze(Target("laptop", "main"))
     router.on_gaze(Target("desktop", "left"))

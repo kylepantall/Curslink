@@ -83,6 +83,19 @@ without a camera keep the host-only behaviour, and `confirm_with_agents =
 false` in `[gaze]` turns the check off. Agents only send `facing` to a
 host that lists it in `welcome.features`, so mixed versions keep working.
 
+Gaze picks a *device*, not a monitor: looking at another computer brings
+the pointer back to wherever you left it there, and looking between the
+monitors of the device you're on does nothing (unless `[gaze]
+within_device = true`).
+
+While the desktop app calibrates, the host keeps linking but hands its
+camera to the app (`calibrate on` on the service's stdin). For a screen of
+another computer the app sends `look {...}`, and the host passes a `look`
+frame to that agent, which shows the same "Look here" card, without
+buttons, on that screen. Only agents that list `look` in `hello.features`
+get one. Afterwards the app restarts the service, which brings gaze back
+with the new calibration.
+
 Head pose, not eye tracking, was chosen for the MVP because it is robust
 on ordinary webcams at desk distance. Separate monitors are usually 20 to
 40 degrees apart, which head pose resolves well. Adding eye gaze for finer

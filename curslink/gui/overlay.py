@@ -4,6 +4,10 @@ The screen to look at is covered edge to edge in the window tint, with a
 pulsing target in the middle to look at, the step, and the buttons. The
 host's other screens are dimmed, so the eye goes to the right place.
 Space records, S skips, Esc cancels.
+
+On a paired computer the host's calibration shows the same card, without
+buttons (the keyboard and mouse are at the host), through
+:class:`RemoteLookHere`.
 """
 
 from __future__ import annotations
@@ -35,6 +39,34 @@ def qscreen_for(screen_id: str):
         if 0 <= n < len(screens):
             return screens[n]
     return None
+
+
+def find_qscreen(screen_id: str, os_rect=None):
+    """The QScreen for a layout screen of *this* computer: by id ("main",
+    "screenN"), by the OS's display name (an agent's screens are named after
+    them, like \\\\.\\DISPLAY1), or by where it sits on the desktop
+    (``os_rect`` = x, y, width, height in this computer's OS pixels)."""
+    found = qscreen_for(screen_id)
+    if found is not None:
+        return found
+    screens = QGuiApplication.screens()
+    for s in screens:
+        if s.name() == screen_id:
+            return s
+    if os_rect and len(os_rect) == 4:
+        x, y, w, h = (float(v) for v in os_rect)
+        cx, cy = x + w / 2, y + h / 2
+        for s in screens:
+            g, r = s.geometry(), s.devicePixelRatio() or 1.0
+            # Qt's geometry is in device independent pixels; the OS's may be physical.
+            for k in (1.0, r):
+                if g.x() * k <= cx < (g.x() + g.width()) * k and g.y() * k <= cy < (g.y() + g.height()) * k:
+                    return s
+        for s in screens:
+            g, r = s.geometry(), s.devicePixelRatio() or 1.0
+            if (round(g.width() * r), round(g.height() * r)) == (round(w), round(h)):
+                return s
+    return QGuiApplication.primaryScreen()
 
 
 def _tint() -> QColor:
@@ -125,11 +157,13 @@ class _Layer(QWidget):
     skip = Signal()
     cancel = Signal()
 
-    def __init__(self, screen, with_target: bool):
+    def __init__(self, screen, with_target: bool, controls: bool = True):
         super().__init__(None, Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
                          | Qt.WindowType.Tool)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, not with_target)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, not (with_target and controls))
+        if not controls:
+            self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.setGeometry(screen.geometry())
         self.with_target = with_target
         self.record_button = None
@@ -156,8 +190,12 @@ class _Layer(QWidget):
             v.addSpacing(8)
         v.addSpacing(14)
         row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(10)
         row.addStretch(1)
+        self.controls = QWidget()
+        self.controls.setLayout(row)
+        self.controls.setVisible(controls)
         self.record_button = button("Record", "primary", self.record.emit)
         self.skip_button = button("Skip this screen", None, self.skip.emit)
         cancel = button("Cancel", None, self.cancel.emit)
@@ -166,7 +204,7 @@ class _Layer(QWidget):
             b.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # Space records, whatever has focus
             row.addWidget(b)
         row.addStretch(1)
-        v.addLayout(row)
+        v.addWidget(self.controls)
         v.addSpacing(22)
         self.step = label("")
         self.step.setStyleSheet(f"color: {t['ink3']}; font-size: 12.5px;")
@@ -247,6 +285,53 @@ class LookHere:
         return True
 
     def hide(self) -> None:
+        for layer in self.layers:
+            layer.hide()
+            layer.deleteLater()
+        self.layers = []
+
+
+class RemoteLookHere:
+    """The card on a paired computer, put up and taken down by the host's
+    calibration. Nothing to press here: Space and Esc work on the host."""
+
+    def __init__(self):
+        self.layers: list[_Layer] = []
+        self.key: tuple | None = None
+
+    def apply(self, data: dict) -> None:
+        if data.get("hide") or not isinstance(data.get("screen"), str):
+            self.hide()
+            return
+        key = tuple(sorted((k, str(v)) for k, v in data.items()))
+        if key == self.key:
+            return
+        self.hide()
+        self.key = key
+        target = find_qscreen(data["screen"], data.get("os"))
+        host = str(data.get("host") or "the host")
+        for s in QGuiApplication.screens():
+            layer = _Layer(s, s is target, controls=False)
+            if s is target:
+                layer.step.setText(str(data.get("step", "")))
+                total = int(data.get("total", 0) or 0)
+                if total:
+                    done = {int(i) for i in data.get("done", []) if isinstance(i, int)}
+                    layer.set_progress(total, int(data.get("current", 0) or 0), done)
+                if data.get("recording"):
+                    layer.title.setText("Keep looking…")
+                    layer.text.setText("Recording. Hold still for a moment.")
+                else:
+                    layer.text.setText(f"Keep looking at the dot, then press Space on {host}.")
+                layer.keys.setText(f"Space on {host} records · Esc there cancels")
+            layer.show()
+            if s is target:
+                layer.raise_()
+            self.layers.append(layer)
+        log.info("look-here overlay for %s's calibration on %s", host, data["screen"])
+
+    def hide(self) -> None:
+        self.key = None
         for layer in self.layers:
             layer.hide()
             layer.deleteLater()

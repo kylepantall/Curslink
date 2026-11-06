@@ -149,6 +149,44 @@ def test_look_here_overlay_on_this_computer(qapp):
     assert hits == ["record"] and lh.layers == []
 
 
+def test_remote_look_here_shows_on_an_agent_without_buttons(desktop, qapp):
+    from curslink.gui.overlay import find_qscreen
+
+    assert find_qscreen("\\\\.\\DISPLAY9", [0, 0, 10, 10]) is not None  # falls back to a real screen
+    desktop._on_look({"event": "look", "screen": "main", "step": "Step 2 of 3 · Kyles_PC", "host": "Mac",
+                      "total": 3, "current": 1, "done": [0]})
+    look = desktop._look
+    assert len(look.layers) == len(qapp.screens())
+    target = next(layer for layer in look.layers if layer.with_target)
+    assert target.controls.isHidden() and "Space on Mac" in target.keys.text()
+    desktop._on_look({"event": "look", "hide": True})
+    assert look.layers == []
+
+
+def test_calibrating_with_linking_up_asks_the_agent_for_the_card(desktop, qapp, monkeypatch):
+    desktop.window.pages["setup"].create()
+    cfg = desktop.config()
+    cfg.add_device("laptop", "Work laptop")
+    cfg.save()
+    desktop.config_saved(restart=False)
+    page = desktop.window.pages["calibrate"]
+    page.load_targets()
+    sent = []
+    monkeypatch.setattr(desktop.service, "send", sent.append)
+    monkeypatch.setattr(desktop.service, "restart", lambda: sent.append("restart"))
+    page.kept_linking = True
+    page.state = "ready"
+    page.step = next(i for i, (t, _n) in enumerate(page.targets) if t.device_id == "laptop")
+    page.show_state()
+    assert page.overlay.layers == []  # not this computer's screen
+    look = [s for s in sent if s.startswith("look ")]
+    assert look and '"device":"laptop"' in look[-1] and '"screen":' in look[-1]
+    page.cancel()
+    qapp.processEvents()
+    assert sent[-1] == 'look {"hide":true}' or 'look {"hide":true}' in sent
+    assert not page.kept_linking
+
+
 def test_a_paired_agent_starts_hidden(desktop, qapp):
     setup = desktop.window.pages["setup"]
     setup.agent_choice.setChecked(True)
