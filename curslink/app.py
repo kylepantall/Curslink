@@ -244,6 +244,7 @@ async def run_host(cfg: HostConfig) -> None:
         relay.start()
         log.info("waiting for agents via relay %s", cfg.relay.address)
     capture.start(LoopBridge(loop, router))
+    router.blocked = input_blocked_reason()
 
     # Gaze can come from this computer's camera, the agents' own cameras,
     # or both, so the arbiter runs even when this camera is off.
@@ -298,6 +299,29 @@ async def run_host(cfg: HostConfig) -> None:
         if relay:
             await relay.close()
         await server.close()
+
+
+def input_blocked_reason():
+    """For Router.blocked: on macOS, input can't be captured (so it mustn't
+    leave this Mac) until Accessibility and Input Monitoring are allowed.
+    macOS forgets them when an update's signature changes."""
+    from curslink import macperms
+
+    if not macperms.MAC:
+        return lambda: ""
+    state = {"checked": 0.0, "why": ""}
+
+    def blocked() -> str:
+        now = time.monotonic()
+        if now - state["checked"] >= 5.0:
+            state["checked"] = now
+            missing = [k for k in (macperms.ACCESSIBILITY, macperms.INPUT_MONITORING) if not macperms.granted(k)]
+            state["why"] = ("macOS hasn't allowed " + " and ".join(m.replace("-", " ").title() for m in missing)
+                            + " for Curslink, so it can't capture the mouse and keyboard. Allow them in "
+                            "System Settings > Privacy & Security, then restart Curslink.") if missing else ""
+        return state["why"]
+
+    return blocked
 
 
 def host_command(router: Router, stop: asyncio.Event, command: str) -> None:

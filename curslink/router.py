@@ -80,6 +80,15 @@ class Router:
         self.listeners: list[Callable[[SwitchEvent], None]] = []
         # Told whenever gaze switching is paused or resumed.
         self.on_gaze_paused: Callable[[bool], None] = lambda paused: None
+        # Why input can't leave this device right now ("" = it can). On
+        # macOS without Accessibility/Input Monitoring nothing is captured,
+        # so "switching" would only move the label, not the mouse.
+        self.blocked: Callable[[], str] = lambda: ""
+        self._blocked_said = ""
+        # After coming home by gaze or a hotkey the pointer may land right on
+        # the edge it left by; it has to leave that edge before an edge push
+        # counts again, or the next pointer event bounces input straight back.
+        self._edge_armed = True
 
         first = next(iter(layout.screens(local_device_id)), None)
         if first is None:
@@ -114,7 +123,11 @@ class Router:
         self.x, self.y = screen.from_os(ox, oy)
         if not self.settings.edge_switching:
             return
-        for ex, ey in self.layout.edge_pushes(self.local_id, self.x, self.y):
+        pushes = self.layout.edge_pushes(self.local_id, self.x, self.y)
+        if not self._edge_armed:
+            self._edge_armed = not pushes
+            return
+        for ex, ey in pushes:
             crossing = self.layout.find_crossing(
                 self.local_id, self.x, self.y, ex, ey, self.settings.gap_tolerance_px
             )
@@ -223,6 +236,15 @@ class Router:
     def switch_to(self, screen: Screen, x: float, y: float, reason: str) -> None:
         old = self.active_device
         new = screen.device_id
+        if old == new and screen == self.screen and reason != "edge":
+            return  # already there: no re-entry, no animation
+        if old == self.local_id and new != self.local_id:
+            why = self.blocked()
+            if why:
+                if why != self._blocked_said:
+                    log.warning("not switching to %s: %s", new, why)
+                    self._blocked_said = why
+                return
         self._last_pos[old] = (self.x, self.y)
 
         if old != new:
@@ -243,8 +265,10 @@ class Router:
         if new == self.local_id:
             if old != new:
                 self.capture.set_grab(False)
+                self._edge_armed = reason == "edge"
             self.local_sink.move_to(ox, oy)
-            self.overlay.show(effect, ox, oy)
+            if old != new:
+                self.overlay.show(effect, ox, oy)
         else:
             if old == self.local_id:
                 self.capture.set_grab(True)

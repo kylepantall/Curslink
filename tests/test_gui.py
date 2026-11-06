@@ -318,3 +318,15 @@ def test_host_status_with_only_an_agents_camera(desktop, qapp):
     desktop.service.send = sent.append
     page.gaze_clicked(False)
     assert sent == ["gaze pause"]
+def test_switch_animation_never_takes_focus_or_clicks(qapp):
+    from PySide6.QtCore import Qt
+
+    from curslink.overlay import make_effect_widget
+
+    w = make_effect_widget("pop", 50, 50)
+    flags = w.windowFlags()
+    assert flags & Qt.WindowType.WindowDoesNotAcceptFocus
+    assert flags & Qt.WindowType.WindowTransparentForInput
+    assert w.testAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+    assert not w.isActiveWindow()
+    w.close()
