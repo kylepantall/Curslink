@@ -16,6 +16,11 @@ enabled = true               # advertise on the LAN and accept pairing requests
 port = 24851
 # store = "pairings.json"    # default: your user config folder
 
+[update]
+check = true                 # look for a newer release when host/agent start
+auto = true                  # and install it (installed builds), then restart
+prerelease = false           # include release candidates
+
 [host]
 device_id = "desktop"        # which [[devices]] entry is this machine
 listen = "0.0.0.0"
