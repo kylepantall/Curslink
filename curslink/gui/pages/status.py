@@ -160,7 +160,11 @@ class StatusPage(Page):
             except Exception:
                 self.mini.set_screens([])
             if state == RUNNING and status.active:
-                self.mini.set_states({f"{status.active}/{status.screen}": {"active"}})
+                states = {f"{status.active}/{status.screen}": {"active"}}
+                looking = status.looking()
+                if looking:
+                    states.setdefault(looking, set()).add("looking")
+                self.mini.set_states(states)
             else:
                 self.mini.set_states({})
             self.eyebrow.setText("KEYBOARD AND MOUSE ARE ON")

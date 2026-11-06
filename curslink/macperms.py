@@ -4,6 +4,9 @@
   keyboard and mouse (host).
 * Input Monitoring: to watch the keyboard and mouse (host).
 * Camera: for gaze switching (host). Checked and asked through AVFoundation.
+* Local Network: to find and reach the other computers (both). macOS has no
+  API to ask, so Curslink sends one mDNS packet: macOS refuses it with "No
+  route to host" while access is off, and shows its prompt the first time.
 
 Both belong to the Curslink executable, which the app and its linking
 service share, so asking from the app covers the service too. The service
@@ -28,11 +31,13 @@ MAC = sys.platform == "darwin"
 ACCESSIBILITY = "accessibility"
 INPUT_MONITORING = "input-monitoring"
 CAMERA = "camera"
+LOCAL_NETWORK = "local-network"
 
 _SETTINGS_URL = {
     ACCESSIBILITY: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
     INPUT_MONITORING: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent",
     CAMERA: "x-apple.systempreferences:com.apple.preference.security?Privacy_Camera",
+    LOCAL_NETWORK: "x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork",
 }
 
 _kIOHIDRequestTypeListenEvent = 1
@@ -56,6 +61,9 @@ PERMISSIONS = {
     CAMERA: Permission(
         CAMERA, "Camera",
         "Lets Curslink see which screen you're looking at. The picture never leaves this computer."),
+    LOCAL_NETWORK: Permission(
+        LOCAL_NETWORK, "Local Network",
+        "Lets Curslink find your other computers on this network and pair with them."),
 }
 
 
@@ -64,7 +72,9 @@ def needed(role: str | None) -> list[str]:
     if not MAC:
         return []
     # The host runs gaze switching, so it needs the camera too.
-    return [ACCESSIBILITY, INPUT_MONITORING, CAMERA] if role == "host" else [ACCESSIBILITY]
+    if role == "host":
+        return [ACCESSIBILITY, INPUT_MONITORING, CAMERA, LOCAL_NETWORK]
+    return [ACCESSIBILITY, LOCAL_NETWORK]
 
 
 def _lib(path: str):
@@ -94,6 +104,8 @@ def granted(key: str) -> bool:
             return fn(_kIOHIDRequestTypeListenEvent) == _kIOHIDAccessTypeGranted
         if key == CAMERA:
             return _camera_status() == _AV_AUTHORIZED
+        if key == LOCAL_NETWORK:
+            return _local_network_ok()
     except Exception:
         log.warning("couldn't check the %s permission", key, exc_info=True)
         return True  # can't tell: don't nag
@@ -142,6 +154,9 @@ def request(key: str) -> None:
             fn.restype = ctypes.c_bool
             fn.argtypes = [ctypes.c_uint32]
             fn(_kIOHIDRequestTypeListenEvent)
+        elif key == LOCAL_NETWORK:
+            if _local_network_ok():  # the first try shows macOS's prompt
+                return
         elif key == CAMERA and _camera_status() == _AV_NOT_DETERMINED:
             # First time: macOS shows its own prompt, no need for Settings.
             _request_camera()
@@ -160,14 +175,68 @@ def _camera_status() -> int:
     return int(AVFoundation.AVCaptureDevice.authorizationStatusForMediaType_(AVFoundation.AVMediaTypeVideo))
 
 
-def _request_camera() -> None:
+def _request_camera():
+    import threading
+
     import AVFoundation
+
+    done = threading.Event()
 
     def answered(ok):
         log.info("camera access %s", "allowed" if ok else "refused")
+        done.set()
 
     AVFoundation.AVCaptureDevice.requestAccessForMediaType_completionHandler_(
         AVFoundation.AVMediaTypeVideo, answered)
+    return done
+
+
+def ensure_camera(timeout: float = 60.0) -> bool:
+    """Before opening the camera: if macOS hasn't asked yet, ask and wait
+    for the answer. (OpenCV fails at once while the prompt is still up.)"""
+    if not MAC:
+        return True
+    try:
+        status = _camera_status()
+        if status == _AV_NOT_DETERMINED:
+            _request_camera().wait(timeout)
+            status = _camera_status()
+        return status == _AV_AUTHORIZED
+    except Exception:
+        log.warning("couldn't check camera access", exc_info=True)
+        return True
+
+
+# An mDNS query with no questions: harmless, and enough for macOS to decide.
+_MDNS_PROBE = bytes(12)
+
+
+def _local_network_ok() -> bool:
+    import errno
+    import socket
+
+    from curslink.pairing.discovery import local_addresses
+
+    addresses = local_addresses()
+    if not addresses:
+        return True  # no network at all: not a permission problem
+    blocked = 0
+    for addr in addresses:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(addr))
+            sock.sendto(_MDNS_PROBE, ("224.0.0.251", 5353))
+            return True
+        except OSError as exc:
+            if exc.errno in (errno.EHOSTUNREACH, errno.EPERM, errno.EACCES):
+                blocked += 1
+            # anything else is network trouble on that address, not the permission
+        finally:
+            sock.close()
+    if not blocked:
+        return True
+    log.info("Local Network access looks off: mDNS refused on %d of %d address(es)", blocked, len(addresses))
+    return False
 
 
 def open_settings(key: str) -> None:

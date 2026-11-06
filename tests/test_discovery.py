@@ -17,6 +17,36 @@ def test_found_from_txt_record():
     f = found_from_info(info({"id": "desk", "name": "Desk", "role": "host", "cport": "24850"}))
     assert (f.device_id, f.name, f.role, f.address, f.pairing_port, f.control_port) == (
         "desk", "Desk", "host", "192.168.1.20", 24851, 24850)
+    assert f.host == "x.local"
+
+
+def test_looking_reporter_says_when_the_screen_changes(monkeypatch):
+    from curslink import app, events
+    from curslink.gaze.zones import Target
+
+    sent = []
+    monkeypatch.setattr(events, "emit", lambda kind, **data: sent.append((kind, data)))
+
+    class Classifier:
+        class settings:
+            max_distance_deg = 20.0
+
+        def nearest(self, yaw, pitch):
+            return (Target("desk", "main"), abs(yaw)) if yaw < 15 else (Target("laptop", "screen1"), abs(yaw - 30))
+
+    r = app.LookingReporter(Classifier())
+    r.sample(0, 0)
+    r.sample(1, 0)  # same screen, within a second: nothing new
+    r.sample(30, 0)
+    r.sample(80, 0)  # far from every screen
+    assert [d["screen"] for _k, d in sent] == ["desk/main", "laptop/screen1", ""]
+
+
+def test_firewall_check_is_a_no_op_off_windows():
+    from curslink import winfirewall
+
+    if not winfirewall.WINDOWS:
+        assert winfirewall.status() == "ok" and winfirewall.allow()
 
 
 def test_unusable_adverts_are_ignored():

@@ -260,13 +260,38 @@ def start_gaze(cfg: HostConfig, router: Router, loop: asyncio.AbstractEventLoop,
     if server is not None:
         wire_agent_cameras(server, arbiter)
 
+    looking = LookingReporter(arbiter.classifier)
+
+    def on_sample(t: float, yaw: float, pitch: float) -> None:
+        arbiter.on_sample(t, yaw, pitch)
+        looking.sample(yaw, pitch)
+
     tracker = HeadPoseTracker(
-        lambda t, yaw, pitch: loop.call_soon_threadsafe(arbiter.on_sample, t, yaw, pitch),
+        lambda t, yaw, pitch: loop.call_soon_threadsafe(on_sample, t, yaw, pitch),
         camera=resolve(cfg.gaze.camera, cfg.gaze.camera_name),
         preview=cfg.gaze.preview,
     )
     tracker.start()
     return tracker
+
+
+class LookingReporter:
+    """Tells the desktop app which screen the camera thinks you're looking
+    at, so the screen maps can light it up live. Sent when it changes and
+    once a second besides (the app clears it when these stop)."""
+
+    def __init__(self, classifier):
+        self.classifier = classifier
+        self.key: str | None = None
+        self.sent = 0.0
+
+    def sample(self, yaw: float, pitch: float) -> None:
+        target, d = self.classifier.nearest(yaw, pitch)
+        key = f"{target.device_id}/{target.screen_id}" if d <= self.classifier.settings.max_distance_deg else ""
+        now = time.monotonic()
+        if key != self.key or now - self.sent >= 1.0:
+            self.key, self.sent = key, now
+            events.emit("looking", screen=key)
 
 
 def make_arbiter(cfg: HostConfig, router: Router) -> GazeArbiter:

@@ -13,6 +13,8 @@
   <key>LSMinimumSystemVersion</key><string>12.0</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSLocalNetworkUsageDescription</key><string>Curslink finds and connects to your other computers on this network.</string>
+  <key>NSBonjourServices</key><array><string>_curslink._tcp</string></array>
   <key>NSCameraUsageDescription</key><string>Curslink uses the camera to see which screen you're looking at.</string>
 </dict>
 </plist>

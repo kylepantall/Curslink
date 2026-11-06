@@ -87,8 +87,12 @@ class SettingsPage(Page):
             b.setProperty("effect", key)
             self.effect_group.addButton(b)
             effects.addWidget(b)
+        self.preview_button = button("Preview", None, self.preview_effect)
+        self.preview_button.setToolTip("Play the animation here, the way it looks when the pointer switches")
+        effects.addSpacing(8)
+        effects.addWidget(self.preview_button)
         effects.addStretch(1)
-        self.effect_group.buttonClicked.connect(lambda b: self.set_config("host", "effect", b.property("effect")))
+        self.effect_group.buttonClicked.connect(self.pick_effect)
         grid.addLayout(effects, 1, 0)
 
         grid.addWidget(label("Camera", "small"), 0, 1)
@@ -246,6 +250,24 @@ class SettingsPage(Page):
     def set_theme(self, mode: str) -> None:
         self.set_pref("theme", mode)
         theme.manager().set_mode(mode)
+
+    def pick_effect(self, b) -> None:
+        self.set_config("host", "effect", b.property("effect"))
+        self.preview_effect()
+
+    def preview_effect(self) -> None:
+        """Play the chosen switch animation over the middle of this window."""
+        b = self.effect_group.checkedButton()
+        effect = b.property("effect") if b else "pop"
+        self.preview_button.setEnabled(effect != "none")
+        if effect == "none":
+            return
+        if getattr(self, "_overlay", None) is None:
+            from curslink.overlay import OverlayProcess
+
+            self._overlay = OverlayProcess()
+        c = self.window().frameGeometry().center()
+        self._overlay.show(effect, c.x(), c.y())
 
     def set_camera(self, index: int, name: str) -> None:
         if self._loading:

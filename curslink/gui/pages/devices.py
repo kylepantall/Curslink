@@ -103,6 +103,19 @@ class DevicesPage(Page):
         self.message.hide()
         self.add(self.message)
 
+        self.firewall = Card(rows=True)
+        self.firewall.setObjectName("accentCard")
+        self.firewall.add_row(
+            text_block("Windows Firewall is hiding this PC",
+                       "Other computers can't find or pair with Curslink here until it's allowed through. "
+                       "Windows will ask for permission."),
+            button("Allow on my network", "primary", self.allow_firewall))
+        self.firewall.hide()
+        self.add(self.firewall)
+
+        self.this = Card("This computer", rows=True)
+        self.add(self.this)
+
         self.paired = Card("Paired with this computer", rows=True)
         self.add(self.paired)
 
@@ -150,12 +163,55 @@ class DevicesPage(Page):
     # -- lists --------------------------------------------------------------
     def shown(self) -> None:
         self.refresh()
+        self.check_firewall()
         if not self.found and self.pairing is None:
             self.search()
+
+    def draw_this(self) -> None:
+        from curslink.pairing.discovery import local_addresses, local_hostname
+
+        self.this.clear_rows()
+        try:
+            me, pairing = self.me()
+        except Exception:
+            return
+        port = getattr(pairing, "port", None)
+        ips = ", ".join(local_addresses()) or "no network address"
+        self.this.add_row(
+            text_block(me.name, f"{me.role.title()} · {local_hostname()} · id {me.device_id}"),
+            label(ips + (f" · port {port}" if port else ""), "mono"))
+
+    def check_firewall(self) -> None:
+        from curslink import winfirewall
+
+        if not winfirewall.WINDOWS or getattr(self, "_fw_checking", False):
+            return
+        self._fw_checking = True
+
+        def done(state):
+            self._fw_checking = False
+            self.firewall.setVisible(state == "blocked")
+
+        def failed(_exc):
+            self._fw_checking = False
+
+        in_background(winfirewall.status, done, failed, name="curslink-firewall")
+
+    def allow_firewall(self) -> None:
+        from curslink import winfirewall
+
+        if winfirewall.allow():
+            self.say("Allowed. Give it a few seconds, then press Search again on the other computer.", ok=True)
+            QTimer.singleShot(4000, self.check_firewall)
+            if self.app.linking:
+                self.app.service.restart()
+        else:
+            self.say("Windows didn't make the change. Press Allow again and choose Yes when Windows asks.")
 
     def refresh(self) -> None:
         if not self.app.has_config():
             return
+        self.draw_this()
         self.paired.clear_rows()
         try:
             store = self.store()
@@ -193,16 +249,22 @@ class DevicesPage(Page):
         for f in want:
             already = f.device_id in paired
             self.nearby.add_row(
-                text_block(f.name, f"{f.role.title()} · {'paired' if already else 'not paired'}"),
+                text_block(f.name, " · ".join(x for x in (f.role.title(), f.host,
+                                                          "paired" if already else "not paired") if x)),
                 label(f.address, "mono"),
                 button("Pair again" if already else "Pair", None if already else "primary",
                        lambda _=False, found=f: self.pair_with(found.address, found.pairing_port, found.name)),
             )
         if not want:
+            import sys
+
             other = "agents" if me.role == "host" else "hosts"
-            self.nearby.rows.addWidget(EmptyState(
-                "searching", f"Looking for {other}…",
-                "Open Curslink on the other computer, on the same network.", size=(120, 90)))
+            hint = "Open Curslink on the other computer, on the same network."
+            if sys.platform == "darwin":
+                hint += (" On a Mac, check Curslink is on in System Settings › Privacy & Security › "
+                         "Local Network.")
+            hint += " Or pair by address below: each computer shows its address under This computer."
+            self.nearby.rows.addWidget(EmptyState("searching", f"Looking for {other}…", hint, size=(120, 90)))
 
     def search(self) -> None:
         from curslink.pairing.discovery import browse

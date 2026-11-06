@@ -34,6 +34,7 @@ class Found:
     pairing_port: int
     control_port: int | None = None
     service: str = field(default="", compare=False)
+    host: str = field(default="", compare=False)  # its .local name, e.g. "kyles-pc.local"
 
     @property
     def address(self) -> str:
@@ -65,6 +66,7 @@ def found_from_info(info) -> Found | None:
         pairing_port=info.port,
         control_port=int(cport) if cport.isdigit() else None,
         service=info.name,
+        host=(info.server or "").rstrip("."),
     )
 
 
@@ -83,6 +85,12 @@ def local_addresses() -> list[str]:
             if not (addr.is_loopback or addr.is_link_local):
                 out.append(ip.ip)
     return out
+
+
+def local_hostname() -> str:
+    """This machine's mDNS name, e.g. "kyles-pc.local"."""
+    host = re.sub(r"[^A-Za-z0-9-]", "-", socket.gethostname().split(".")[0]) or "curslink"
+    return f"{host}.local"
 
 
 def _instance_name(me: DeviceInfo) -> str:
@@ -107,19 +115,20 @@ class Advertiser:
         props = {"id": self.me.device_id, "name": self.me.name, "role": self.me.role, "v": str(PAIRING_VERSION)}
         if self.control_port:
             props["cport"] = str(self.control_port)
-        host = re.sub(r"[^A-Za-z0-9-]", "-", socket.gethostname().split(".")[0]) or "curslink"
+        addresses = local_addresses()
         self._info = ServiceInfo(
             SERVICE_TYPE,
             _instance_name(self.me),
             port=self.pairing_port,
             properties=props,
-            server=f"{host}.local.",
-            parsed_addresses=local_addresses(),
+            server=f"{local_hostname()}.",
+            parsed_addresses=addresses,
         )
         self._zc = AsyncZeroconf()
         # allow_name_change: two devices with the same display name still both show up.
         await self._zc.async_register_service(self._info, allow_name_change=True)
-        log.info("advertising %s on the LAN for pairing (port %d)", self.me.name, self.pairing_port)
+        log.info("advertising %s on the LAN for pairing (port %d) as %s, %s", self.me.name, self.pairing_port,
+                 local_hostname(), ", ".join(addresses) or "no LAN address")
 
     async def close(self) -> None:
         if self._zc is None:
@@ -142,6 +151,8 @@ async def browse(timeout: float = 3.0, exclude: str | None = None) -> list[Found
         if state_change in (ServiceStateChange.Added, ServiceStateChange.Updated):
             names.add(name)
 
+    log.info("discovery: looking for Curslink devices for %.0fs from %s (%s)", timeout, local_hostname(),
+             ", ".join(local_addresses()) or "no LAN address")
     azc = AsyncZeroconf()
     browser = AsyncServiceBrowser(azc.zeroconf, [SERVICE_TYPE], handlers=[on_change])
     try:
@@ -154,8 +165,17 @@ async def browse(timeout: float = 3.0, exclude: str | None = None) -> list[Found
     found: dict[str, Found] = {}
     for info in infos:
         item = found_from_info(info)
-        if item and item.device_id != exclude:
+        if item is None:
+            log.info("discovery: %s answered but didn't resolve to a usable address", info.name)
+        elif item.device_id != exclude:
             found.setdefault(item.device_id, item)
+    if found:
+        log.info("discovery: found %s", "; ".join(
+            f"{f.name} ({f.role}, {f.host or '?'}, {', '.join(f.addresses)})" for f in found.values()))
+    else:
+        log.info("discovery: found nothing (%d answer(s), including this device's own). If the other "
+                 "computer is running Curslink, a firewall or macOS Local Network access is likely "
+                 "blocking mDNS (UDP 5353)", len(names))
     return sorted(found.values(), key=lambda f: (f.role != "host", f.name.lower()))
 
 

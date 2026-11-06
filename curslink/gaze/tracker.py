@@ -168,6 +168,15 @@ class HeadPoseTracker:
         opened = time.monotonic()
         log.info("camera %s: opening", self.camera)
         cap = cv2.VideoCapture(self.camera)
+        for attempt in range(3):
+            # Just freed by the linking service, or macOS's camera prompt just
+            # answered: it can take a moment to open.
+            if cap.isOpened() or self._stop.is_set():
+                break
+            cap.release()
+            log.info("camera %s: not free yet, trying again (%d)", self.camera, attempt + 1)
+            time.sleep(1.0)
+            cap = cv2.VideoCapture(self.camera)
         if not cap.isOpened():
             estimator.close()
             log.error("camera %s: couldn't open it (in use by another app, unplugged, or no camera permission)",

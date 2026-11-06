@@ -492,8 +492,29 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _keep_matplotlib_cache() -> None:
+    """MediaPipe imports matplotlib, and the packaged app's matplotlib gets a
+    new temporary config folder each launch, so it rebuilt its font cache
+    (several seconds) every time. Point it at a folder that lasts."""
+    if not getattr(sys, "frozen", False):
+        return
+    import os
+
+    from curslink.diagnostics import log_dir
+
+    folder = log_dir().parent / "matplotlib" if sys.platform != "darwin" else (
+        Path.home() / "Library" / "Caches" / "Curslink" / "matplotlib")
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        os.environ["MPLCONFIGDIR"] = str(folder)
+        os.environ.setdefault("MPLBACKEND", "Agg")
+    except OSError:
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
+    _keep_matplotlib_cache()
     if argv[:1] == ["_overlay-helper"]:
         # The packaged app re-runs itself as the animation helper (see overlay.py).
         from curslink.overlay import run_helper
