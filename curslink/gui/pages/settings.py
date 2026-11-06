@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import sys
+import time
+from pathlib import Path
 
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QButtonGroup, QGridLayout, QHBoxLayout, QLineEdit, QSlider, QSpinBox, QVBoxLayout
+from PySide6.QtWidgets import QButtonGroup, QFileDialog, QGridLayout, QHBoxLayout, QLineEdit, QSlider, QSpinBox, QVBoxLayout
 
-from curslink import __version__
+from curslink import __version__, diagnostics
 from curslink.autostart import Autostart
 from curslink.gui.widgets import Card, Page, Toggle, button, label, text_block
 
@@ -136,6 +138,21 @@ class SettingsPage(Page):
         files.body.addLayout(row)
         files.body.addWidget(label("The command line reads the same file: curslink host -c <that file>.", "small"))
         self.add(files)
+
+        # -- diagnostics ------------------------------------------------------------
+        diag = Card("Diagnostics")
+        self.log_text = label("", "mono", wrap=True)
+        diag.body.addWidget(self.log_text)
+        self.crash_text = label("", "small", wrap=True)
+        diag.body.addWidget(self.crash_text)
+        row = QHBoxLayout()
+        row.addWidget(button("Open the logs folder", None, self.open_logs))
+        row.addWidget(button("Save a diagnostics file…", None, self.save_bundle))
+        row.addStretch(1)
+        diag.body.addLayout(row)
+        diag.body.addWidget(label("Send the diagnostics file with a bug report. It has the logs and crash reports, "
+                                  "not your pairing keys.", "small", wrap=True))
+        self.add(diag)
         self.finish()
 
         app.config_changed.connect(self.load)
@@ -144,6 +161,16 @@ class SettingsPage(Page):
 
     def shown(self) -> None:
         self.load()
+        self.load_diagnostics()
+
+    def load_diagnostics(self) -> None:
+        self.log_text.setText(str(diagnostics.current_log_file() or diagnostics.log_dir()))
+        crashes = diagnostics.crash_reports()
+        if crashes:
+            when = time.strftime("%d %b %Y %H:%M", time.localtime(crashes[0].stat().st_mtime))
+            self.crash_text.setText(f"{len(crashes)} crash report{'s' * (len(crashes) != 1)}, the latest from {when}.")
+        else:
+            self.crash_text.setText("No crash reports.")
 
     def load(self) -> None:
         if not self.app.has_config():
@@ -251,6 +278,23 @@ class SettingsPage(Page):
             self.install_button.setEnabled(True)
 
         self.app.install_update(on_error=failed)
+
+    def open_logs(self) -> None:
+        folder = diagnostics.log_dir()
+        folder.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+
+    def save_bundle(self) -> None:
+        start = str(Path.home() / "Desktop" / diagnostics.bundle_name())
+        path, _ = QFileDialog.getSaveFileName(self, "Save diagnostics", start, "Zip files (*.zip)")
+        if not path:
+            return
+        try:
+            diagnostics.write_bundle(Path(path))
+        except OSError as exc:
+            self.crash_text.setText(f"Couldn't save it: {exc}")
+            return
+        self.crash_text.setText(f"Saved {path}")
 
     def open_folder(self) -> None:
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.app.config_path.parent)))

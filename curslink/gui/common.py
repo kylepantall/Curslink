@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import collections
+import logging
 import threading
 import time
 from dataclasses import dataclass, field
@@ -10,9 +11,11 @@ from importlib import resources
 from pathlib import Path
 from typing import Any, Callable
 
-from PySide6.QtCore import QByteArray, QObject, QPointF, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QByteArray, QCoreApplication, QObject, QPointF, QRectF, QSize, Qt, QThread, Signal, Slot
 from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
+
+log = logging.getLogger(__name__)
 
 # The mockup's palette (see the "Curslink desktop app" design canvas).
 NAVY = "#0F1B2D"
@@ -122,30 +125,80 @@ class Status(QObject):
 
 # --------------------------------------------------------- background work
 
-class _Relay(QObject):
-    done = Signal(object)
-    failed = Signal(object)
+class _MainThread(QObject):
+    """Runs callables on the Qt thread for code on other threads.
+
+    One long-lived instance owns every hand-over. Worker threads never own,
+    create or drop a QObject: an earlier version made a QObject per task and
+    let the worker thread free it when the thread ended, which deleted it on
+    the wrong thread while its queued signal was still being delivered (a
+    segfault in Shiboken's ``cppPointer`` from ``QObjectWrapper::event``).
+    """
+
+    _call = Signal(object)
+
+    def __init__(self, parent: QObject | None = None):
+        super().__init__(parent)
+        self._call.connect(self._run, Qt.ConnectionType.QueuedConnection)
+
+    @Slot(object)
+    def _run(self, fn: Callable[[], Any]) -> None:
+        try:
+            fn()
+        except Exception:  # a bug in a callback mustn't take the app down
+            log.exception("callback on the Qt thread failed")
+
+    def post(self, fn: Callable[[], Any]) -> None:
+        self._call.emit(fn)
+
+
+_main: _MainThread | None = None
+
+
+def main_thread() -> _MainThread:
+    """The hand-over object. Created on first use, which must be on the Qt thread."""
+    global _main
+    if _main is None:
+        app = QCoreApplication.instance()
+        if app is None or QThread.currentThread() is not app.thread():
+            raise RuntimeError("main_thread() must first be called on the Qt thread")
+        _main = _MainThread(app)
+        _main.destroyed.connect(_forget_main)
+    return _main
+
+
+def _forget_main(*_args) -> None:
+    global _main
+    _main = None
+
+
+def call_on_main(fn: Callable[[], Any]) -> None:
+    """Run ``fn`` on the Qt thread soon. Safe to call from any thread."""
+    main_thread().post(fn)
 
 
 def in_background(fn: Callable[[], Any], on_done: Callable[[Any], None] | None = None,
-                  on_error: Callable[[BaseException], None] | None = None) -> threading.Thread:
-    """Run ``fn`` on a thread; ``on_done``/``on_error`` run back on the Qt thread."""
-    relay = _Relay()
-    if on_done:
-        relay.done.connect(on_done)
-    if on_error:
-        relay.failed.connect(on_error)
+                  on_error: Callable[[BaseException], None] | None = None,
+                  name: str = "curslink-task") -> threading.Thread:
+    """Run ``fn`` on a thread; ``on_done``/``on_error`` run back on the Qt thread.
+
+    Call from the Qt thread.
+    """
+    main = main_thread()
 
     def run() -> None:
         try:
             result = fn()
         except BaseException as exc:  # handed to on_error
-            relay.failed.emit(exc)
+            if on_error is not None:
+                main.post(lambda err=exc: on_error(err))  # ``exc`` is unbound after except
+            else:
+                log.warning("background task %s failed", name, exc_info=exc)
         else:
-            relay.done.emit(result)
+            if on_done is not None:
+                main.post(lambda: on_done(result))
 
-    thread = threading.Thread(target=run, daemon=True)
-    thread._relay = relay  # keep it alive as long as the thread
+    thread = threading.Thread(target=run, name=name, daemon=True)
     thread.start()
     return thread
 

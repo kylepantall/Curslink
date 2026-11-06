@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import QHBoxLayout, QSpinBox, QVBoxLayout, QWidget
@@ -9,6 +11,8 @@ from PySide6.QtWidgets import QHBoxLayout, QSpinBox, QVBoxLayout, QWidget
 from curslink.gui.common import ACCENT_BRIGHT, NAVY, NAVY_2, in_background
 from curslink.gui.service import RUNNING, STARTING
 from curslink.gui.widgets import Card, Page, button, clear_layout, label
+
+log = logging.getLogger(__name__)
 
 YAW_RANGE, PITCH_RANGE = 50.0, 32.0
 
@@ -262,6 +266,7 @@ class CalibratePage(Page):
         self.resume_linking(force=True)
 
     def failed(self, exc) -> None:
+        log.warning("calibration stopped: %s", exc, exc_info=exc if not isinstance(exc, RuntimeError) else None)
         self.stop_camera()
         self.state, self.message = "error", str(exc)
         self.show_state()

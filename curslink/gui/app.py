@@ -13,14 +13,14 @@ import logging
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QTimer, Signal
+from PySide6.QtCore import QObject, QTimer, Signal, qInstallMessageHandler, qVersion
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from curslink import __version__, update
+from curslink import __version__, diagnostics, update
 from curslink.config import ConfigError, agent_config, host_config, load_raw
 from curslink.configedit import ConfigFile
-from curslink.gui.common import STYLE, Status, app_icon, in_background
+from curslink.gui.common import STYLE, Status, app_icon, call_on_main, in_background, main_thread
 from curslink.gui.prefs import Prefs
 from curslink.gui.service import FAILED, RUNNING, STARTING, STOPPED, Service
 
@@ -54,6 +54,8 @@ class Curslink(QObject):
         self.quitting = False
         self.window = None
         self.tray = None
+        diagnostics.on_crash(lambda path: call_on_main(
+            lambda: self.status.add_log("error", f"Something went wrong; a report was saved to {path}")))
 
     # -- the config file ----------------------------------------------------
     @property
@@ -220,6 +222,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="curslink gui", description="Open the Curslink app.")
     parser.add_argument("--minimized", action="store_true", help="start in the tray without opening the window")
     parser.add_argument("-c", "--config", help="use this curslink.toml (remembered for next time)")
+    parser.add_argument("-v", "--verbose", action="store_true", help="log at debug level")
     args, qt_args = parser.parse_known_args(argv if argv is not None else [])
 
     qt = QApplication.instance() or QApplication([sys.argv[0], *qt_args])
@@ -236,6 +239,12 @@ def main(argv: list[str] | None = None) -> int:
     name = instance_name()
     if _already_running(name):
         return 0
+
+    # Only the copy that stays running owns the log files.
+    diagnostics.setup("gui", verbose=args.verbose)
+    qInstallMessageHandler(diagnostics.qt_message_handler)
+    main_thread()  # created on the Qt thread before any worker needs it
+    log.info("Qt %s, platform plugin %s", qVersion(), qt.platformName())
 
     prefs = Prefs.load()
     if args.config:
@@ -266,11 +275,17 @@ def main(argv: list[str] | None = None) -> int:
             "There's no system tray here, so Curslink stays open in a window. "
             "Minimise it to keep it out of the way.",
         )
+    crashed = diagnostics.last_native_crash()
+    if crashed is not None and tray_ok:
+        QTimer.singleShot(1500, lambda: app.tray.say(
+            "Curslink closed unexpectedly last time",
+            "A crash report was saved. Settings > Diagnostics has it."))
     QTimer.singleShot(4000, app.check_for_update)
     daily = QTimer(app)
     daily.timeout.connect(app.check_for_update)
     daily.start(24 * 3600 * 1000)
 
     code = qt.exec()
+    log.info("quitting (exit code %s)", code)
     app.service.stop()
     return code

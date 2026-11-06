@@ -6,32 +6,28 @@ import asyncio
 import threading
 import time
 
-from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QHBoxLayout, QLineEdit, QMessageBox, QVBoxLayout
 
 from curslink.config import agent_config, host_config
-from curslink.gui.common import in_background
+from curslink.gui.common import call_on_main, in_background, main_thread
 from curslink.gui.widgets import Card, Page, button, label, pill, text_block
-
-
-class _PairSignals(QObject):
-    code = Signal(str, str)      # code, peer name
-    finished = Signal(object)    # PairingResult
-    failed = Signal(str)
 
 
 class Pairing:
     """One outgoing pairing attempt, on its own thread and event loop."""
 
-    def __init__(self, me, address: str, port: int):
+    def __init__(self, me, address: str, port: int, on_code, on_finished, on_failed):
         self.me, self.address, self.port = me, address, port
-        self.signals = _PairSignals()
+        # Called on the Qt thread: on_code(code, peer_name), on_finished(PairingResult),
+        # on_failed(message). No QObject lives here, so nothing Qt is freed off-thread.
+        self.on_code, self.on_finished, self.on_failed = on_code, on_finished, on_failed
+        main_thread()  # made here, on the Qt thread, before the worker needs it
         self._loop: asyncio.AbstractEventLoop | None = None
         self._task: asyncio.Task | None = None
         self.cancelled = False
 
     def start(self) -> None:
-        threading.Thread(target=self._run, daemon=True).start()
+        threading.Thread(target=self._run, name="curslink-pairing", daemon=True).start()
 
     def cancel(self) -> None:
         self.cancelled = True
@@ -42,6 +38,9 @@ class Pairing:
             except RuntimeError:
                 pass
 
+    def _fail(self, message: str) -> None:
+        call_on_main(lambda: self.on_failed(message))
+
     def _run(self) -> None:
         from curslink.pairing.handshake import PairingError, initiate
 
@@ -49,7 +48,7 @@ class Pairing:
             reader, writer = await asyncio.wait_for(asyncio.open_connection(self.address, self.port), 5)
             try:
                 return await initiate(reader, writer, self.me,
-                                      lambda code, peer: self.signals.code.emit(code, peer.name))
+                                      lambda code, peer: call_on_main(lambda: self.on_code(code, peer.name)))
             finally:
                 writer.close()
 
@@ -62,15 +61,15 @@ class Pairing:
         try:
             result = loop.run_until_complete(main())
         except asyncio.CancelledError:
-            self.signals.failed.emit("")
+            self._fail("")
         except PairingError as exc:
-            self.signals.failed.emit(f"Pairing failed: {exc}")
+            self._fail(f"Pairing failed: {exc}")
         except (OSError, asyncio.TimeoutError) as exc:
-            self.signals.failed.emit(f"Couldn't reach {self.address}: {exc or 'timed out'}")
+            self._fail(f"Couldn't reach {self.address}: {exc or 'timed out'}")
         except Exception as exc:  # a bug, but don't take the app down
-            self.signals.failed.emit(f"Pairing failed: {exc}")
+            self._fail(f"Pairing failed: {exc}")
         else:
-            self.signals.finished.emit(result)
+            call_on_main(lambda: self.on_finished(result))
         finally:
             loop.close()
 
@@ -242,10 +241,7 @@ class DevicesPage(Page):
         self.code.setText("")
         self.code_hint.hide()
         self.code_card.show()
-        self.pairing = Pairing(me, address, port)
-        self.pairing.signals.code.connect(self.show_code)
-        self.pairing.signals.finished.connect(self.paired_ok)
-        self.pairing.signals.failed.connect(self.pair_failed)
+        self.pairing = Pairing(me, address, port, self.show_code, self.paired_ok, self.pair_failed)
         self.pairing.start()
 
     def show_code(self, code: str, peer: str) -> None:

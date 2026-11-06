@@ -96,9 +96,11 @@ class Service(QObject):
             )
         except OSError as exc:
             self.error = f"Couldn't start Curslink: {exc}"
+            log.error("couldn't start %s: %s", role, exc)
             self._set_state(FAILED)
             return
         self._started_at = time.monotonic()
+        log.info("started %s (pid %s): %s", role, self._proc.pid, " ".join(service_command(role, self.config)))
         self._set_state(STARTING)
         proc = self._proc
         threading.Thread(target=self._pump, args=(proc,), name="curslink-service-out", daemon=True).start()
@@ -152,6 +154,7 @@ class Service(QObject):
         event = events.parse(line)
         if event is None:
             if line.strip():
+                log.info("%s: %s", self.role or "service", line)
                 self.tail.append(line)
                 self.output.emit(line)
             return
@@ -164,6 +167,12 @@ class Service(QObject):
     def _on_exit(self, code: int) -> None:
         up_for = time.monotonic() - self._started_at
         self._proc = None
+        if self._stopping or code == 0:
+            log.info("%s exited (code %s) after %.0fs", self.role, code, up_for)
+        else:
+            how = f"signal {-code}" if code < 0 else f"exit code {code}"
+            log.error("%s died (%s) after %.0fs; last output:\n%s", self.role, how, up_for,
+                      "\n".join(self.tail) or "(none)")
         if self._stopping or code == 0:
             self._set_state(STOPPED)
             return
