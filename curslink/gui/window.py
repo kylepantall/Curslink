@@ -236,12 +236,10 @@ class MainWindow(QMainWindow):
         self.version_label = label("", "sideNoteText")
         fv.addWidget(self.version_label)
         sv.addWidget(self.footer)
-        # macOS: the sidebar is a glass pane floating over the body, which
-        # runs the full width of the window underneath it. Elsewhere it sits
-        # beside the body.
-        self.floating_side = th.platform == "mac"
-        if not self.floating_side:
-            h.addWidget(side)
+        # macOS: the sidebar is the window's glass itself, full height from
+        # under the traffic lights to the bottom edge, with the body beside it.
+        self.floating_side = False
+        h.addWidget(side)
 
         pane = QWidget()
         pane.setObjectName("contentPane")

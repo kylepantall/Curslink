@@ -333,6 +333,11 @@ def install(path: Path, kind: str, version: str, relaunch: list[str] | None = No
         # The setup can't replace curslink.exe while it runs: exit now.
         log.info("Curslink %s is installing; it will start again when done", version)
         _flush_streams()
+        # Exiting under a running Qt app can fault in native teardown, which
+        # wrote a false "crashed" report after every successful update.
+        import faulthandler
+
+        faulthandler.disable()
         os._exit(0)
     if kind == "macos-pkg":
         _run(_as_admin(["/usr/sbin/installer", "-pkg", str(path), "-target", "/"]))

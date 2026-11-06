@@ -49,6 +49,10 @@ def prepare(window) -> None:
                            Qt.WindowType.MaximizeUsingFullscreenGeometryHint)
         window.setWindowFlag(expanded, True)
         window.setWindowFlag(Qt.WindowType.NoTitleBarBackgroundHint, True)
+        # Qt 6.9+ keeps widgets out of the title bar area (the "safe area")
+        # by default, which left an empty strip where the title bar was. The
+        # sidebar's own top padding clears the traffic lights instead.
+        window.setAttribute(Qt.WidgetAttribute.WA_ContentsMarginsRespectsSafeArea, False)
 
 
 def apply_glass(window, dark: bool) -> bool:
