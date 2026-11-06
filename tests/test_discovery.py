@@ -111,3 +111,32 @@ def test_local_network_probe(monkeypatch):
     assert not macperms._local_network_ok()
     refused.discard("10.0.0.2")  # one address getting through is enough
     assert macperms._local_network_ok()
+
+
+def test_addresses_on_our_network_come_first():
+    import ipaddress
+
+    from curslink.pairing.discovery import rank_addresses
+
+    lan = [ipaddress.ip_network("192.168.68.0/22")]
+    # What a Mac with a VM bridge and a VPN advertises.
+    mac = ("192.168.64.1", "10.200.1.2", "fe80::1", "192.168.68.52")
+    assert rank_addresses(mac, lan)[0] == "192.168.68.52"
+    assert rank_addresses(mac, lan)[-1] == "fe80::1"
+    assert rank_addresses(("10.0.0.5", "192.168.1.9"), [])[0] == "10.0.0.5"  # no match: order kept
+
+
+def test_reachable_skips_addresses_that_dont_answer():
+    import asyncio
+
+    from curslink.pairing.discovery import reachable
+
+    async def go():
+        server = await asyncio.start_server(lambda r, w: w.close(), "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        async with server:
+            # 192.0.2.1 is TEST-NET: never answers.
+            return (await reachable(("192.0.2.1", "127.0.0.1"), port, timeout=0.3),
+                    await reachable(("192.0.2.1",), port, timeout=0.3))
+
+    assert asyncio.run(go()) == ("127.0.0.1", None)

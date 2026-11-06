@@ -55,8 +55,7 @@ def found_from_info(info) -> Found | None:
     ) or tuple(info.parsed_scoped_addresses())
     if not device_id or role not in ("host", "agent") or not addresses or not info.port:
         return None
-    # IPv4 first: it is what most home networks route reliably.
-    addresses = tuple(sorted(addresses, key=lambda a: ":" in a))
+    addresses = rank_addresses(addresses)
     cport = _txt(props, "cport")
     return Found(
         device_id=device_id,
@@ -68,6 +67,50 @@ def found_from_info(info) -> Found | None:
         service=info.name,
         host=(info.server or "").rstrip("."),
     )
+
+
+def local_networks() -> list[ipaddress.IPv4Network]:
+    """The IPv4 networks this machine is on (LAN, VPN, VM bridges)."""
+    try:
+        import ifaddr  # a zeroconf dependency
+    except ImportError:  # pragma: no cover
+        return []
+    nets = []
+    for adapter in ifaddr.get_adapters():
+        for ip in adapter.ips:
+            if isinstance(ip.ip, str):
+                net = ipaddress.ip_network(f"{ip.ip}/{ip.network_prefix}", strict=False)
+                if not (net.network_address.is_loopback or net.network_address.is_link_local):
+                    nets.append(net)
+    return nets
+
+
+def rank_addresses(addresses, networks=None) -> tuple[str, ...]:
+    """Best address to try first. A device advertises every address it has,
+    and a Mac also has VM bridges and VPN tunnels the other device can't
+    reach (192.168.64.1, 10.x), so: an address on one of our own networks
+    first, then other IPv4, then IPv6."""
+    nets = local_networks() if networks is None else networks
+
+    def key(a: str):
+        ip = ipaddress.ip_address(a.split("%")[0])
+        if ip.version == 6:
+            return 2
+        return 0 if any(ip in n for n in nets) else 1
+
+    return tuple(sorted(addresses, key=key))
+
+
+async def reachable(addresses, port: int, timeout: float = 1.0) -> str | None:
+    """The first of ``addresses`` (in order) that accepts a TCP connection on ``port``."""
+    for addr in addresses:
+        try:
+            _reader, writer = await asyncio.wait_for(asyncio.open_connection(addr, port), timeout)
+        except (OSError, asyncio.TimeoutError):
+            continue
+        writer.close()
+        return addr
+    return None
 
 
 def local_addresses() -> list[str]:

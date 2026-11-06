@@ -468,7 +468,13 @@ async def resolve_host(cfg: AgentConfig, store: PairingStore) -> ConnectTarget:
 
         found = await find(peer.device_id, timeout=2.0)
         if found is not None and found.control_port:
-            return ConnectTarget(found.address, found.control_port, ctx, auth_key, relay)
+            from curslink.pairing.discovery import reachable
+
+            # The host advertises all its addresses, some unreachable from
+            # here (VM bridges, VPNs): use one that answers.
+            address = await reachable(found.addresses, found.control_port) or found.address
+            log.info("host found on the LAN at %s (it advertises %s)", address, ", ".join(found.addresses))
+            return ConnectTarget(address, found.control_port, ctx, auth_key, relay)
     if relay:
         return ConnectTarget("", cfg.port, ctx, auth_key, relay)
     if peer is None:
