@@ -196,6 +196,9 @@ class CalibratePage(Page):
             cal.start()
             if not cal.wait_for_face(20):
                 cal.stop()
+                why = getattr(cal.tracker, "error", None)
+                if why:
+                    raise RuntimeError(f"The camera stopped: {why}. Settings > Diagnostics has the full log.")
                 raise RuntimeError("No face found. Check the camera is free and you're facing it in good light.")
             return cal
 

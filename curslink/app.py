@@ -372,15 +372,24 @@ class Calibrator:
             self.latest = (yaw, pitch)
 
     def start(self) -> None:
+        log.info("calibration: starting camera")
         self.tracker.start()
 
     def stop(self) -> None:
+        log.info("calibration: stopping camera")
         self.tracker.stop()
 
     def wait_for_face(self, timeout: float = 15.0) -> bool:
         deadline = time.monotonic() + timeout
+        alive = getattr(self.tracker, "alive", None)
         while self.latest is None and time.monotonic() < deadline:
+            if alive is not None and not alive():
+                log.warning("calibration: the camera stopped before a face was found: %s",
+                            getattr(self.tracker, "error", None))
+                return False
             time.sleep(0.1)
+        if self.latest is None:
+            log.warning("calibration: no face within %.0fs", timeout)
         return self.latest is not None
 
     def record(self, target: Target, seconds: float = 1.5, settle: float = 0.2) -> tuple[float, float] | None:
@@ -393,10 +402,14 @@ class Calibrator:
         with self._lock:
             samples = [(y, p) for t, y, p in self._samples if t >= start + settle]
         if len(samples) < 5:
+            log.warning("calibration: only %d samples for %s, skipped", len(samples), target)
             return None
         for yaw, pitch in samples:
             self.calibration.add(target, yaw, pitch)
-        return self.calibration.centroids()[target]
+        centre = self.calibration.centroids()[target]
+        log.info("calibration: %s at yaw %+.1f, pitch %+.1f from %d samples", target, centre[0], centre[1],
+                 len(samples))
+        return centre
 
 
 def close_pairs(cal: Calibration, margin_deg: float) -> list[tuple[Target, Target, float]]:
