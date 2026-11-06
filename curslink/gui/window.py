@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import QRectF, QSize, Qt, QTimer
+from PySide6.QtCore import QEvent, QRectF, QSize, Qt, QTimer
 from PySide6.QtGui import QCloseEvent, QColor, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -132,6 +132,9 @@ def logo(size: int) -> QLabel:
     return lab
 
 
+SIDE_INSET = 8  # the floating macOS sidebar's gap to the window edge
+
+
 class MainWindow(QMainWindow):
     def __init__(self, app):
         super().__init__()
@@ -233,13 +236,18 @@ class MainWindow(QMainWindow):
         self.version_label = label("", "sideNoteText")
         fv.addWidget(self.version_label)
         sv.addWidget(self.footer)
-        h.addWidget(side)
+        # macOS: the sidebar is a glass pane floating over the body, which
+        # runs the full width of the window underneath it. Elsewhere it sits
+        # beside the body.
+        self.floating_side = th.platform == "mac"
+        if not self.floating_side:
+            h.addWidget(side)
 
         pane = QWidget()
         pane.setObjectName("contentPane")
         pane.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         pv = QVBoxLayout(pane)
-        pv.setContentsMargins(0, 0, 0, 0)
+        pv.setContentsMargins(th.size["side_w"] + SIDE_INSET if self.floating_side else 0, 0, 0, 0)
         self.stack = QStackedWidget()
         pv.addWidget(self.stack)
         h.addWidget(pane, 1)
@@ -254,6 +262,11 @@ class MainWindow(QMainWindow):
         }
         for page in self.pages.values():
             self.stack.addWidget(page)
+        if self.floating_side:
+            side.setParent(root)
+            side.raise_()
+            root.installEventFilter(self)
+            self.place_side()
 
         app.service_changed.connect(lambda _s: self.refresh_side())
         app.status.changed.connect(self.refresh_side)
@@ -261,6 +274,16 @@ class MainWindow(QMainWindow):
         theme.manager().changed.connect(self.theme_changed)
         self.refresh_side()
         self.show_page("status")
+
+    def place_side(self) -> None:
+        root = self.centralWidget()
+        self.side.setGeometry(SIDE_INSET, SIDE_INSET, self.side.width(), max(0, root.height() - 2 * SIDE_INSET))
+        self.side.raise_()
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802
+        if self.floating_side and obj is self.centralWidget() and event.type() == QEvent.Type.Resize:
+            self.place_side()
+        return super().eventFilter(obj, event)
 
     # -- pages ----------------------------------------------------------------
     def show_page(self, key: str) -> None:

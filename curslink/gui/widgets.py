@@ -203,16 +203,29 @@ def restyle_pills() -> None:
             pass
 
 
-class Segmented(QWidget):
+def seg_track() -> tuple[QFrame, QHBoxLayout]:
+    """The recessed track a segmented control's buttons sit in."""
+    track = QFrame()
+    track.setObjectName("segTrack")
+    track.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+    h = QHBoxLayout(track)
+    h.setContentsMargins(2, 2, 2, 2)
+    h.setSpacing(2)
+    return track, h
+
+
+class Segmented(QFrame):
     """A row of mutually exclusive buttons (System / Light / Dark)."""
 
     picked = Signal(str)
 
     def __init__(self, options: list[tuple[str, str]]):
         super().__init__()
+        self.setObjectName("segTrack")
+        self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         h = QHBoxLayout(self)
-        h.setContentsMargins(0, 0, 0, 0)
-        h.setSpacing(4)
+        h.setContentsMargins(2, 2, 2, 2)
+        h.setSpacing(2)
         self.group = QButtonGroup(self)
         self.buttons: dict[str, QPushButton] = {}
         for key, text in options:

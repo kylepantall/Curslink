@@ -14,7 +14,7 @@ from curslink import __version__, diagnostics
 from curslink.autostart import Autostart
 from curslink.gui import native, theme
 from curslink.gui.camerapicker import CameraPicker
-from curslink.gui.widgets import Card, Page, Segmented, Toggle, button, label, spot, text_block
+from curslink.gui.widgets import Card, Page, Segmented, Toggle, seg_track, button, label, spot, text_block
 
 
 class SettingsPage(Page):
@@ -81,12 +81,14 @@ class SettingsPage(Page):
         grid.addWidget(label("Animation where the pointer lands", "small"), 0, 0)
         effects = QHBoxLayout()
         self.effect_group = QButtonGroup(self)
+        track, seg = seg_track()
         for key, text in (("pop", "Pop"), ("blink", "Blink"), ("none", "None")):
             b = button(text, "seg")
             b.setCheckable(True)
             b.setProperty("effect", key)
             self.effect_group.addButton(b)
-            effects.addWidget(b)
+            seg.addWidget(b)
+        effects.addWidget(track)
         self.preview_button = button("Preview", None, self.preview_effect)
         self.preview_button.setToolTip("Play the animation here, the way it looks when the pointer switches")
         effects.addSpacing(8)

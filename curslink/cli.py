@@ -161,7 +161,7 @@ async def _pair(me, pcfg: PairingConfig, args) -> int:
         return 1
     finally:
         writer.close()
-    store.add(result.peer.device_id, result.peer.name, result.peer.role, result.key)
+    store.add(result.peer.device_id, result.peer.name, result.peer.role, result.key, address)
     print(f"Paired with {result.peer.name}. Keys saved to {store.path}")
     if me.role == "host":
         print(f"Make sure [[devices]] in your config has an entry with id = \"{result.peer.device_id}\".")
