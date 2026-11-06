@@ -364,14 +364,16 @@ def test_macos_capture_reads_deltas_and_survives_a_disabled_tap(monkeypatch):
         def on_motion(self, dx, dy):
             calls.append(("motion", dx, dy))
 
-    capture = pb.PynputCapture()
+    monkeypatch.setattr(pb, "_mac_warp", lambda x, y: calls.append(("warp", x, y)))
+    capture = pb.PynputCapture(park_at=(7, 8))
     capture._mac, capture._handler = True, Handler()
     assert capture._mac_mouse_tap(5, fields) is fields  # not grabbed: the Mac gets it
     capture._grabbed = True
     assert capture._mac_mouse_tap(5, fields) is None
     assert capture._mac_mouse_tap(6, {**fields, pb._MAC_SOURCE_PID: 99}) is None  # ours: no motion
     assert capture._mac_key_tap(10, "key") is None
-    assert calls == [("motion", 3, -2)]
+    assert calls == [("motion", 3, -2), ("warp", 7, 8)]  # held at the park point
+    del calls[1]
 
     class Base:
         def _create_event_tap(self):
