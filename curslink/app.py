@@ -27,6 +27,27 @@ from curslink.security import HelloVerifier, client_context, server_context
 log = logging.getLogger(__name__)
 
 
+class CaptureStats:
+    """How the mouse reports reach the loop while input is on another device:
+    how many, how many moves they became, and how long each waited for the
+    loop. Logged every so often by :func:`report_capture`."""
+
+    def __init__(self) -> None:
+        self.reports = 0
+        self.moves = 0
+        self.waits: list[float] = []
+
+    def sent(self, waited: float) -> None:
+        self.moves += 1
+        if len(self.waits) < 20000:
+            self.waits.append(waited)
+
+    def take(self) -> tuple[int, int, list[float]]:
+        out = (self.reports, self.moves, self.waits)
+        self.reports, self.moves, self.waits = 0, 0, []
+        return out
+
+
 class LoopBridge:
     """Hands input callbacks from pynput's threads to the asyncio loop.
 
@@ -43,45 +64,54 @@ class LoopBridge:
         self._lock = threading.Lock()
         self._dx = 0.0
         self._dy = 0.0
+        self._ts = 0.0   # when the newest motion waiting was captured
         self._pending = False
         self._gen = 0  # a flush scheduled before the last take is stale
+        self.stats = CaptureStats()
 
     def on_pointer(self, x, y):
         self._loop.call_soon_threadsafe(self._router.on_pointer, x, y)
 
     def on_motion(self, dx, dy):
+        now = time.monotonic()
         with self._lock:
             self._dx += dx
             self._dy += dy
+            self._ts = now
+            self.stats.reports += 1
             if self._pending:
                 return
             self._pending = True
             gen = self._gen
         self._loop.call_soon_threadsafe(self._flush, gen)
 
-    def _take(self) -> tuple[float, float]:
+    def _take(self) -> tuple[float, float, float]:
         with self._lock:
-            dx, dy = self._dx, self._dy
+            dx, dy, ts = self._dx, self._dy, self._ts
             self._dx = self._dy = 0.0
             self._pending = False
             self._gen += 1
-        return dx, dy
+        return dx, dy, ts
+
+    def _motion(self, dx: float, dy: float, ts: float) -> None:
+        self.stats.sent(time.monotonic() - ts)
+        self._router.on_motion(dx, dy, ts)
 
     def _flush(self, gen: int) -> None:
         with self._lock:
             if gen != self._gen:
                 return  # a button or key took this motion with it
-        dx, dy = self._take()
+        dx, dy, ts = self._take()
         if dx or dy:
-            self._router.on_motion(dx, dy)
+            self._motion(dx, dy, ts)
 
     def _after_motion(self, fn, *args):
         """Run ``fn`` on the loop after the motion waiting now."""
-        dx, dy = self._take()
+        dx, dy, ts = self._take()
 
         def run():
             if dx or dy:
-                self._router.on_motion(dx, dy)
+                self._motion(dx, dy, ts)
             fn(*args)
 
         self._loop.call_soon_threadsafe(run)
@@ -243,7 +273,9 @@ async def run_host(cfg: HostConfig) -> None:
         relay = HostRelays(cfg.relay, cfg.device_id, cfg.secret is not None, store, tls, server.handle_streams)
         relay.start()
         log.info("waiting for agents via relay %s", cfg.relay.address)
-    capture.start(LoopBridge(loop, router))
+    bridge = LoopBridge(loop, router)
+    capture.start(bridge)
+    reporter = loop.create_task(report_capture(bridge, capture, server, router))
     router.blocked = input_blocked_reason()
 
     # Gaze can come from this computer's camera, the agents' own cameras,
@@ -291,6 +323,7 @@ async def run_host(cfg: HostConfig) -> None:
     try:
         await stop.wait()
     finally:
+        reporter.cancel()
         if gaze["tracker"]:
             gaze["tracker"].stop()
         capture.stop()
@@ -299,6 +332,56 @@ async def run_host(cfg: HostConfig) -> None:
         if relay:
             await relay.close()
         await server.close()
+
+
+def _ms(values: list[float], q: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    return ordered[min(len(ordered) - 1, int(len(ordered) * q))] * 1000.0
+
+
+def capture_report(bridge: LoopBridge, capture, server: HostServer, device_id: str, span: float) -> str | None:
+    """One log line on the host's half of the pointer path, or None if the
+    mouse didn't move: reports from the mouse, moves sent, how long reports
+    waited for the loop and took in the event tap, and the network round trip."""
+    reports, moves, waits = bridge.stats.take()
+    taps = getattr(capture, "tap_times", None)
+    tap_times = list(taps) if taps is not None else []
+    if taps is not None:
+        taps.clear()
+    conn = server.connections.get(device_id)
+    rtts = list(conn.rtts) if conn is not None else []
+    if conn is not None:
+        conn.rtts.clear()
+    if not reports:
+        return None
+    line = (f"pointer to {device_id}: {reports} mouse reports in {span:.0f}s ({reports / span:.0f}/s) "
+            f"sent as {moves} moves; waited for the loop p50 {_ms(waits, 0.5):.2f} / "
+            f"p99 {_ms(waits, 0.99):.2f} / max {_ms(waits, 1.0):.2f} ms")
+    if tap_times:
+        line += f"; event tap took p50 {_ms(tap_times, 0.5):.2f} / max {_ms(tap_times, 1.0):.2f} ms"
+    if rtts:
+        line += (f"; network round trip p50 {_ms(rtts, 0.5):.1f} / p95 {_ms(rtts, 0.95):.1f} / "
+                 f"max {_ms(rtts, 1.0):.1f} ms")
+    return line
+
+
+async def report_capture(bridge: LoopBridge, capture, server: HostServer, router: Router,
+                         every_s: float = 10.0) -> None:
+    """While input is on another device, log how its pointer path is doing,
+    so a diagnostics bundle shows where any lag comes from."""
+    target = None
+    while True:
+        await asyncio.sleep(every_s)
+        target = router.active_device if not router.is_local else target
+        if target is None:
+            continue
+        line = capture_report(bridge, capture, server, target, every_s)
+        if line:
+            log.info("%s", line)
+        if router.is_local:
+            target = None
 
 
 def input_blocked_reason():
@@ -496,9 +579,14 @@ async def run_agent(cfg: AgentConfig) -> None:
     overlay = OverlayProcess() if cfg.animations else None
     if overlay:
         overlay.start()
+    from curslink.smoothing import PointerSmoother
+
+    sink = PynputSink(cfg.modifier_map)
+    smoother = PointerSmoother(sink.move_to) if cfg.smooth_pointer else None
     session = AgentSession(
-        PynputSink(cfg.modifier_map),
+        sink,
         overlay.show if overlay else (lambda effect, x, y: None),
+        smoother=smoother,
     )
     store = PairingStore(cfg.pairing.store)
     client = AgentClient(
@@ -531,6 +619,8 @@ async def run_agent(cfg: AgentConfig) -> None:
             task.cancel()
         if camera:
             camera.stop()
+        if smoother:
+            smoother.close()
         await pairing.close()
         if overlay:
             overlay.close()

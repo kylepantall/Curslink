@@ -148,6 +148,32 @@ which stops one paired device from claiming another's id. Link keys are
 transport independent: a relayed connection runs the same TLS-PSK end to
 end.
 
+### Pointer motion: sent at once, played back evenly
+
+Each mouse report is sent as soon as it is captured (no batching beyond
+what the host's loop hasn't got to yet; TCP_NODELAY is on, as asyncio sets
+it), stamped with the host's capture time (`move.ts`). Measured over real
+TLS-PSK on one machine at 1000 reports a second, a report reaches the
+agent in 0.4 ms typically and under 5 ms at worst, so Curslink's own path
+isn't what makes a pointer lag.
+
+Real links aren't that even: Wi-Fi in particular holds packets for tens of
+milliseconds and then delivers them together. The agent therefore plays
+moves back on the host's timeline (`curslink/smoothing.py`), a few
+milliseconds behind it, and moves the pointer between reports at 250 Hz.
+How far behind adapts: the 99th percentile of how late reports have
+arrived over the last two seconds, plus one gap between reports (needed to
+have the next point to move towards), capped at 35 ms. On a clean link
+with a fast mouse that's about 2 ms. Clicks, scrolls and keys don't wait;
+the pointer snaps to the newest position first, so they land where the
+host saw them.
+
+Both ends log where time goes every 10 seconds while input is remote: the
+host logs mouse report rate, loop wait, event tap time and ping round trip;
+the agent logs arrival rate, lateness, longest gap, playback delay and
+injection time. That's the first thing to read in a diagnostics bundle
+when the pointer feels laggy.
+
 ### Nearby pairing
 
 Running hosts and agents advertise `_curslink._tcp` over mDNS

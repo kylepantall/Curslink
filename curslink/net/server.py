@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import logging
 import ssl
+import time
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -15,7 +16,7 @@ from curslink.protocol import HOST_FEATURES, Message, ProtocolError, encode
 log = logging.getLogger(__name__)
 
 HELLO_TIMEOUT_S = 5.0
-PING_INTERVAL_S = 2.0
+PING_INTERVAL_S = 0.5   # often enough to measure the round trip as it changes
 DEAD_AFTER_S = 7.0
 # If an agent stops reading, don't buffer more than this before dropping it.
 MAX_BUFFER_BYTES = 256 * 1024
@@ -32,6 +33,7 @@ class AgentConnection:
     camera: bool = False          # runs its own camera to confirm gaze switches
     facing: bool | None = None    # last thing that camera reported
     features: frozenset = frozenset()  # hello.features: what else it understands
+    rtts: list = field(default_factory=list)  # ping round trips (s) since last taken
 
 
 class HostServer:
@@ -159,6 +161,10 @@ class HostServer:
     def _on_message(self, conn: AgentConnection, msg: Message) -> None:
         if msg.t == "bye":
             conn.writer.close()
+        elif msg.t == "pong":
+            ts = msg.get("ts")
+            if isinstance(ts, (int, float)) and not isinstance(ts, bool) and len(conn.rtts) < 1000:
+                conn.rtts.append(max(0.0, time.monotonic() - ts / 1000.0))
         elif msg.t == "facing":
             conn.facing = msg.data["facing"]
             self.on_facing(conn.device_id, conn.facing)
@@ -173,4 +179,4 @@ class HostServer:
                 conn.writer.transport.abort()
                 return
             n += 1
-            self.send(conn.device_id, "ping", n=n)
+            self.send(conn.device_id, "ping", n=n, ts=round(time.monotonic() * 1000.0, 2))

@@ -135,7 +135,10 @@ class Router:
                 self.switch_to(crossing.screen, crossing.x, crossing.y, "edge")
                 return
 
-    def on_motion(self, dx: float, dy: float) -> None:
+    def on_motion(self, dx: float, dy: float, ts: float | None = None) -> None:
+        """``ts``: when the motion was captured (time.monotonic()). Sent with
+        the move so the agent can play moves back as evenly as they happened
+        (see curslink.smoothing)."""
         if self.is_local:
             return
         nx, ny = self.x + dx, self.y + dy
@@ -151,7 +154,10 @@ class Router:
             here, nx, ny = self.layout.clamp_to_device(self.active_device, nx, ny)
         self.screen, self.x, self.y = here, nx, ny
         ox, oy = here.to_os(nx, ny)
-        self.transport.send(self.active_device, "move", x=ox, y=oy)
+        if ts is None:
+            self.transport.send(self.active_device, "move", x=ox, y=oy)
+        else:
+            self.transport.send(self.active_device, "move", x=ox, y=oy, ts=round(ts * 1000.0, 2))
 
     def on_button(self, button: str, pressed: bool) -> None:
         if self.is_local:

@@ -93,7 +93,7 @@ async def test_loop_bridge_adds_up_motion_and_keeps_clicks_in_order():
     calls = []
 
     class Router:
-        def on_motion(self, dx, dy):
+        def on_motion(self, dx, dy, ts=None):
             calls.append(("motion", dx, dy))
 
         def on_button(self, button, pressed):
@@ -365,6 +365,7 @@ def test_macos_capture_reads_deltas_and_survives_a_disabled_tap(monkeypatch):
             calls.append(("motion", dx, dy))
 
     monkeypatch.setattr(pb, "_mac_warp", lambda x, y: calls.append(("warp", x, y)))
+    monkeypatch.setattr(pb, "_mac_location", lambda event: event.get("loc", (7, 8)))
     capture = pb.PynputCapture(park_at=(7, 8))
     capture._mac, capture._handler = True, Handler()
     assert capture._mac_mouse_tap(5, fields) is fields  # not grabbed: the Mac gets it
@@ -372,7 +373,11 @@ def test_macos_capture_reads_deltas_and_survives_a_disabled_tap(monkeypatch):
     assert capture._mac_mouse_tap(5, fields) is None
     assert capture._mac_mouse_tap(6, {**fields, pb._MAC_SOURCE_PID: 99}) is None  # ours: no motion
     assert capture._mac_key_tap(10, "key") is None
-    assert calls == [("motion", 3, -2), ("warp", 7, 8)]  # held at the park point
+    assert calls == [("motion", 3, -2)]  # still near the park point: no warp
+    del calls[:]
+    far = {**fields, "loc": (200, 8)}
+    assert capture._mac_mouse_tap(5, far) is None
+    assert calls == [("motion", 3, -2), ("warp", 7, 8)]  # strayed: held at the park point
     del calls[1]
 
     class Base:

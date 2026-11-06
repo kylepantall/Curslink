@@ -28,9 +28,13 @@ FACING_REFRESH_S = 1.0
 class AgentSession:
     """Applies host messages to the local OS. Pure logic, no networking."""
 
-    def __init__(self, sink: InputSink, show_effect: Callable[[str, int, int], None]):
+    def __init__(self, sink: InputSink, show_effect: Callable[[str, int, int], None], smoother=None):
         self.sink = sink
         self.show_effect = show_effect
+        # A curslink.smoothing.PointerSmoother plays timestamped moves back
+        # evenly; without one (or from a host that sends no ts) each move is
+        # applied as it arrives.
+        self.smoother = smoother
         # The host's calibration asks this device to show "Look here" on one
         # of its screens (or to hide it). See curslink.gui.overlay.
         self.on_look: Callable[[dict], None] = lambda data: None
@@ -41,17 +45,29 @@ class AgentSession:
     def handle(self, msg: Message) -> bytes | None:
         t = msg.t
         if t == "ping":
-            return encode("pong", n=msg.get("n"))
+            reply = {"n": msg.get("n")}
+            if "ts" in msg.data:
+                reply["ts"] = msg.data["ts"]  # lets the host time the round trip
+            return encode("pong", **reply)
+        if t == "move":
+            ts = msg.data.get("ts")
+            if self.smoother is not None and isinstance(ts, (int, float)) and not isinstance(ts, bool):
+                self.smoother.add(msg.data["x"], msg.data["y"], ts)
+            else:
+                self.sink.move_to(int(msg.data["x"]), int(msg.data["y"]))
+            return None
+        if self.smoother is not None and t in ("button", "scroll", "key"):
+            self.smoother.snap()  # these happen where the pointer is now, not where playback is
         if t == "enter":
             self.active = True
             x, y = int(msg.data["x"]), int(msg.data["y"])
-            self.sink.move_to(x, y)
+            if self.smoother is not None:
+                self.smoother.reset(x, y)
+            else:
+                self.sink.move_to(x, y)
             self.show_effect(msg.get("effect", "none"), x, y)
         elif t == "leave":
-            self.active = False
             self.release_all()
-        elif t == "move":
-            self.sink.move_to(int(msg.data["x"]), int(msg.data["y"]))
         elif t == "look":
             self.on_look(dict(msg.data))
         elif t == "button":
@@ -71,6 +87,10 @@ class AgentSession:
         return None
 
     def release_all(self) -> None:
+        """Input left this device (or the host went away)."""
+        self.active = False
+        if self.smoother is not None:
+            self.smoother.pause()
         for key in sorted(self.keys):
             with contextlib.suppress(Exception):
                 self.sink.key(key, False)
