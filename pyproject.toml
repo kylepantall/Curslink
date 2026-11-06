@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "curslink"
+version = "0.1.0"
+description = "Look at a device and your mouse and keyboard follow: gaze and edge based input switching across computers."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "pynput>=1.7",
+]
+
+[project.optional-dependencies]
+gaze = [
+    "mediapipe>=0.10.14",
+    "opencv-python>=4.8",
+    "numpy>=1.26",
+]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "numpy>=1.26",
+]
+
+[project.scripts]
+curslink = "curslink.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["curslink*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
