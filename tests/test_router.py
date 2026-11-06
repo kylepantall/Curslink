@@ -174,3 +174,14 @@ def test_switch_listeners_notified(parts):
     router.listeners.append(events.append)
     router.on_pointer(3839, 500)
     assert events[-1].to_device == "laptop" and events[-1].reason == "edge"
+
+
+def test_input_stays_home_while_it_cant_be_captured(parts):
+    router, capture, _, transport, _ = parts
+    router.blocked = lambda: "macOS hasn't allowed Accessibility"
+    router.on_gaze(Target("laptop", "main"))
+    router.on_pointer(3839, 500)
+    assert router.is_local and not capture.grabbed and transport.sent == []
+    router.blocked = lambda: ""
+    router.on_gaze(Target("laptop", "main"))
+    assert router.active_device == "laptop"
