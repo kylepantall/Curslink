@@ -231,7 +231,9 @@ class Curslink(QObject):
 
     def hide_to_tray(self, force_note: bool = False) -> None:
         """Close the window and keep running in the tray, saying so once."""
-        if self.window is None or not self.tray_placed():
+        from curslink import macperms
+
+        if self.window is None or not self.tray_placed() or macperms.missing(self.role):
             return
         self.window.hide()
         from curslink.gui import native
@@ -369,6 +371,13 @@ def main(argv: list[str] | None = None) -> int:
             "There's no system tray here, so Curslink stays open in a window. "
             "Minimise it to keep it out of the way.",
         )
+    from curslink import macperms
+
+    lacking = macperms.missing(app.role) if app.has_config() else []
+    if lacking:
+        # Even when it would start hidden: nothing works until they're granted.
+        log.warning("macOS permissions missing: %s", ", ".join(lacking))
+        app.show_window("status")
     crashed = diagnostics.last_native_crash()
     if crashed is not None and tray_ok:
         QTimer.singleShot(1500, lambda: app.tray.say(

@@ -166,3 +166,21 @@ def test_nothing_paired_means_setup_isnt_done(desktop, qapp):
     desktop.window.pages["devices"].store().add("laptop", "Work laptop", "agent", b"k" * 32)
     assert desktop.has_pairings()
     assert not desktop.agent_paired()  # a host isn't an agent
+
+
+def test_macos_permissions_card(desktop, qapp, monkeypatch):
+    from curslink import macperms
+
+    desktop.window.pages["setup"].create()
+    card = desktop.window.pages["status"].permissions
+    have = {"accessibility": False, "input-monitoring": False}
+    monkeypatch.setattr(macperms, "MAC", True)
+    monkeypatch.setattr(macperms, "granted", lambda k: have[k])
+    asked = []
+    monkeypatch.setattr(macperms, "request", lambda k: asked.append(k))
+    card.refresh()
+    assert not card.isHidden() and card.rows.count() == 2  # a host needs both
+    have["accessibility"] = have["input-monitoring"] = True
+    card.refresh()
+    assert card.isHidden()
+    assert macperms.needed("agent") == ["accessibility"]

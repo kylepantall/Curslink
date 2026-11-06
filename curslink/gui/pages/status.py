@@ -24,6 +24,12 @@ class StatusPage(Page):
         self.error.hide()
         self.add(self.error)
 
+        # macOS: Accessibility / Input Monitoring, asked for here until granted.
+        from curslink.gui.permissions import PermissionsCard
+
+        self.permissions = PermissionsCard(app)
+        self.add(self.permissions)
+
         # Where input is (host) / the link to the host (agent).
         self.where = Card()
         top = QHBoxLayout()
@@ -93,6 +99,7 @@ class StatusPage(Page):
         self.refresh()
 
     def shown(self) -> None:
+        self.permissions.refresh()
         self.refresh()
 
     # -- actions --------------------------------------------------------------
