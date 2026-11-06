@@ -271,3 +271,50 @@ def test_a_config_without_devices_goes_back_to_setup(desktop):
     assert not desktop.has_config()
     desktop.window.pages["setup"].create()
     assert desktop.has_config() and desktop.check_config() is None
+
+
+def test_agent_camera_setting_and_host_status(desktop, qapp):
+    """An agent can turn its own camera on; the host shows it's in use."""
+    from curslink.configedit import ConfigFile, new_agent_config
+
+    desktop.config_path.parent.mkdir(parents=True, exist_ok=True)
+    desktop.config_path.write_text(new_agent_config("laptop", "Laptop"))
+    desktop.config_saved(restart=False)
+    page = desktop.window.pages["settings"]
+    page.load()
+    assert not page.agent_camera.isChecked()
+    page.agent_camera.click()
+    assert ConfigFile(desktop.config_path).get("agent.gaze", "enabled") is True
+    page.set_agent_camera_device(2, "USB Camera")
+    raw = ConfigFile(desktop.config_path).raw()
+    assert raw["agent"]["gaze"] == {"enabled": True, "camera": 2, "camera_name": "USB Camera"}
+    from curslink.config import agent_config
+    assert agent_config(raw).gaze.camera_name == "USB Camera"
+
+    s = desktop.status
+    s.apply({"event": "cameras", "devices": ["laptop", "phone"]})
+    assert s.cameras == ["laptop", "phone"]
+
+
+def test_host_status_with_only_an_agents_camera(desktop, qapp):
+    desktop.window.pages["setup"].create()
+    me = desktop.config().get("host", "device_id")
+    cfg = desktop.config()
+    cfg.add_device("laptop", "Work laptop")
+    cfg.save()
+    desktop.config_saved(restart=False)
+    s = desktop.status
+    s.apply({"event": "running", "role": "host", "device_id": me, "name": "x", "active": me, "screen": "main",
+             "gaze": False})
+    s.apply({"event": "agent", "device_id": "laptop", "name": "Work laptop", "connected": True, "screens": []})
+    s.apply({"event": "cameras", "devices": ["laptop"]})
+    desktop.service.state = "running"
+    desktop.service_changed.emit("running")
+    page = desktop.window.pages["status"]
+    page.refresh()
+    assert page.gaze_toggle.isChecked()
+    assert "Work laptop's camera" in page.gaze_text.detail_label.text()
+    sent = []
+    desktop.service.send = sent.append
+    page.gaze_clicked(False)
+    assert sent == ["gaze pause"]

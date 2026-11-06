@@ -159,18 +159,30 @@ class ConfigFile:
             raise
 
     # -- simple values --------------------------------------------------------
+    # ``table`` may be dotted for a sub-table: ``"agent.gaze"``.
     def get(self, table: str, key: str, default: Any = None) -> Any:
-        t = self.raw().get(table, {})
+        t: Any = self.raw()
+        for part in table.split("."):
+            t = t.get(part, {}) if isinstance(t, dict) else {}
         return t.get(key, default) if isinstance(t, dict) else default
 
+    def _table(self, table: str, create: bool):
+        t: Any = self.doc
+        for part in table.split("."):
+            if part not in t:
+                if not create:
+                    return None
+                t[part] = tomlkit.table()
+            t = t[part]
+        return t
+
     def set(self, table: str, key: str, value: Any) -> None:
-        if table not in self.doc:
-            self.doc[table] = tomlkit.table()
-        self.doc[table][key] = value
+        self._table(table, create=True)[key] = value
 
     def remove(self, table: str, key: str) -> None:
-        if table in self.doc and key in self.doc[table]:
-            del self.doc[table][key]
+        t = self._table(table, create=False)
+        if t is not None and key in t:
+            del t[key]
 
     # -- the layout -----------------------------------------------------------
     def devices(self) -> list[dict[str, Any]]:

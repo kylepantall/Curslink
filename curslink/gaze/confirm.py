@@ -1,4 +1,4 @@
-"""Two-camera confirmation: the host's camera and an agent's own camera agree.
+"""Gaze from any device's camera: the host's, an agent's, or both together.
 
 In a setup like two laptops and one monitor, the host's camera alone can
 only tell that your head turned *away* from its screens; it can't be sure
@@ -19,6 +19,14 @@ a gaze switch happen when both cameras agree:
 * a device reporting the user facing it gets the pointer when the host's
   camera confirms the head has turned away from the host's own screens
   (or towards that device, if it was calibrated).
+
+When the host's camera isn't calibrated, is switched off, or has stopped
+seeing anyone, the cameras that are left decide on their own ("facing
+only"): a device whose camera sees you facing it gets the pointer, and
+when the device you're on stops seeing you the pointer goes to another
+device that does, or home to the host if the host has no camera of its
+own. The host's camera, when it runs uncalibrated, reports for the host
+the same way an agent's does.
 
 Devices without a camera keep the old behaviour: host gaze alone decides.
 Everything here is pure logic with explicit timestamps, so it is easy to
@@ -122,6 +130,9 @@ class _Report:
 class GazeArbiter:
     """Host side: combines host gaze with agents' own cameras.
 
+    ``classifier`` is the host camera's calibrated classifier, or ``None``
+    when the host has no calibrated camera (agents' cameras, and the host's
+    own uncalibrated one reporting through :meth:`on_facing`, decide then).
     ``switch(target)`` asks the router to switch; ``current()`` says where
     the pointer is now. ``screens_of(device_id)`` lists a device's screen
     ids (the first is used when a device wasn't calibrated on the host).
@@ -129,7 +140,7 @@ class GazeArbiter:
 
     def __init__(
         self,
-        classifier: GazeClassifier,
+        classifier: GazeClassifier | None,
         local_device_id: str,
         switch: Callable[[Target], None],
         current: Callable[[], Target],
@@ -147,6 +158,8 @@ class GazeArbiter:
         self._last_sample: tuple[float, float, float] | None = None  # (t, yaw, pitch)
         # Told when a switch was held back for want of confirmation, for logs and the app.
         self.on_blocked: Callable[[Target], None] = lambda target: None
+        # While True nothing switches (the app is calibrating the host camera).
+        self.suspended = False
 
     # ------------------------------------------------------------ agents
     def set_camera(self, device_id: str, has_camera: bool) -> None:
@@ -163,26 +176,71 @@ class GazeArbiter:
         """Does ``device_id`` agree that the user is facing it?"""
         if not self.settings.enabled or device_id == self.local_id or device_id not in self.cameras:
             return True  # nothing to ask: host gaze alone decides
+        return self._facing(device_id, now)
+
+    def _facing(self, device_id: str, now: float) -> bool:
         report = self.reports.get(device_id)
         return report is not None and report.facing and now - report.at <= self.settings.report_fresh_s
 
+    def host_live(self, now: float) -> bool:
+        """Is the host's calibrated camera seeing anyone, so it has a say?"""
+        if self.classifier is None or self._last_sample is None:
+            return False
+        return now - self._last_sample[0] <= self.settings.host_alive_s
+
     def on_facing(self, t: float, device_id: str, facing: bool) -> None:
-        """An agent's camera says whether the user is facing it."""
+        """A device's own camera says whether the user is facing it."""
+        was_facing = self._facing(device_id, t)
         self.reports[device_id] = _Report(facing, t)
-        if not facing or not self.settings.enabled or device_id not in self.cameras:
+        if self.suspended or device_id not in self.cameras:
             return
-        if self._current().device_id == device_id:
+        if not self.settings.enabled and device_id != self.local_id:
+            return  # agents' cameras were turned off on the host
+        current = self._current().device_id
+        if not self.host_live(t):
+            self._facing_only(t, device_id, facing and not was_facing, facing, current)
+            return
+        if not facing or current == device_id:
             return
         target = self._host_agrees(t, device_id)
         if target is not None:
             log.info("gaze: %s sees you facing it and the host sees you turned away", device_id)
             self._do_switch(target)
 
+    def _facing_only(self, t: float, device_id: str, turned_to: bool, facing: bool, current: str) -> None:
+        """No calibrated host camera to ask: the devices' own cameras decide.
+
+        Only *turning to* a device moves the pointer there, not the
+        once-a-second "still facing" refresh, so two cameras that both see
+        you don't pass the pointer back and forth, and "bring input home"
+        sticks until you look away and back."""
+        if facing:
+            if turned_to and current != device_id:
+                log.info("gaze: %s's camera sees you facing it", device_id)
+                self._do_switch(self._default_target(device_id))
+            return
+        if current != device_id:
+            return  # you weren't on it anyway
+        others = [d for d in self.cameras if d != device_id and self._facing(d, t)
+                  and (self.settings.enabled or d == self.local_id)]
+        if others:
+            target_id = max(others, key=lambda d: self.reports[d].at)
+        elif self.local_id not in self.cameras and device_id != self.local_id:
+            target_id = self.local_id  # the host has no camera to ask: you looked back at it
+        else:
+            return  # nobody sees you: looking away from everything, stay put
+        log.info("gaze: you turned away from %s, to %s", device_id, target_id)
+        self._do_switch(self._default_target(target_id))
+
     # -------------------------------------------------------------- host
     def on_sample(self, t: float, yaw: float, pitch: float) -> None:
-        """One head-pose sample from the host's camera."""
+        """One head-pose sample from the host's calibrated camera."""
+        if self.classifier is None:
+            return
         self._last_sample = (t, yaw, pitch)
         target = self.classifier.update(t, yaw, pitch)
+        if self.suspended:
+            return
         if target is None:
             return
         if self.confirms(target.device_id, t):
@@ -198,12 +256,9 @@ class GazeArbiter:
         backs up the agent's: the head has turned away from the host's
         screens, or towards a calibrated screen of that device."""
         sample = self._last_sample
-        if sample is None:
-            return None  # host camera never saw anyone: can't confirm
+        assert sample is not None and self.classifier is not None  # see host_live()
         t, yaw, pitch = sample
         age = now - t
-        if age > self.settings.host_alive_s:
-            return None  # host camera seems to be dead
         fallback = self._default_target(device_id)
         if age > self.settings.host_fresh_s:
             return fallback  # face gone from the host camera: turned well away
@@ -217,7 +272,8 @@ class GazeArbiter:
         return None if near_host else fallback
 
     def _default_target(self, device_id: str) -> Target | None:
-        calibrated = [t for t in self.classifier.targets if t.device_id == device_id]
+        targets = self.classifier.targets if self.classifier is not None else []
+        calibrated = [t for t in targets if t.device_id == device_id]
         if calibrated:
             return calibrated[0]
         screens = self._screens_of(device_id)
@@ -227,4 +283,5 @@ class GazeArbiter:
         if target is None:
             return
         self._switch(target)
-        self.classifier.force(self._current())
+        if self.classifier is not None:
+            self.classifier.force(self._current())

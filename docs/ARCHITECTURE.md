@@ -83,6 +83,27 @@ without a camera keep the host-only behaviour, and `confirm_with_agents =
 false` in `[gaze]` turns the check off. Agents only send `facing` to a
 host that lists it in `welcome.features`, so mixed versions keep working.
 
+### Any device's camera, on its own
+
+The host's camera isn't required. When it's off, uncalibrated, or has
+stopped seeing anyone for `host_alive_s`, the cameras that are left decide
+on their own ("facing only"):
+
+* turning to a device whose camera sees you moves the pointer there (only
+  the turn, not the once-a-second "still facing" refresh, so two cameras
+  that both see you don't pass the pointer back and forth, and "bring
+  input home" sticks until you look away and back);
+* when the device you're on stops seeing you, the pointer goes to another
+  device that does, or home to the host if the host has no camera of its
+  own (with two devices, not looking at the laptop means looking back at
+  the host); if the host's camera is on and doesn't see you either, it
+  stays put.
+
+The host's own camera without a calibration works the same way: it only
+reports whether you face the host (`[gaze] facing_deg`, `facing_dwell_ms`,
+`center_*`), like an agent's. So "laptop camera only", "both cameras, no
+calibration" and "calibrated host plus agent cameras" all work.
+
 Gaze picks a *device*, not a monitor: looking at another computer brings
 the pointer back to wherever you left it there, and looking between the
 monitors of the device you're on does nothing (unless `[gaze]

@@ -63,6 +63,7 @@ class Status(QObject):
         self.screen = ""
         self.gaze = False
         self.gaze_paused = False
+        self.cameras: list[str] = []  # host: connected agents running their own camera
         self.looking_at = ""   # "device/screen" the host's camera says you're looking at
         self.looking_seen = 0.0
         self._looking_drawn: str | None = None
@@ -114,6 +115,8 @@ class Status(QObject):
             self.switched.emit(switch)
         elif kind == "gaze":
             self.gaze_paused = bool(event.get("paused"))
+        elif kind == "cameras":
+            self.cameras = [str(d) for d in event.get("devices", []) or []]
         elif kind == "looking":
             looking = event.get("screen") or ""
             fresh = time.monotonic() - self.looking_seen >= 2.5  # back after a gap

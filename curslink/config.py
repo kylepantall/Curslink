@@ -39,14 +39,18 @@ class GazeConfig:
     settings: GazeSettings = field(default_factory=GazeSettings)
     # Agents with their own camera must agree before gaze switches to them.
     confirm: ConfirmSettings = field(default_factory=ConfirmSettings)
+    # Used instead of the calibration when there isn't one: this camera
+    # then only tells whether you face this computer.
+    facing: FacingSettings = field(default_factory=FacingSettings)
 
 
 @dataclass
 class AgentGazeConfig:
-    """``[agent.gaze]``: this agent's own camera confirms gaze switches to it."""
+    """``[agent.gaze]``: this agent's own camera tells the host when you face it."""
 
     enabled: bool = False
     camera: int = 0
+    camera_name: str = ""            # follow this camera if its index changes
     preview: bool = False
     settings: FacingSettings = field(default_factory=FacingSettings)
 
@@ -259,6 +263,7 @@ def host_config(raw: dict[str, Any], base_dir: Path = Path(".")) -> HostConfig:
             pitch_weight=float(g.get("pitch_weight", defaults.pitch_weight)),
         ),
         confirm=ConfirmSettings(enabled=bool(g.get("confirm_with_agents", True))),
+        facing=facing_settings(g, "[gaze]", "facing_dwell_ms"),
     )
     secret = _secret(raw)
     relay = relay_target(raw, secret)
@@ -303,9 +308,9 @@ def agent_config(raw: dict[str, Any], base_dir: Path = Path(".")) -> AgentConfig
     return cfg
 
 
-def agent_gaze_config(g: Any) -> AgentGazeConfig:
-    if not isinstance(g, dict):
-        raise ConfigError("[agent.gaze] must be a table")
+def facing_settings(g: dict[str, Any], where: str, dwell_key: str = "dwell_ms") -> FacingSettings:
+    """Facing-detector settings; the host's ``[gaze].dwell_ms`` is the
+    calibrated classifier's, so the host reads ``facing_dwell_ms``."""
     d = FacingSettings()
     try:
         settings = FacingSettings(
@@ -314,15 +319,23 @@ def agent_gaze_config(g: Any) -> AgentGazeConfig:
             center_yaw_deg=float(g.get("center_yaw_deg", d.center_yaw_deg)),
             center_pitch_deg=float(g.get("center_pitch_deg", d.center_pitch_deg)),
             pitch_weight=float(g.get("pitch_weight", d.pitch_weight)),
-            dwell_s=float(g.get("dwell_ms", d.dwell_s * 1000)) / 1000,
+            dwell_s=float(g.get(dwell_key, d.dwell_s * 1000)) / 1000,
         )
     except (TypeError, ValueError) as exc:
-        raise ConfigError(f"[agent.gaze]: {exc}") from exc
+        raise ConfigError(f"{where}: {exc}") from exc
     if settings.facing_deg <= 0:
-        raise ConfigError("[agent.gaze].facing_deg must be positive")
+        raise ConfigError(f"{where}.facing_deg must be positive")
+    return settings
+
+
+def agent_gaze_config(g: Any) -> AgentGazeConfig:
+    if not isinstance(g, dict):
+        raise ConfigError("[agent.gaze] must be a table")
+    settings = facing_settings(g, "[agent.gaze]")
     return AgentGazeConfig(
         enabled=bool(g.get("enabled", False)),
         camera=_int(g, "camera", 0),
+        camera_name=str(g.get("camera_name", "") or ""),
         preview=bool(g.get("preview", False)),
         settings=settings,
     )
