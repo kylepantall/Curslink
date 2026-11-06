@@ -282,3 +282,29 @@ def test_hidden_pair_dialog_command(monkeypatch):
 
     monkeypatch.setattr(dialog, "run", lambda *a: 7 if a == ("Main PC", "host", "desktop") else 0)
     assert cli.main(["_pair-dialog", "Main PC", "host", "desktop"]) == 7
+
+
+def test_store_remembers_where_a_peer_was(tmp_path):
+    store = PairingStore(tmp_path / "pairings.json")
+    store.add("mac", "Mac", "host", b"k" * 32, "192.168.1.5")
+    assert PairingStore(store.path).get("mac").address == "192.168.1.5"
+    store.set_address("mac", "fe80::1%en0")
+    assert PairingStore(store.path).get("mac").address == "fe80::1"
+    store.add("pc", "PC", "agent", b"k" * 32)
+    assert "address" not in json.loads(store.path.read_text())["peers"]["pc"]
+
+
+async def test_agent_falls_back_to_the_paired_address(tmp_path, monkeypatch):
+    from curslink import app
+    from curslink.config import agent_config
+    from curslink.pairing import discovery
+
+    async def nothing(device_id, timeout=3.0):
+        return None
+
+    monkeypatch.setattr(discovery, "find", nothing)
+    store = PairingStore(tmp_path / "pairings.json")
+    store.add("mac", "Mac", "host", b"k" * 32, "192.168.1.5")
+    cfg = agent_config({"agent": {"device_id": "pc", "name": "PC"}})
+    target = await app.resolve_host(cfg, store)
+    assert (target.host, target.port) == ("192.168.1.5", cfg.port)

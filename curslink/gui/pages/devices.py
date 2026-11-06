@@ -330,10 +330,11 @@ class DevicesPage(Page):
             self.say(message)
 
     def paired_ok(self, result) -> None:
+        address = self.pairing.address if self.pairing else ""
         self.pairing = None
         self.code_card.hide()
         peer = result.peer
-        self.store().add(peer.device_id, peer.name, peer.role, result.key)
+        self.store().add(peer.device_id, peer.name, peer.role, result.key, address)
         note = f"Paired with {peer.name}."
         if self.app.role == "host":
             cfg = self.app.config()

@@ -468,7 +468,13 @@ async def resolve_host(cfg: AgentConfig, store: PairingStore) -> ConnectTarget:
 
         found = await find(peer.device_id, timeout=2.0)
         if found is not None and found.control_port:
+            store.set_address(peer.device_id, found.address)
             return ConnectTarget(found.address, found.control_port, ctx, auth_key, relay)
+        if peer.address:
+            # mDNS didn't reach us (some routers and mesh Wi-Fi drop it one
+            # way): try where we paired with it or last found it.
+            log.info("%s didn't answer on mDNS; trying its last address %s:%d", peer.name, peer.address, cfg.port)
+            return ConnectTarget(peer.address, cfg.port, ctx, auth_key, relay)
     if relay:
         return ConnectTarget("", cfg.port, ctx, auth_key, relay)
     if peer is None:

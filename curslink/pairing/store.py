@@ -20,7 +20,7 @@ import os
 import sys
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 ROLES = ("host", "agent")
@@ -50,6 +50,14 @@ class Peer:
     role: str
     key: bytes
     paired_at: float = 0.0
+    # Where it was last reached (an IP or name), so a paired agent can find
+    # its host even when mDNS doesn't make it across the network.
+    address: str = ""
+
+
+def _bare(address: str) -> str:
+    """Drop an IPv6 scope ("fe80::1%en0") and surrounding space."""
+    return (address or "").strip().split("%")[0]
 
 
 class PairingStore:
@@ -93,6 +101,7 @@ class PairingStore:
                 role=str(rec.get("role", "")),
                 key=key,
                 paired_at=float(rec.get("paired_at", 0)),
+                address=str(rec.get("address", "") or ""),
             )
         self._peers, self._stamp = peers, stamp
 
@@ -109,16 +118,26 @@ class PairingStore:
         return [p for p in self._peers.values() if role is None or p.role == role]
 
     # ------------------------------------------------------------- writing
-    def add(self, device_id: str, name: str, role: str, key: bytes) -> Peer:
+    def add(self, device_id: str, name: str, role: str, key: bytes, address: str = "") -> Peer:
         if role not in ROLES:
             raise ValueError(f"role must be one of {ROLES}")
         if len(key) != KEY_BYTES:
             raise ValueError("link keys are 32 bytes")
         self._reload()
-        peer = Peer(device_id, name, role, key, time.time())
+        peer = Peer(device_id, name, role, key, time.time(), _bare(address))
         self._peers[device_id] = peer
         self._save()
         return peer
+
+    def set_address(self, device_id: str, address: str) -> None:
+        """Remember where ``device_id`` was last reached (saved only if it changed)."""
+        address = _bare(address)
+        self._reload()
+        peer = self._peers.get(device_id)
+        if peer is None or not address or peer.address == address:
+            return
+        self._peers[device_id] = replace(peer, address=address)
+        self._save()
 
     def remove(self, device_id: str) -> bool:
         self._reload()
@@ -136,6 +155,7 @@ class PairingStore:
                     "name": p.name,
                     "role": p.role,
                     "paired_at": int(p.paired_at),
+                    **({"address": p.address} if p.address else {}),
                 }
                 for p in self._peers.values()
             },

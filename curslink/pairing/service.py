@@ -96,7 +96,8 @@ class PairingListener:
                 return
             finally:
                 self._busy = False
-            self.store.add(result.peer.device_id, result.peer.name, result.peer.role, result.key)
+            self.store.add(result.peer.device_id, result.peer.name, result.peer.role, result.key,
+                           peer_addr[0] if isinstance(peer_addr, tuple) and peer_addr else "")
             log.info("paired with %s (%s)", result.peer.name, result.peer.device_id)
             self.on_paired(result)
         except (ConnectionError, OSError) as exc:
