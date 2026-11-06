@@ -223,3 +223,11 @@ def test_devices_page_shows_this_computer(desktop, qapp):
     page.refresh()
     texts = " ".join(w.text() for w in page.this.findChildren(type(page.search_state)))
     assert local_hostname() in texts
+
+
+def test_a_config_without_devices_goes_back_to_setup(desktop):
+    desktop.config_path.parent.mkdir(parents=True, exist_ok=True)
+    desktop.config_path.write_text('[host]\neffect = "pop"\n')
+    assert not desktop.has_config()
+    desktop.window.pages["setup"].create()
+    assert desktop.has_config() and desktop.check_config() is None

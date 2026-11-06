@@ -85,6 +85,6 @@ if sys.platform == "darwin":
         coll,
         name="Curslink.app",
         icon=icon,
-        bundle_identifier="io.github.kylepantall.curslink.app",
+        bundle_identifier="io.github.orimovo.curslink.app",
     )
 

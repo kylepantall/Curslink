@@ -16,10 +16,14 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+import logging
+
 import tomlkit
 from tomlkit.items import AoT, Table
 
 from curslink.pairing.store import default_dir
+
+log = logging.getLogger(__name__)
 
 
 def default_config_path() -> Path:
@@ -126,6 +130,11 @@ class ConfigFile:
         return role_of(self.raw())
 
     def save(self) -> None:
+        if not self.path.exists() and "devices" not in self.doc:
+            # The file went (deleted by hand) and this is one setting, not a
+            # whole config: writing it would leave a config that can't load.
+            log.warning("config not saved: the file is gone and this isn't a whole config")
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(prefix=".curslink-", suffix=".toml", dir=self.path.parent)
         try:

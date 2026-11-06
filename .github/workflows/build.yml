@@ -148,8 +148,8 @@ jobs:
               [ -x /Applications/Curslink.app/Contents/MacOS/curslink ] || { echo "::error::no Curslink.app"; exit 1; }
               # macOS records permissions against this identity (packaging/curslink.spec).
               codesign --verify --deep --strict /Applications/Curslink.app
-              codesign -dv /Applications/Curslink.app 2>&1 | grep -qx 'Identifier=io.github.kylepantall.curslink.app' \
-                || { echo "::error::Curslink.app isn't signed as io.github.kylepantall.curslink.app"; exit 1; } ;;
+              codesign -dv /Applications/Curslink.app 2>&1 | grep -qx 'Identifier=io.github.orimovo.curslink.app' \
+                || { echo "::error::Curslink.app isn't signed as io.github.orimovo.curslink.app"; exit 1; } ;;
             Linux)
               sudo dpkg -i out/curslink-$VERSION-${{ matrix.platform }}.deb
               exe=/usr/bin/curslink

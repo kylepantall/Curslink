@@ -19,7 +19,9 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-APP_ID = "io.github.kylepantall.curslink"
+APP_ID = "io.github.orimovo.curslink"
+# The LaunchAgent label before 0.4.3, replaced by refresh().
+OLD_APP_IDS = ("io.github.kylepantall.curslink",)
 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_VALUE = "Curslink"
@@ -127,9 +129,20 @@ class Autostart:
     def refresh(self) -> bool:
         """If start-at-sign-in is on but runs another command than this copy
         would write (the executable moved in an update), rewrite it."""
-        if not getattr(sys, "frozen", False) or not self.is_enabled():
+        if not getattr(sys, "frozen", False):
             return False
         want = launch_command(minimized=True)
+        if self.platform == "darwin":
+            agents = self.home / "Library" / "LaunchAgents"
+            old = [agents / f"{name}.plist" for name in OLD_APP_IDS if (agents / f"{name}.plist").exists()]
+            if old:
+                for path in old:
+                    path.unlink(missing_ok=True)
+                log.info("start-at-sign-in had an old name; renaming it")
+                self.set_enabled(True, want)
+                return True
+        if not self.is_enabled():
+            return False
         if self.command() == want:
             return False
         log.info("start-at-sign-in pointed at an old copy; updating it")

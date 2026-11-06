@@ -63,7 +63,15 @@ class Curslink(QObject):
         return self.prefs.config_path
 
     def has_config(self) -> bool:
-        return self.config_path.exists()
+        """A config to run from. A file with no devices in it (left by
+        deleting the real one while the app ran) counts as none, so the app
+        goes back to setup instead of failing to link."""
+        if not self.config_path.exists():
+            return False
+        try:
+            return "devices" in load_raw(self.config_path)
+        except Exception:
+            return True  # there, but broken: check_config says what's wrong
 
     def config(self) -> ConfigFile:
         return ConfigFile(self.config_path)
@@ -316,7 +324,7 @@ def main(argv: list[str] | None = None) -> int:
     qt.setApplicationName("Curslink")
     qt.setApplicationDisplayName("Curslink")
     qt.setApplicationVersion(__version__)
-    qt.setOrganizationDomain("kylepantall.github.io")
+    qt.setOrganizationDomain("orimovo.github.io")
     qt.setDesktopFileName("curslink")
     if not (sys.platform == "darwin" and getattr(sys, "frozen", False)):
         # The packaged macOS app has its bundle's icon, drawn to Apple's

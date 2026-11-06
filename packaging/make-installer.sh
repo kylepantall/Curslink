@@ -44,7 +44,7 @@ case "$platform" in
 
   macos-*)
     # Curslink.app holds the executable itself, signed as
-    # io.github.kylepantall.curslink.app: that's the identity macOS records
+    # io.github.orimovo.curslink.app: that's the identity macOS records
     # permissions against (see packaging/curslink.spec). `curslink` on PATH
     # is a link to the same executable, so updates replace one copy.
     [ -d "$root/dist/Curslink.app" ] || { echo "no app bundle in dist/Curslink.app" >&2; exit 1; }
@@ -64,7 +64,7 @@ case "$platform" in
     if [ "$identity" != - ]; then
       codesign --force --deep --sign "$identity" "$bundle"
     fi
-    codesign --force --sign "$identity" --identifier io.github.kylepantall.curslink.app "$bundle"
+    codesign --force --sign "$identity" --identifier io.github.orimovo.curslink.app "$bundle"
     codesign --verify --deep --strict "$bundle"
     cp "$here/macos/preinstall" "$stage/scripts/preinstall"
     chmod +x "$stage/scripts/preinstall"
@@ -77,7 +77,7 @@ case "$platform" in
       --component-plist "$stage/components.plist" \
       --install-location / \
       --scripts "$stage/scripts" \
-      --identifier io.github.kylepantall.curslink \
+      --identifier io.github.orimovo.curslink \
       --version "$numeric" \
       "$stage/component.pkg"
     # A product archive gets the standard installer window and a title.
@@ -88,8 +88,8 @@ case "$platform" in
   <options customize="never" require-scripts="false" hostArchitectures="arm64"/>
   <domains enable_localSystem="true"/>
   <choices-outline><line choice="default"/></choices-outline>
-  <choice id="default" title="Curslink"><pkg-ref id="io.github.kylepantall.curslink"/></choice>
-  <pkg-ref id="io.github.kylepantall.curslink" version="$numeric">component.pkg</pkg-ref>
+  <choice id="default" title="Curslink"><pkg-ref id="io.github.orimovo.curslink"/></choice>
+  <pkg-ref id="io.github.orimovo.curslink" version="$numeric">component.pkg</pkg-ref>
 </installer-gui-script>
 XML
     productbuild --distribution "$stage/distribution.xml" --package-path "$stage" "$out/$name.pkg"
