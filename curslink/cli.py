@@ -1,4 +1,4 @@
-"""``curslink host | agent | pair | unpair | relay | invite | calibrate | check | overlay-test``"""
+"""``curslink host | agent | pair | unpair | relay | invite | calibrate | check | update | overlay-test``"""
 
 from __future__ import annotations
 
@@ -43,16 +43,29 @@ def _host_cfg(path: str):
     return host_config(load_raw(p), base_dir=p.parent)
 
 
+def _updates(path: str, argv: list[str]) -> None:
+    """Install a newer release before starting, then keep an eye out for the next."""
+    from curslink import update
+
+    p = Path(path)
+    raw = load_raw(p) if p.exists() else {}
+    update.on_start(raw, argv)
+    update.watch(raw)
+
+
 def cmd_host(args) -> int:
     from curslink.app import run_host
 
-    asyncio.run(run_host(_host_cfg(args.config)))
+    cfg = _host_cfg(args.config)
+    _updates(args.config, args.argv)
+    asyncio.run(run_host(cfg))
     return 0
 
 
 def cmd_agent(args) -> int:
     from curslink.app import run_agent
 
+    _updates(args.config, args.argv)
     raw = load_raw(args.config)
     if args.host:
         raw.setdefault("agent", {})["host"] = args.host
@@ -275,6 +288,53 @@ def cmd_check(args) -> int:
     return 0
 
 
+def cmd_update(args) -> int:
+    from curslink import update
+
+    path = Path(args.config)
+    settings = update.UpdateSettings()
+    if path.exists():
+        try:
+            settings = update.update_settings(load_raw(path))
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from exc
+    if args.pre:
+        settings.prerelease = True
+    kind = update.install_kind()
+    try:
+        release = update.check(settings)
+    except update.UpdateError as exc:
+        print(f"Update check failed: {exc}", file=sys.stderr)
+        return 1
+    if release is None:
+        print(f"Curslink {__version__} is the newest release.")
+        return 0
+    print(f"Curslink {release.version} is out (you have {__version__}): {release.url}")
+    if args.check:
+        return 0
+    if kind is None:
+        print('This copy runs from source; update it with: pip install -U "curslink[gaze] @ git+https://github.com/kylepantall/Curslink"')
+        return 0
+    if not args.yes:
+        if not sys.stdin.isatty():
+            print("Pass --yes to install it without asking.", file=sys.stderr)
+            return 1
+        if input("Install it now? [Y/n] ").strip().lower() not in ("", "y", "yes"):
+            return 1
+
+    def progress(done: int, total: int) -> None:
+        if total:
+            print(f"\rDownloading... {done * 100 // total}%", end="", flush=True)
+
+    try:
+        message = update.update(release, kind, progress=progress)
+    except update.UpdateError as exc:
+        print(f"\nUpdate failed: {exc}", file=sys.stderr)
+        return 1
+    print(f"\n{message}")
+    return 0
+
+
 def cmd_overlay_test(args) -> int:
     import time
 
@@ -351,6 +411,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-c", "--config", default="curslink.toml")
     p.set_defaults(func=cmd_check)
 
+    p = sub.add_parser("update", help="install the newest Curslink release")
+    p.add_argument("-c", "--config", default="curslink.toml", help="read [update] settings from here, if it exists")
+    p.add_argument("--check", action="store_true", help="only say whether there's a newer release")
+    p.add_argument("--yes", "-y", action="store_true", help="install without asking")
+    p.add_argument("--pre", action="store_true", help="include pre-releases")
+    p.set_defaults(func=cmd_update)
+
     p = sub.add_parser("overlay-test", help="play the switch animation")
     p.add_argument("--effect", choices=["pop", "blink"], default="pop")
     p.add_argument("x", type=int, nargs="?", default=400)
@@ -373,7 +440,14 @@ def main(argv: list[str] | None = None) -> int:
         return dialog_main(argv[1:])
     if argv[:1] == ["_selftest"]:
         return _selftest()
+    if argv[:1] == ["_install-kind"]:
+        # How this copy was installed (used by CI to check the installers).
+        from curslink.update import install_kind
+
+        print(install_kind() or "source")
+        return 0
     args = build_parser().parse_args(argv)
+    args.argv = argv
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",

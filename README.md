@@ -31,11 +31,43 @@ push the pointer off the edge of a screen into the next device, with a
 
 ## Quick start
 
-Download the build for each device from the
-[latest release](https://github.com/kylepantall/Curslink/releases/latest)
-(`windows-x64.zip`, `macos-arm64.tar.gz` or `linux-x64.tar.gz`), unpack it,
-and run `curslink` from the unpacked folder. The builds include camera
-switching and need no Python.
+Install Curslink on each device from the
+[latest release](https://github.com/kylepantall/Curslink/releases/latest).
+The builds include camera switching and need no Python.
+
+| Platform | Installer | Installs to |
+| --- | --- | --- |
+| Windows | `curslink-X.Y.Z-windows-x64-setup.exe` | `%LOCALAPPDATA%\Programs\Curslink` (no admin needed), added to your PATH |
+| macOS (Apple silicon) | `curslink-X.Y.Z-macos-arm64.pkg` | `/usr/local/lib/curslink`, with `curslink` in `/usr/local/bin` |
+| Linux (Debian, Ubuntu) | `curslink-X.Y.Z-linux-x64.deb` | `/opt/curslink`, with `curslink` in `/usr/bin` (`sudo apt install ./curslink-*.deb`) |
+
+The installers aren't code-signed yet: on Windows click "More info" then
+"Run anyway" in SmartScreen; on macOS right-click the `.pkg` and choose
+Open. Portable archives (`.zip`, `.tar.gz`) are there too if you'd rather
+unpack and run `curslink` from the folder.
+
+### Updates
+
+An installed Curslink keeps itself up to date. Each time `curslink host` or
+`curslink agent` starts, it checks GitHub for a newer release, downloads the
+installer for your platform, checks it against the release's
+`SHA256SUMS.txt`, installs it and restarts with the same arguments. On macOS
+and Linux installing asks for your password; on Windows it runs silently. While
+running, it checks once a day and logs when a new version is out, which then
+installs at the next start.
+
+* `curslink update` updates by hand (`--check` only looks, `--pre` includes
+  release candidates).
+* Turn it off or down in `curslink.toml`, or set `CURSLINK_NO_UPDATE=1`:
+
+  ```toml
+  [update]
+  check = true        # look for new releases
+  auto = true         # install them at startup (false: just say so)
+  prerelease = false
+  ```
+* While the repository is private, set `CURSLINK_GITHUB_TOKEN` to a GitHub
+  token that can read it, or the check can't see the releases.
 
 Or install from source with Python 3.13+:
 
@@ -150,6 +182,10 @@ To build the packaged app locally: `pip install ".[gaze]" pyinstaller`, then
 
 Releasing: bump the version in `pyproject.toml` and `curslink/__init__.py`,
 then push a tag such as `v0.2.0`. The Release workflow builds every platform
-and publishes a GitHub release with the archives and `SHA256SUMS.txt`.
+and publishes a GitHub release with the installers, the archives and
+`SHA256SUMS.txt`; installed copies pick it up on their next start. To build an
+installer locally after PyInstaller: `packaging/make-installer.sh 0.2.0
+linux-x64 out` (needs Inno Setup on Windows, Xcode tools on macOS, `dpkg-deb`
+on Linux).
 
 Design notes and the roadmap live in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).

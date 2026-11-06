@@ -2,9 +2,11 @@ name: App builds
 
 # Builds the packaged Curslink app for Windows, macOS and Linux: one folder
 # per platform holding the curslink executable and everything it loads
-# (MediaPipe, OpenCV, Tk), so nobody needs Python installed. The release
-# calls this and attaches the archives; a PR that touches the packaging
-# builds on its own, so a broken build shows up before release day.
+# (MediaPipe, OpenCV, Tk), so nobody needs Python installed, plus an
+# installer per platform (Windows setup .exe, macOS .pkg, Linux .deb) that
+# `curslink update` uses to install newer releases. The release calls this
+# and attaches everything; a PR that touches the packaging builds on its
+# own, so a broken build shows up before release day.
 on:
   workflow_call:
     inputs:
@@ -15,6 +17,7 @@ on:
     paths:
       - packaging/**
       - pyproject.toml
+      - curslink/update.py
       - .github/workflows/build.yml
   workflow_dispatch:
 
@@ -87,6 +90,35 @@ jobs:
             tar -czf "out/$name.tar.gz" -C dist curslink
           fi
           ls -l out
+
+      - name: Build the installer
+        run: packaging/make-installer.sh "$VERSION" ${{ matrix.platform }} out
+
+      # Install it the way a user would, then check the installed copy runs
+      # and knows how it was installed (which is what the updater goes by).
+      - name: Smoke test the installer
+        run: |
+          case "$RUNNER_OS" in
+            Windows)
+              setup=$(cygpath -w out/curslink-$VERSION-${{ matrix.platform }}-setup.exe)
+              powershell -NoProfile -Command "Start-Process -Wait -FilePath '$setup' -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART'"
+              exe="$(cygpath -u "$LOCALAPPDATA")/Programs/Curslink/curslink.exe"
+              powershell -NoProfile -Command "[Environment]::GetEnvironmentVariable('Path','User')" | grep -qi 'Programs\\Curslink' \
+                || { echo "::error::the installer didn't add Curslink to PATH"; exit 1; }
+              want=windows-setup ;;
+            macOS)
+              sudo installer -pkg out/curslink-$VERSION-${{ matrix.platform }}.pkg -target /
+              exe=/usr/local/bin/curslink
+              want=macos-pkg ;;
+            Linux)
+              sudo dpkg -i out/curslink-$VERSION-${{ matrix.platform }}.deb
+              exe=/usr/bin/curslink
+              want=deb ;;
+          esac
+          "$exe" --version
+          "$exe" _selftest
+          got=$("$exe" _install-kind | tr -d '\r')
+          [ "$got" = "$want" ] || { echo "::error::installed copy says it is '$got', not '$want'"; exit 1; }
 
       - uses: actions/upload-artifact@v4
         with:

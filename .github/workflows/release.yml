@@ -1,8 +1,10 @@
 name: Release
 
 # Tag a commit v1.2.3 (or run this by hand with a tag) and this builds the
-# app for every platform and publishes a GitHub release with the archives
-# and their SHA256SUMS.txt.
+# app for every platform and publishes a GitHub release with the installers,
+# the portable archives and their SHA256SUMS.txt. Installed copies find the
+# release through GitHub's "latest release" and check what they download
+# against SHA256SUMS.txt (curslink/update.py), so every file goes in it.
 #
 #   git tag v0.2.0 && git push origin v0.2.0
 #   gh workflow run release.yml -f tag=v0.2.0
@@ -75,7 +77,7 @@ jobs:
         run: |
           mkdir -p dist && cd dist
           shopt -s nullglob
-          files=(*.zip *.tar.gz)
+          files=(*.zip *.tar.gz *.exe *.pkg *.deb)
           echo "count=${#files[@]}" >> "$GITHUB_OUTPUT"
           if [ ${#files[@]} -eq 0 ]; then
             echo "::error::No platform built; nothing to release."
@@ -100,4 +102,7 @@ jobs:
           files: |
             dist/*.zip
             dist/*.tar.gz
+            dist/*.exe
+            dist/*.pkg
+            dist/*.deb
             dist/SHA256SUMS.txt
