@@ -6,7 +6,7 @@ field. The format is intentionally tiny and language-neutral so that a
 future Android agent (Kotlin) can speak it without any Python code.
 
 Host -> agent
-    welcome      {device_id}
+    welcome      {device_id, features}  features: optional list, e.g. ["facing"]
     enter        {x, y, effect}        agent now owns the pointer; warp to x, y
     leave        {}                    host took control back
     move         {x, y}                absolute position in the agent's OS coords
@@ -16,8 +16,15 @@ Host -> agent
     ping         {n}
 
 Agent -> host
-    hello        {v, device_id, name, platform, screens, auth}
+    hello        {v, device_id, name, platform, screens, auth, camera}
     pong         {n}
+    facing       {facing}              the agent's own camera sees the user
+                                       facing it (true) or not (false)
+
+``hello.camera`` is true when the agent runs its own camera to confirm
+gaze switches (see :mod:`curslink.gaze.confirm`). An agent only sends
+``facing`` to a host whose ``welcome.features`` lists ``"facing"``, so
+older hosts never see a frame type they don't know.
 
 ``hello.auth`` proves which key the agent holds (see
 :func:`curslink.security.hello_auth`); agents older than pairing omit it.
@@ -51,6 +58,7 @@ MESSAGE_TYPES = frozenset(
         "key",
         "ping",
         "pong",
+        "facing",
         "bye",
         "pair_hello",
         "pair_key",
@@ -61,6 +69,8 @@ MESSAGE_TYPES = frozenset(
 
 BUTTONS = frozenset({"left", "right", "middle", "x1", "x2"})
 EFFECTS = frozenset({"pop", "blink", "none"})
+# What this host understands beyond the base protocol, sent in welcome.features.
+HOST_FEATURES = ("facing",)
 
 
 class ProtocolError(ValueError):
@@ -129,6 +139,9 @@ def _validate(msg: Message) -> None:
             raise ProtocolError("key.key must be a non-empty string")
         if not isinstance(msg.data.get("pressed"), bool):
             raise ProtocolError("key.pressed must be a boolean")
+    elif t == "facing":
+        if not isinstance(msg.data.get("facing"), bool):
+            raise ProtocolError("facing.facing must be a boolean")
     elif t == "hello":
         if msg.data.get("v") != PROTOCOL_VERSION:
             raise ProtocolError(
