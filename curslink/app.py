@@ -27,26 +27,72 @@ log = logging.getLogger(__name__)
 
 
 class LoopBridge:
-    """Hands input callbacks from pynput's threads to the asyncio loop."""
+    """Hands input callbacks from pynput's threads to the asyncio loop.
+
+    Relative motion is added up until the loop gets to it, so a fast mouse
+    (1000 reports a second) sends the agent one move per loop turn instead
+    of a backlog of tiny ones it then replays late. Buttons, scrolls and keys
+    take any motion still waiting with them, so a click lands where the
+    pointer was when you clicked.
+    """
 
     def __init__(self, loop: asyncio.AbstractEventLoop, router: Router):
         self._loop = loop
         self._router = router
+        self._lock = threading.Lock()
+        self._dx = 0.0
+        self._dy = 0.0
+        self._pending = False
+        self._gen = 0  # a flush scheduled before the last take is stale
 
     def on_pointer(self, x, y):
         self._loop.call_soon_threadsafe(self._router.on_pointer, x, y)
 
     def on_motion(self, dx, dy):
-        self._loop.call_soon_threadsafe(self._router.on_motion, dx, dy)
+        with self._lock:
+            self._dx += dx
+            self._dy += dy
+            if self._pending:
+                return
+            self._pending = True
+            gen = self._gen
+        self._loop.call_soon_threadsafe(self._flush, gen)
+
+    def _take(self) -> tuple[float, float]:
+        with self._lock:
+            dx, dy = self._dx, self._dy
+            self._dx = self._dy = 0.0
+            self._pending = False
+            self._gen += 1
+        return dx, dy
+
+    def _flush(self, gen: int) -> None:
+        with self._lock:
+            if gen != self._gen:
+                return  # a button or key took this motion with it
+        dx, dy = self._take()
+        if dx or dy:
+            self._router.on_motion(dx, dy)
+
+    def _after_motion(self, fn, *args):
+        """Run ``fn`` on the loop after the motion waiting now."""
+        dx, dy = self._take()
+
+        def run():
+            if dx or dy:
+                self._router.on_motion(dx, dy)
+            fn(*args)
+
+        self._loop.call_soon_threadsafe(run)
 
     def on_button(self, button, pressed):
-        self._loop.call_soon_threadsafe(self._router.on_button, button, pressed)
+        self._after_motion(self._router.on_button, button, pressed)
 
     def on_scroll(self, dx, dy):
-        self._loop.call_soon_threadsafe(self._router.on_scroll, dx, dy)
+        self._after_motion(self._router.on_scroll, dx, dy)
 
     def on_key(self, key, pressed):
-        self._loop.call_soon_threadsafe(self._router.on_key, key, pressed)
+        self._after_motion(self._router.on_key, key, pressed)
 
 
 class Pairing:
@@ -214,13 +260,34 @@ async def run_host(cfg: HostConfig) -> None:
         active=router.active_device, screen=router.screen.id,
         gaze=tracker is not None, gaze_paused=router.gaze_paused,
     )
+    gaze = {"tracker": tracker}
+
+    async def calibrate_on() -> None:
+        """The app is calibrating: give it the camera, and keep input here.
+        Linking stays up so agents can show "Look here" on their screens; the
+        app restarts us afterwards, which brings gaze back."""
+        if not router.is_local:
+            router.go_home("app")
+        running, gaze["tracker"] = gaze["tracker"], None
+        if running is not None:
+            await loop.run_in_executor(None, running.stop)
+        events.emit("calibrating", on=True)
+
+    def command(line: str) -> None:
+        if line == "calibrate on":
+            loop.create_task(calibrate_on())
+        elif line.startswith("look "):
+            look_command(server, line[5:])
+        else:
+            host_command(router, stop, line)
+
     if events.channel.enabled:
-        events.read_commands(loop, lambda command: host_command(router, stop, command))
+        events.read_commands(loop, command)
     try:
         await stop.wait()
     finally:
-        if tracker:
-            tracker.stop()
+        if gaze["tracker"]:
+            gaze["tracker"].stop()
         capture.stop()
         overlay.close()
         await pairing.close()
@@ -244,6 +311,29 @@ def host_command(router: Router, stop: asyncio.Event, command: str) -> None:
         router.set_gaze_paused(not router.gaze_paused)
     else:
         log.debug("unknown command %r", command)
+
+
+def look_command(server: HostServer, payload: str) -> None:
+    """``look {"device": ..., "screen": ..., ...}`` shows the calibration's
+    "Look here" card on that agent's screen; ``look {"hide": true}`` takes it
+    down everywhere."""
+    import json
+
+    try:
+        data = json.loads(payload)
+        if not isinstance(data, dict):
+            raise ValueError("not an object")
+    except ValueError as exc:
+        log.debug("bad look command %r: %s", payload, exc)
+        return
+    device = data.pop("device", None)
+    for device_id in list(server.connections):
+        if not server.supports(device_id, "look"):
+            continue
+        if device_id == device and not data.get("hide"):
+            server.send(device_id, "look", **data)
+        else:
+            server.send(device_id, "look", hide=True)
 
 
 def start_gaze(cfg: HostConfig, router: Router, loop: asyncio.AbstractEventLoop, server: HostServer | None = None):
@@ -356,7 +446,14 @@ async def run_agent(cfg: AgentConfig) -> None:
         cfg.device_id, cfg.name, cfg.host, cfg.port, None, session,
         resolve=lambda: resolve_host(cfg, store),
     )
-    client.on_state = lambda state, detail: events.emit("host", state=state, detail=detail)
+    session.on_look = lambda data: events.emit("look", **data)
+
+    def on_state(state: str, detail: str) -> None:
+        if state != "connected":
+            events.emit("look", hide=True)  # the host can't take it down now
+        events.emit("host", state=state, detail=detail)
+
+    client.on_state = on_state
     camera = start_facing(cfg, client, asyncio.get_running_loop()) if cfg.gaze.enabled else None
     pairing = Pairing(cfg.pairing, DeviceInfo(cfg.device_id, cfg.name, "agent"), store)
     await pairing.start()

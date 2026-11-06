@@ -31,6 +31,7 @@ class AgentConnection:
     last_seen: float = 0.0
     camera: bool = False          # runs its own camera to confirm gaze switches
     facing: bool | None = None    # last thing that camera reported
+    features: frozenset = frozenset()  # hello.features: what else it understands
 
 
 class HostServer:
@@ -78,6 +79,10 @@ class HostServer:
     def is_connected(self, device_id: str) -> bool:
         return device_id in self.connections
 
+    def supports(self, device_id: str, feature: str) -> bool:
+        conn = self.connections.get(device_id)
+        return conn is not None and feature in conn.features
+
     def send(self, device_id: str, t: str, **data) -> None:
         conn = self.connections.get(device_id)
         if conn is None:
@@ -122,6 +127,7 @@ class HostServer:
                 screens=list(hello.get("screens", []) or []),
                 last_seen=loop.time(),
                 camera=hello.get("camera") is True,
+                features=frozenset(f for f in (hello.get("features") or []) if isinstance(f, str)),
             )
             self.connections[device_id] = conn
             writer.write(encode("welcome", device_id=device_id, features=list(HOST_FEATURES)))

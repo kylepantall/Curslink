@@ -13,7 +13,7 @@ from typing import Awaitable, Callable
 from curslink.inputs.base import InputSink
 from curslink.net.framing import STREAM_LIMIT, read_message
 from curslink.net.relay import RelayError, RelayTarget, agent_connect
-from curslink.protocol import PROTOCOL_VERSION, Message, ProtocolError, encode
+from curslink.protocol import AGENT_FEATURES, PROTOCOL_VERSION, Message, ProtocolError, encode
 from curslink.security import channel_binding, hello_auth
 
 log = logging.getLogger(__name__)
@@ -31,6 +31,9 @@ class AgentSession:
     def __init__(self, sink: InputSink, show_effect: Callable[[str, int, int], None]):
         self.sink = sink
         self.show_effect = show_effect
+        # The host's calibration asks this device to show "Look here" on one
+        # of its screens (or to hide it). See curslink.gui.overlay.
+        self.on_look: Callable[[dict], None] = lambda data: None
         self.active = False
         self.keys: set[str] = set()
         self.buttons: set[str] = set()
@@ -49,6 +52,8 @@ class AgentSession:
             self.release_all()
         elif t == "move":
             self.sink.move_to(int(msg.data["x"]), int(msg.data["y"]))
+        elif t == "look":
+            self.on_look(dict(msg.data))
         elif t == "button":
             name, pressed = msg.data["button"], msg.data["pressed"]
             if not pressed and name not in self.buttons:
@@ -187,6 +192,7 @@ class AgentClient:
                 name=self.name,
                 platform=f"{platform.system()} {platform.release()}",
                 screens=detect_screens(),
+                features=list(AGENT_FEATURES),
             )
             if self.facing_source is not None:
                 hello["camera"] = True

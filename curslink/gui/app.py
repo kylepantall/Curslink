@@ -50,6 +50,10 @@ class Curslink(QObject):
         self.service.event.connect(self.status.apply)
         self.service.output.connect(lambda line: self.status.add_log("output", line))
         self.service.state_changed.connect(self._on_service_state)
+        self.service.event.connect(self._on_look)
+        self.calibrating = False  # host: the service gave the camera to calibration
+        self.service.event.connect(self._on_calibrating)
+        self._look = None
         self.release: update.Release | None = None
         self.quitting = False
         self.window = None
@@ -139,9 +143,29 @@ class Curslink(QObject):
     def linking(self) -> bool:
         return self.service.state in (STARTING, RUNNING)
 
+    def _on_look(self, event: dict) -> None:
+        """Agent: the host's calibration wants "Look here" on one of our screens."""
+        if event.get("event") != "look":
+            return
+        if self._look is None:
+            if event.get("hide"):
+                return
+            from curslink.gui.overlay import RemoteLookHere
+
+            self._look = RemoteLookHere()
+        self._look.apply(event)
+
+    def _on_calibrating(self, event: dict) -> None:
+        if event.get("event") == "calibrating":
+            self.calibrating = bool(event.get("on"))
+
     def _on_service_state(self, state: str) -> None:
+        if state != RUNNING:
+            self.calibrating = False
         if state in (STOPPED, FAILED):
             self.status.stopped()
+            if self._look is not None:
+                self._look.hide()
         self.service_changed.emit(state)
 
     # -- updates --------------------------------------------------------------

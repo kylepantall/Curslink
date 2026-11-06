@@ -140,6 +140,26 @@ def test_gaze_within_same_device_is_opt_in(parts):
     assert sink.calls[-1] == ("move", 2880, 540)
 
 
+def test_gaze_back_home_lands_where_you_left_it_not_on_the_monitor_looked_at(parts):
+    router, _, sink, _, _ = parts
+    router.on_pointer(500, 400)                 # working on the left monitor
+    router.on_gaze(Target("laptop", "main"))
+    assert router.active_device == "laptop"
+    router.on_gaze(Target("desktop", "right"))  # eyes land on the right monitor
+    assert router.is_local
+    assert router.screen.id == "left"
+    assert sink.calls[-1] == ("move", 500, 400)
+
+
+def test_gaze_to_another_device_ignores_which_of_its_monitors(parts):
+    router, _, sink, _, _ = parts
+    router.on_pointer(2500, 300)                # right monitor
+    router.on_gaze(Target("laptop", "main"))
+    router.on_gaze(Target("desktop", "left"))
+    assert router.screen.id == "right"
+    assert sink.calls[-1] == ("move", 2500, 300)
+
+
 def test_disconnect_of_active_device_returns_home(parts):
     router, capture, _, transport, _ = parts
     router.on_pointer(3839, 500)

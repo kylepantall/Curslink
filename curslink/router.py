@@ -190,10 +190,19 @@ class Router:
         if screen.device_id == self.active_device:
             if not self.settings.gaze_within_device or screen == self.screen:
                 return
-        x, y = self._last_pos.get(screen.device_id, screen.center)
-        if not screen.contains(x, y):
-            x, y = screen.center
-        self.switch_to(screen, x, y, "gaze")
+            self.switch_to(screen, *screen.center, "gaze")
+            return
+        # Gaze picks the device, not the monitor: the pointer comes back
+        # wherever you left it on that device, even if your eyes land on
+        # another of its screens. Only a device never visited starts on the
+        # screen you looked at.
+        last = self._last_pos.get(screen.device_id)
+        if last is not None:
+            here = self.layout.screen_at(*last, screen.device_id)
+            if here is not None:
+                self.switch_to(here, *last, "gaze")
+                return
+        self.switch_to(screen, *screen.center, "gaze")
 
     # ------------------------------------------------------- connectivity
     def on_disconnect(self, device_id: str) -> None:

@@ -51,6 +51,20 @@ async def test_forwarding_end_to_end():
     assert disconnected == ["laptop"]
 
 
+async def test_look_reaches_an_agent_that_says_it_understands_it():
+    server, client, task, sink, effects, disconnected = await start()
+    looks = []
+    client.session.on_look = looks.append
+    await wait_for(lambda: server.is_connected("laptop"))
+    assert server.supports("laptop", "look")
+    server.send("laptop", "look", screen="main", step="Step 1 of 2")
+    server.send("laptop", "look", hide=True)
+    await wait_for(lambda: len(looks) >= 2)
+    assert looks == [{"screen": "main", "step": "Step 1 of 2"}, {"hide": True}]
+    await server.close()
+    await asyncio.wait_for(task, 3)
+
+
 async def test_wrong_secret_cannot_connect():
     server, client, task, sink, *_ = await start(secret_client="a different secret!")
     with pytest.raises((ssl.SSLError, ConnectionError, OSError)):
