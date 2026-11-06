@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from curslink.net.framing import STREAM_LIMIT, read_message
-from curslink.protocol import Message, ProtocolError, encode
+from curslink.protocol import HOST_FEATURES, Message, ProtocolError, encode
 
 log = logging.getLogger(__name__)
 
@@ -29,6 +29,8 @@ class AgentConnection:
     writer: asyncio.StreamWriter
     screens: list = field(default_factory=list)
     last_seen: float = 0.0
+    camera: bool = False          # runs its own camera to confirm gaze switches
+    facing: bool | None = None    # last thing that camera reported
 
 
 class HostServer:
@@ -48,6 +50,8 @@ class HostServer:
         self.ssl_context = ssl_context
         self.on_connect = on_connect
         self.on_disconnect = on_disconnect
+        # (device_id, facing): an agent's own camera sees the user facing it or not.
+        self.on_facing: Callable[[str, bool], None] = lambda device_id, facing: None
         self.host = host
         self.port = port
         # (device_id, hello.auth, TLS channel binding) -> allowed? See security.HelloVerifier.
@@ -117,9 +121,10 @@ class HostServer:
                 writer=writer,
                 screens=list(hello.get("screens", []) or []),
                 last_seen=loop.time(),
+                camera=hello.get("camera") is True,
             )
             self.connections[device_id] = conn
-            writer.write(encode("welcome", device_id=device_id))
+            writer.write(encode("welcome", device_id=device_id, features=list(HOST_FEATURES)))
             log.info("agent %s (%s, %s) connected from %s", device_id, conn.name, conn.platform, peer)
             self.on_connect(conn)
             pinger = asyncio.create_task(self._ping(conn))
@@ -148,6 +153,9 @@ class HostServer:
     def _on_message(self, conn: AgentConnection, msg: Message) -> None:
         if msg.t == "bye":
             conn.writer.close()
+        elif msg.t == "facing":
+            conn.facing = msg.data["facing"]
+            self.on_facing(conn.device_id, conn.facing)
 
     async def _ping(self, conn: AgentConnection) -> None:
         loop = asyncio.get_running_loop()

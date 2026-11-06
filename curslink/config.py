@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from curslink.gaze.confirm import ConfirmSettings, FacingSettings
 from curslink.gaze.zones import GazeSettings
 from curslink.layout import Device, Layout, Screen
 from curslink.pairing.service import DEFAULT_PAIRING_PORT
@@ -35,6 +36,18 @@ class GazeConfig:
     calibration: Path = Path("calibration.json")
     preview: bool = False
     settings: GazeSettings = field(default_factory=GazeSettings)
+    # Agents with their own camera must agree before gaze switches to them.
+    confirm: ConfirmSettings = field(default_factory=ConfirmSettings)
+
+
+@dataclass
+class AgentGazeConfig:
+    """``[agent.gaze]``: this agent's own camera confirms gaze switches to it."""
+
+    enabled: bool = False
+    camera: int = 0
+    preview: bool = False
+    settings: FacingSettings = field(default_factory=FacingSettings)
 
 
 @dataclass
@@ -74,6 +87,7 @@ class AgentConfig:
     animations: bool = True
     relay: RelayTarget | None = None
     pairing: PairingConfig = field(default_factory=PairingConfig)
+    gaze: AgentGazeConfig = field(default_factory=AgentGazeConfig)
 
 
 def _secret(raw: dict[str, Any]) -> str | None:
@@ -242,6 +256,7 @@ def host_config(raw: dict[str, Any], base_dir: Path = Path(".")) -> HostConfig:
             dwell_s=float(g.get("dwell_ms", defaults.dwell_s * 1000)) / 1000,
             pitch_weight=float(g.get("pitch_weight", defaults.pitch_weight)),
         ),
+        confirm=ConfirmSettings(enabled=bool(g.get("confirm_with_agents", True))),
     )
     secret = _secret(raw)
     relay = relay_target(raw, secret)
@@ -279,7 +294,33 @@ def agent_config(raw: dict[str, Any], base_dir: Path = Path(".")) -> AgentConfig
         modifier_map=dict(agent.get("modifier_map", {})),
         animations=agent.get("animations", True),
         pairing=pairing_config(raw, base_dir),
+        gaze=agent_gaze_config(agent.get("gaze", {})),
     )
     if not cfg.host and not cfg.relay and not cfg.pairing.enabled:
         raise ConfigError("set [agent].host (LAN), a [relay] (internet), or leave [pairing] enabled")
     return cfg
+
+
+def agent_gaze_config(g: Any) -> AgentGazeConfig:
+    if not isinstance(g, dict):
+        raise ConfigError("[agent.gaze] must be a table")
+    d = FacingSettings()
+    try:
+        settings = FacingSettings(
+            facing_deg=float(g.get("facing_deg", d.facing_deg)),
+            hysteresis_deg=float(g.get("hysteresis_deg", d.hysteresis_deg)),
+            center_yaw_deg=float(g.get("center_yaw_deg", d.center_yaw_deg)),
+            center_pitch_deg=float(g.get("center_pitch_deg", d.center_pitch_deg)),
+            pitch_weight=float(g.get("pitch_weight", d.pitch_weight)),
+            dwell_s=float(g.get("dwell_ms", d.dwell_s * 1000)) / 1000,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"[agent.gaze]: {exc}") from exc
+    if settings.facing_deg <= 0:
+        raise ConfigError("[agent.gaze].facing_deg must be positive")
+    return AgentGazeConfig(
+        enabled=bool(g.get("enabled", False)),
+        camera=_int(g, "camera", 0),
+        preview=bool(g.get("preview", False)),
+        settings=settings,
+    )

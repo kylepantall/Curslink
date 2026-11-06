@@ -12,6 +12,7 @@ from dataclasses import replace
 
 from curslink import events
 from curslink.config import AgentConfig, HostConfig, PairingConfig
+from curslink.gaze.confirm import FacingDetector, GazeArbiter
 from curslink.gaze.zones import Calibration, GazeClassifier, Target
 from curslink.net.client import AgentClient, AgentSession, NotReady
 from curslink.net.client import Target as ConnectTarget
@@ -199,7 +200,7 @@ async def run_host(cfg: HostConfig) -> None:
 
     tracker = None
     if cfg.gaze.enabled:
-        tracker = start_gaze(cfg, router, loop)
+        tracker = start_gaze(cfg, router, loop, server)
 
     log.info(
         "Curslink host running as %r. Return hotkey: %s, gaze toggle: %s",
@@ -245,7 +246,7 @@ def host_command(router: Router, stop: asyncio.Event, command: str) -> None:
         log.debug("unknown command %r", command)
 
 
-def start_gaze(cfg: HostConfig, router: Router, loop: asyncio.AbstractEventLoop):
+def start_gaze(cfg: HostConfig, router: Router, loop: asyncio.AbstractEventLoop, server: HostServer | None = None):
     from curslink.gaze.tracker import HeadPoseTracker
 
     if not cfg.gaze.calibration.exists():
@@ -254,26 +255,63 @@ def start_gaze(cfg: HostConfig, router: Router, loop: asyncio.AbstractEventLoop)
             cfg.gaze.calibration,
         )
         return None
+    arbiter = make_arbiter(cfg, router)
+    if server is not None:
+        wire_agent_cameras(server, arbiter)
+
+    tracker = HeadPoseTracker(
+        lambda t, yaw, pitch: loop.call_soon_threadsafe(arbiter.on_sample, t, yaw, pitch),
+        camera=cfg.gaze.camera,
+        preview=cfg.gaze.preview,
+    )
+    tracker.start()
+    return tracker
+
+
+def make_arbiter(cfg: HostConfig, router: Router) -> GazeArbiter:
+    """The host's gaze classifier, checked against agents' own cameras."""
     classifier = GazeClassifier(Calibration.load(cfg.gaze.calibration), cfg.gaze.settings)
+    arbiter = GazeArbiter(
+        classifier,
+        cfg.device_id,
+        switch=router.on_gaze,
+        current=lambda: Target(router.active_device, router.screen.id),
+        screens_of=lambda device_id: [s.id for s in cfg.layout.screens(device_id)],
+        settings=cfg.gaze.confirm,
+    )
 
     def on_switch(event: SwitchEvent) -> None:
         classifier.force(Target(event.to_device, event.screen.id))
 
     router.listeners.append(on_switch)
     classifier.force(Target(router.active_device, router.screen.id))
+    arbiter.on_blocked = lambda target: log.debug(
+        "gaze: waiting for %s's camera to confirm you're facing it", target.device_id)
+    return arbiter
 
-    def handle(t: float, yaw: float, pitch: float) -> None:
-        target = classifier.update(t, yaw, pitch)
-        if target is not None:
-            router.on_gaze(target)
 
-    tracker = HeadPoseTracker(
-        lambda t, yaw, pitch: loop.call_soon_threadsafe(handle, t, yaw, pitch),
-        camera=cfg.gaze.camera,
-        preview=cfg.gaze.preview,
-    )
-    tracker.start()
-    return tracker
+def wire_agent_cameras(server: HostServer, arbiter: GazeArbiter) -> None:
+    """Feed agents' camera reports into the arbiter, keeping the server's
+    existing connect/disconnect callbacks."""
+    connected, disconnected = server.on_connect, server.on_disconnect
+
+    def on_connect(conn) -> None:
+        arbiter.set_camera(conn.device_id, conn.camera)
+        if conn.camera:
+            log.info("%s will confirm gaze switches with its own camera", conn.device_id)
+        connected(conn)
+
+    def on_disconnect(device_id: str) -> None:
+        arbiter.forget(device_id)
+        disconnected(device_id)
+
+    def on_facing(device_id: str, facing: bool) -> None:
+        arbiter.on_facing(time.monotonic(), device_id, facing)
+        events.emit("facing", device_id=device_id, facing=facing)
+
+    server.on_connect, server.on_disconnect, server.on_facing = on_connect, on_disconnect, on_facing
+    for conn in server.connections.values():  # connected before gaze started
+        arbiter.set_camera(conn.device_id, conn.camera)
 
 
 async def run_agent(cfg: AgentConfig) -> None:
@@ -293,6 +331,7 @@ async def run_agent(cfg: AgentConfig) -> None:
         resolve=lambda: resolve_host(cfg, store),
     )
     client.on_state = lambda state, detail: events.emit("host", state=state, detail=detail)
+    camera = start_facing(cfg, client, asyncio.get_running_loop()) if cfg.gaze.enabled else None
     pairing = Pairing(cfg.pairing, DeviceInfo(cfg.device_id, cfg.name, "agent"), store)
     await pairing.start()
     stop = asyncio.Event()
@@ -308,9 +347,68 @@ async def run_agent(cfg: AgentConfig) -> None:
     finally:
         for task in (runner, stopper):
             task.cancel()
+        if camera:
+            camera.stop()
         await pairing.close()
         if overlay:
             overlay.close()
+
+
+class FacingCamera:
+    """Agent side: this device's own camera, watching for the user facing it."""
+
+    TICK_S = 0.1
+
+    def __init__(self, detector: FacingDetector, client: AgentClient, tracker, loop: asyncio.AbstractEventLoop):
+        self.detector = detector
+        self.client = client
+        self.tracker = tracker
+        self.loop = loop
+        self._ticker: asyncio.Task | None = None
+
+    def on_sample(self, t: float, yaw: float, pitch: float) -> None:  # on the loop
+        self._report(self.detector.update(t, yaw, pitch))
+
+    def _report(self, changed: bool | None) -> None:
+        if changed is None:
+            return
+        log.debug("camera: you are %sfacing this device", "" if changed else "not ")
+        events.emit("facing", facing=changed)
+        self.client.report_facing(changed)
+
+    async def _tick(self) -> None:
+        while True:
+            await asyncio.sleep(self.TICK_S)
+            self._report(self.detector.tick(time.monotonic()))
+
+    def start(self) -> None:
+        self.tracker.start()
+        self._ticker = self.loop.create_task(self._tick())
+
+    def stop(self) -> None:
+        if self._ticker:
+            self._ticker.cancel()
+        self.tracker.stop()
+
+
+def start_facing(cfg: AgentConfig, client: AgentClient, loop: asyncio.AbstractEventLoop) -> FacingCamera | None:
+    try:
+        from curslink.gaze.tracker import HeadPoseTracker
+    except ImportError as exc:  # pragma: no cover - the gaze extra is missing
+        log.error("[agent.gaze] needs the gaze extra (pip install curslink[gaze]): %s", exc)
+        return None
+    detector = FacingDetector(cfg.gaze.settings)
+    camera: FacingCamera
+
+    def on_sample(t: float, yaw: float, pitch: float) -> None:  # tracker thread
+        loop.call_soon_threadsafe(camera.on_sample, t, yaw, pitch)
+
+    tracker = HeadPoseTracker(on_sample, camera=cfg.gaze.camera, preview=cfg.gaze.preview)
+    camera = FacingCamera(detector, client, tracker, loop)
+    client.facing_source = lambda: detector.facing
+    camera.start()
+    log.info("using camera %d to confirm when you're facing this device", cfg.gaze.camera)
+    return camera
 
 
 def paired_host(cfg: AgentConfig, store: PairingStore):

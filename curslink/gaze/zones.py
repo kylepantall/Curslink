@@ -94,6 +94,11 @@ class GazeClassifier:
         self._candidate: Target | None = None
         self._candidate_since = 0.0
 
+    @property
+    def targets(self) -> list[Target]:
+        """The calibrated screens."""
+        return list(self._centroids)
+
     def distance(self, target: Target, yaw: float, pitch: float) -> float:
         cy, cp = self._centroids[target]
         return math.hypot(yaw - cy, (pitch - cp) * self.settings.pitch_weight)
