@@ -95,6 +95,20 @@ def cmd_overlay_test(args) -> int:
     return 0
 
 
+def _selftest() -> int:
+    """Checks a packaged build carries what it loads at runtime (used by CI)."""
+    import numpy as np
+    import mediapipe as mp
+    from mediapipe.tasks.python import vision  # noqa: F401
+
+    import cv2  # noqa: F401
+    import tkinter  # noqa: F401
+
+    mp.Image(image_format=mp.ImageFormat.SRGB, data=np.zeros((4, 4, 3), dtype=np.uint8))
+    print(f"curslink {__version__}: mediapipe {mp.__version__}, opencv {cv2.__version__}, tk {tkinter.TkVersion}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="curslink", description=__doc__)
     parser.add_argument("--version", action="version", version=__version__)
@@ -127,6 +141,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["_overlay-helper"]:
+        # The packaged app re-runs itself as the animation helper (see overlay.py).
+        from curslink.overlay import run_helper
+
+        run_helper()
+        return 0
+    if argv[:1] == ["_selftest"]:
+        return _selftest()
     args = build_parser().parse_args(argv)
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,

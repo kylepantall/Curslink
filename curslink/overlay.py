@@ -24,6 +24,14 @@ ACCENT = "#3fa9ff"
 DURATION_S = 0.38
 
 
+def helper_command() -> list[str]:
+    """How to start the helper: a packaged build has no ``python -m``, so it
+    runs its own executable with the hidden ``_overlay-helper`` command."""
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "_overlay-helper"]
+    return [sys.executable, "-m", "curslink.overlay"]
+
+
 class OverlayProcess:
     """Host/agent side handle to the helper process."""
 
@@ -38,7 +46,7 @@ class OverlayProcess:
         if self._proc is None or self._proc.poll() is not None:
             try:
                 self._proc = subprocess.Popen(
-                    [sys.executable, "-m", "curslink.overlay"],
+                    helper_command(),
                     stdin=subprocess.PIPE,
                     text=True,
                 )

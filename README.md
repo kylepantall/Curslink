@@ -31,7 +31,13 @@ push the pointer off the edge of a screen into the next device, with a
 
 ## Quick start
 
-Requires Python 3.13+ on every device.
+Download the build for each device from the
+[latest release](https://github.com/kylepantall/Curslink/releases/latest)
+(`windows-x64.zip`, `macos-arm64.tar.gz` or `linux-x64.tar.gz`), unpack it,
+and run `curslink` from the unpacked folder. The builds include camera
+switching and need no Python.
+
+Or install from source with Python 3.13+:
 
 ```bash
 # on every device
@@ -80,5 +86,12 @@ random secret, since anyone with it can send keystrokes to your agents.
 pip install -e ".[dev]"
 pytest
 ```
+
+To build the packaged app locally: `pip install ".[gaze]" pyinstaller`, then
+`pyinstaller packaging/curslink.spec` (output in `dist/curslink/`).
+
+Releasing: bump the version in `pyproject.toml` and `curslink/__init__.py`,
+then push a tag such as `v0.2.0`. The Release workflow builds every platform
+and publishes a GitHub release with the archives and `SHA256SUMS.txt`.
 
 Design notes and the roadmap live in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).

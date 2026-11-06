@@ -1,0 +1,90 @@
+name: App builds
+
+# Builds the packaged Curslink app for Windows, macOS and Linux: one folder
+# per platform holding the curslink executable and everything it loads
+# (MediaPipe, OpenCV, Tk), so nobody needs Python installed. The release
+# calls this and attaches the archives; a PR that touches the packaging
+# builds on its own, so a broken build shows up before release day.
+on:
+  workflow_call:
+    inputs:
+      tag:
+        type: string
+        required: true
+  pull_request:
+    paths:
+      - packaging/**
+      - pyproject.toml
+      - .github/workflows/build.yml
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.event.pull_request.number || inputs.tag || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # PR and manual runs build as 0.0.0.
+  TAG: ${{ inputs.tag || 'v0.0.0' }}
+
+jobs:
+  build:
+    # One platform failing doesn't fail the release; the others still go out.
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows-x64
+          - os: macos-latest
+            platform: macos-arm64
+          - os: ubuntu-latest
+            platform: linux-x64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: echo "VERSION=${TAG#v}" >> "$GITHUB_ENV"
+      # The gaze extra is what makes Curslink Curslink; the build carries it.
+      - run: python -m pip install ".[gaze]" "pyinstaller>=6.11"
+      - run: pyinstaller --noconfirm packaging/curslink.spec
+
+      # The packaged app checks it can load MediaPipe, OpenCV and Tk, which
+      # PyInstaller can miss: a module only imported at runtime builds fine
+      # and then fails on the user's machine.
+      - name: Smoke test the build
+        run: |
+          exe=dist/curslink/curslink
+          [ "$RUNNER_OS" = Windows ] && exe="$exe.exe"
+          "$exe" --version
+          "$exe" _selftest
+          "$exe" check -c examples/curslink.toml
+
+      - name: Package
+        run: |
+          name="curslink-$VERSION-${{ matrix.platform }}"
+          mkdir -p out
+          cp README.md examples/curslink.toml dist/curslink/
+          if [ "$RUNNER_OS" = Windows ]; then
+            (cd dist && 7z a -tzip "../out/$name.zip" curslink > /dev/null)
+          else
+            # tar keeps the executable bit and the macOS ad-hoc signature.
+            tar -czf "out/$name.tar.gz" -C dist curslink
+          fi
+          ls -l out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-${{ matrix.platform }}
+          path: out/*
+          retention-days: 3
