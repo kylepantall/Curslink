@@ -1,6 +1,6 @@
-<!-- App icon: added here once the desktop app's icon lands (docs/images/icon.png). -->
+<p align="center"><img src="docs/images/icon.png" width="128" alt="Curslink icon"></p>
 
-# Curslink
+<h1 align="center">Curslink</h1>
 
 **Look at a device, and your mouse and keyboard follow.**
 
