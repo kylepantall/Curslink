@@ -121,7 +121,10 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: -s -k "$pass" "$keychain" > /dev/null
           security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
           rm "$RUNNER_TEMP/sign.p12"
-          identity=$(security find-identity -p codesigning "$keychain" | awk 'NR==1 {print $2}')
+          # By hash: a self-signed certificate is listed but not "valid"
+          # (not trusted), and codesign accepts it by hash from the search list.
+          identity=$(security find-identity -p codesigning "$keychain" | awk '/[0-9]\) / {print $2; exit}')
+          [ -n "$identity" ] || { echo "::error::no code signing identity in MACOS_SIGN_P12"; exit 1; }
           echo "MACOS_SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
 
       - name: Build the installer
@@ -149,7 +152,10 @@ jobs:
               # macOS records permissions against this identity (packaging/curslink.spec).
               codesign --verify --deep --strict /Applications/Curslink.app
               codesign -dv /Applications/Curslink.app 2>&1 | grep -qx 'Identifier=io.github.orimovo.curslink.app' \
-                || { echo "::error::Curslink.app isn't signed as io.github.orimovo.curslink.app"; exit 1; } ;;
+                || { echo "::error::Curslink.app isn't signed as io.github.orimovo.curslink.app"; exit 1; }
+              # With a certificate, macOS keeps permissions across updates;
+              # ad hoc (no MACOS_SIGN_P12 secret) it doesn't.
+              codesign -d -r- /Applications/Curslink.app 2>&1 | grep 'designated' ;;
             Linux)
               sudo dpkg -i out/curslink-$VERSION-${{ matrix.platform }}.deb
               exe=/usr/bin/curslink
