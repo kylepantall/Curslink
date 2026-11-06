@@ -84,8 +84,14 @@ class RelayError(Exception):
 
 # ----------------------------------------------------------------- helpers
 def generate_key() -> str:
-    """A fresh random relay key or pairing secret (43 URL-safe characters)."""
-    return secrets.token_urlsafe(32)
+    """A fresh random relay key or pairing secret (43 URL-safe characters).
+
+    Never starting with "-", which would read as an option on a command line
+    (``curslink invite --relay-key -abc...``)."""
+    while True:
+        key = secrets.token_urlsafe(32)
+        if not key.startswith("-"):
+            return key
 
 
 PAIRING_CODE_PREFIX = "curslink1-"
@@ -118,6 +124,15 @@ def decode_pairing_code(code: str) -> dict[str, str]:
 def room_id(pairing_key: bytes) -> str:
     """One-way room name from the (already stretched) pairing key."""
     return hmac.new(pairing_key, _ROOM_LABEL, hashlib.sha256).hexdigest()
+
+
+_PAIRED_ROOM_LABEL = b"curslink/v2/relay-room\0"
+
+
+def paired_room_id(link_key: bytes, host_id: str) -> str:
+    """Room for one paired host/agent pair: both sides hold the link key, the
+    relay learns nothing from it, and re-pairing moves the pair to a new room."""
+    return hmac.new(link_key, _PAIRED_ROOM_LABEL + host_id.encode(), hashlib.sha256).hexdigest()
 
 
 def parse_address(address: str, default_port: int = DEFAULT_RELAY_PORT) -> tuple[str, int]:

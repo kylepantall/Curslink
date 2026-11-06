@@ -29,12 +29,28 @@ def test_host_must_be_a_known_device():
         host_config(raw)
 
 
-def test_missing_secret(monkeypatch):
+def test_secret_is_optional_with_pairing(monkeypatch):
     monkeypatch.delenv("CURSLINK_SECRET", raising=False)
     raw = load_raw(EXAMPLE)
-    del raw["secret"]
+    raw.pop("secret", None)
+    assert host_config(raw).secret is None
+    assert agent_config(raw).secret is None
+
+
+def test_agent_host_is_optional(monkeypatch):
+    raw = load_raw(EXAMPLE)
+    raw["agent"].pop("host", None)
+    cfg = agent_config(raw)
+    assert cfg.host == "" and cfg.pairing.enabled and cfg.pairing.port == 24851
+    raw["pairing"] = {"enabled": False}
     with pytest.raises(ConfigError):
-        host_config(raw)
+        agent_config(raw)
+
+
+def test_pairing_store_is_relative_to_config(tmp_path):
+    raw = load_raw(EXAMPLE)
+    raw["pairing"] = {"store": "keys/pairings.json"}
+    assert host_config(raw, base_dir=tmp_path).pairing.store == tmp_path / "keys" / "pairings.json"
 
 
 def test_bad_screen_size():

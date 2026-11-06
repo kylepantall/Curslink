@@ -3,9 +3,18 @@
 # Copy this to curslink.toml on the HOST (the computer your keyboard and
 # mouse are plugged into / paired with) and on every AGENT.
 
-# Same secret on every device (or set the CURSLINK_SECRET env var).
-# It encrypts and authenticates all traffic, so make it long.
-secret = "change-me-to-something-long-and-random"
+# Pairing (recommended): run `curslink host` and `curslink agent`, then
+# `curslink pair` on either one and type the code it shows into the other.
+# Each pair of devices gets its own key; nothing secret goes in this file.
+#
+# Or, the old way: the same secret on every device (or the CURSLINK_SECRET
+# env var). It works alongside pairing for devices you haven't paired.
+# secret = "change-me-to-something-long-and-random"
+
+[pairing]
+enabled = true               # advertise on the LAN and accept pairing requests
+port = 24851
+# store = "pairings.json"    # default: your user config folder
 
 [host]
 device_id = "desktop"        # which [[devices]] entry is this machine
@@ -80,11 +89,13 @@ name = "Work laptop"
   height = 982
 
 # --- On an agent ---------------------------------------------------------
-# Only the [agent] table (and `secret`) is read by `curslink agent`.
+# Only the [agent] and [pairing] tables (and `secret`) are read by `curslink agent`.
 [agent]
 device_id = "laptop"
-host = "192.168.1.10"        # the host's LAN address (optional with a [relay];
-                             # with both, the LAN is tried first)
+name = "Work laptop"
+# host = "192.168.1.10"      # optional once paired: the host is found on the LAN
+                             # (with a [relay] too, the LAN is tried first)
+# host_id = "desktop"        # only if this agent is paired with several hosts
 port = 24850
 animations = true
 # Remap modifiers when the host and agent use different OSes, e.g. a

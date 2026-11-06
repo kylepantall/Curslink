@@ -78,10 +78,45 @@ targets is a possible later upgrade.
 ### Transport and security
 
 Newline-delimited JSON over TCP (`curslink/protocol.py`), wrapped in
-TLS 1.2 with ECDHE-PSK. The PSK is derived from the shared secret with
-scrypt. This gives encryption, mutual authentication and forward secrecy
-with no certificates to manage. It needs Python 3.13+ (stdlib TLS-PSK).
-JSON keeps the protocol easy to implement in Kotlin for Android.
+TLS 1.2 with ECDHE-PSK. This gives encryption, mutual authentication and
+forward secrecy with no certificates to manage. It needs Python 3.13+
+(stdlib TLS-PSK). JSON keeps the protocol easy to implement in Kotlin for
+Android.
+
+The PSK is either a per-pair **link key** from pairing (identity
+`curslink-v2:<agent id>`, looked up in the host's pairing store) or the
+legacy shared `secret` stretched with scrypt (identity `curslink-v1`). The
+stdlib PSK callback can't say which connection it serves, so the agent's
+`hello` carries `auth = HMAC(key, tls-unique channel binding || device id)`,
+which stops one paired device from claiming another's id. Link keys are
+transport independent: a relayed connection runs the same TLS-PSK end to
+end.
+
+### Nearby pairing
+
+Running hosts and agents advertise `_curslink._tcp` over mDNS
+(`curslink/pairing/discovery.py`) with their id, name, role, pairing port
+and, for hosts, the input port. `curslink pair` lists what it finds; picking
+one opens a plain TCP connection to that device's pairing listener
+(`curslink/pairing/service.py`, port 24851) and runs the handshake in
+`curslink/pairing/handshake.py`:
+
+1. The initiator sends a hash commitment to its DH public value, the
+   recipient answers with its own value, the initiator reveals its value.
+   (2048-bit MODP group 14, standard library only.)
+2. Both derive a 6-digit code and the 32-byte link key from the shared
+   secret and the whole transcript, with HKDF-SHA256.
+3. The initiator shows its code; the recipient pops up a window (terminal
+   prompt without a desktop) asking for it. A matching code proves there is
+   no man in the middle: the commitment means an attacker gets one
+   one-in-a-million guess per attempt. Three failures lock the listener
+   for a minute.
+4. The recipient sends a MAC with the new key; both store it in
+   `pairings.json` (per-user config dir, mode 600).
+
+The handshake runs over any asyncio stream pair, so pairing through a relay
+uses the same code. A paired agent with no `[agent].host` finds its host
+by id on the LAN before every connection attempt.
 
 ### Linking over the internet: the relay
 
@@ -96,6 +131,10 @@ to know anyone's IP address.
 * **Matching**: each client sends a room id, a one-way HMAC of the
   stretched pairing secret, so host and agents with the same secret meet
   without the relay learning the secret.
+  Paired devices use one room per pair instead,
+  `HMAC(link_key, "curslink/v2/relay-room" || host id)`; the host keeps a
+  waiting link for every paired agent and picks up new pairings within
+  a few seconds (`app.HostRelays`).
 * **End-to-end encryption**: once paired the relay only copies bytes, and
   host and agent run the same TLS-PSK handshake they use on a LAN through
   it (the host acts as TLS server on its outgoing socket). The relay sees
@@ -134,7 +173,8 @@ on macOS, while the host and agent run asyncio there.
 | `curslink/gaze/tracker.py` | Webcam + MediaPipe thread |
 | `curslink/inputs/` | pynput capture (host) and injection (agent), key names |
 | `curslink/net/` | Host server, agent client, relay server and relay client |
-| `curslink/security.py` | TLS-PSK contexts |
+| `curslink/security.py` | TLS-PSK contexts, hello authentication |
+| `curslink/pairing/` | Pairing store, code-confirmed handshake, mDNS discovery, pairing listener and window |
 | `curslink/overlay.py` | Pop/blink animation helper |
 | `curslink/app.py`, `cli.py` | Wiring and the `curslink` command |
 
@@ -149,8 +189,9 @@ connections between a host and an agent.
    a custom IME or accessibility actions. Alternative path: the host acts
    as a Bluetooth HID keyboard/mouse to the phone (Linux BlueZ can do
    this), which needs no app on the phone at all.
-2. **Discovery and pairing UX**: mDNS so agents find the host, a pairing
-   code instead of hand-written secrets, auto-detected screen sizes.
+2. **Pairing UX**: a paired agent added to the layout automatically from
+   the screens it reports, and pairing from a tray app instead of the
+   terminal. (Discovery and code pairing are done.)
 3. **Tray app / settings UI** with a drag-and-drop layout editor and a
    live gaze preview.
 4. **Linux Wayland** via uinput/evdev, **macOS** relative motion from

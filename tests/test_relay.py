@@ -162,8 +162,8 @@ def test_parse_address():
 def test_config_from_pairing_code(monkeypatch):
     monkeypatch.delenv("CURSLINK_SECRET", raising=False)
     raw = load_raw(EXAMPLE)
-    del raw["secret"]
-    del raw["agent"]["host"]
+    raw.pop("secret", None)
+    raw["agent"].pop("host", None)
     raw["relay"] = {"code": encode_pairing_code("relay.example.com", RELAY_KEY, SECRET)}
     host = host_config(raw)
     agent = agent_config(raw)
@@ -174,7 +174,8 @@ def test_config_from_pairing_code(monkeypatch):
 
 def test_config_needs_lan_or_relay():
     raw = load_raw(EXAMPLE)
-    del raw["agent"]["host"]
+    raw["agent"].pop("host", None)
+    raw["pairing"] = {"enabled": False}  # with pairing on, the host is found on the LAN
     with pytest.raises(ConfigError):
         agent_config(raw)
     raw["host"]["lan"] = False
@@ -206,3 +207,56 @@ def test_cli_relay_init_and_invite(tmp_path, capsys, monkeypatch):
     code = next(w for w in capsys.readouterr().out.split() if w.startswith("curslink1-"))
     decoded = decode_pairing_code(code)
     assert decoded["relay_key"] == cfg.key and len(decoded["secret"]) >= 32
+
+
+# --------------------------------------------- paired devices over a relay
+async def test_paired_agents_meet_the_host_in_per_pair_rooms(tmp_path):
+    """No shared secret anywhere: each paired agent gets its own relay room."""
+    from curslink.app import HostRelays, resolve_host
+    from curslink.config import AgentConfig
+    from curslink.pairing.store import PairingStore
+    from curslink.security import HelloVerifier
+
+    relay = RelayServer(RELAY_KEY, host="127.0.0.1", port=0)
+    await relay.start()
+    base = RelayTarget(f"127.0.0.1:{relay.port}", RELAY_KEY, "")
+    host_store = PairingStore(tmp_path / "host.json")
+    host_store.add("laptop", "Laptop", "agent", b"L" * 32)
+    tls = server_context(None, host_store.key)
+    server = HostServer({"laptop", "tablet"}, tls, verify_hello=HelloVerifier(None, host_store.key))
+    relays = HostRelays(base, "desktop", False, host_store, tls, server.handle_streams, refresh_s=0.05)
+    relays.start()
+
+    tasks = []
+    sinks = {}
+    for device, key in (("laptop", b"L" * 32), ("tablet", b"T" * 32)):
+        store = PairingStore(tmp_path / f"{device}.json")
+        store.add("desktop", "Desktop", "host", key)
+        cfg = AgentConfig(device_id=device, secret=None, relay=base)
+        cfg.pairing.enabled = False
+        sinks[device] = FakeSink()
+        client = AgentClient(device, device, "", 1, None, AgentSession(sinks[device], lambda *a: None),
+                             resolve=lambda cfg=cfg, store=store: resolve_host(cfg, store))
+        tasks.append(asyncio.create_task(client.run_forever()))
+
+    await wait_for(lambda: server.is_connected("laptop"), 5)
+    assert not server.is_connected("tablet")  # not paired with this host yet
+    # pairing the tablet later opens its room without a restart
+    host_store.add("tablet", "Tablet", "agent", b"T" * 32)
+    await wait_for(lambda: server.is_connected("tablet"), 5)
+    assert len(relays.links) == 2
+    server.send("tablet", "move", x=1, y=2)
+    await wait_for(lambda: sinks["tablet"].calls)
+    for t in tasks:
+        t.cancel()
+    await relays.close()
+    await server.close()
+    await relay.close()
+
+
+def test_paired_rooms_differ_per_pair_and_host():
+    from curslink.net.relay import paired_room_id
+
+    assert paired_room_id(b"a" * 32, "desk") != paired_room_id(b"b" * 32, "desk")
+    assert paired_room_id(b"a" * 32, "desk") != paired_room_id(b"a" * 32, "office")
+    assert paired_room_id(b"a" * 32, "desk") != room_id(b"a" * 32)

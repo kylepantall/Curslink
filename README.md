@@ -47,13 +47,24 @@ pip install "curslink[gaze] @ git+https://github.com/kylepantall/Curslink"
 ```
 
 1. Copy [`examples/curslink.toml`](examples/curslink.toml) to each device and
-   edit it: set a long shared `secret`, describe every device's screens in
-   one shared layout (arranged like your desk), and set `[agent]` on agents.
+   edit it: describe every device's screens in one shared layout (arranged
+   like your desk) on the host, and set `[agent]` `device_id` and `name` on
+   agents.
 2. Check the layout on the host: `curslink check`
 3. Start agents: `curslink agent` (on each other device)
-4. Teach it where your screens are: `curslink calibrate` (on the host;
+4. Pair them: run `curslink pair` on the host, pick a device from the list,
+   and type the 6-digit code it shows into the window that pops up on that
+   device. No secrets to copy, and agents find the host on the network by
+   themselves. Add `--as host` if the config also has an `[agent]` table,
+   like the example. (You can also run `curslink pair` on an agent while
+   the host is running.)
+5. Teach it where your screens are: `curslink calibrate` (on the host;
    look at each screen when asked)
-5. Run the host: `curslink host`
+6. Run the host: `curslink host`
+
+`curslink pair --list` shows what a device is paired with and
+`curslink unpair ID` forgets one. If your network blocks multicast,
+`curslink pair --address 192.168.1.20` pairs with a device directly.
 
 ### Over the internet (self-hosted relay)
 
@@ -79,6 +90,11 @@ pairing secret, so it can't read or inject keystrokes.
    `[agent].host`; if they keep it they try the LAN first and fall back to
    the relay. Set `[host] lan = false` to only accept agents via the relay.
 
+Devices you've already paired with `curslink pair` don't need a pairing
+code: give them just `[relay] address` and `key`. Each paired agent then
+meets the host in its own relay room, derived from that pair's key, and a
+laptop paired at home keeps working through the relay when it's away.
+
 Hotkeys on the host:
 
 | Keys | Action |
@@ -102,9 +118,20 @@ Try the animations with `curslink overlay-test --effect pop`.
 ## Security
 
 All traffic is encrypted and mutually authenticated with TLS-PSK (ECDHE,
-forward secret) keyed from the shared `secret`. A device without the
-secret can neither connect to the host nor impersonate it. Use a long,
-random secret, since anyone with it can send keystrokes to your agents.
+forward secret). Pairing gives every host and agent pair its own random
+key, agreed with a Diffie-Hellman exchange and confirmed by the code you
+type, so someone else on the network can neither listen in nor slip in
+between. Keys live in `pairings.json` in your user config folder, readable
+only by you. A device that isn't paired can neither connect to the host
+nor impersonate it.
+
+A pairing request only succeeds if someone at the other device types the
+code, and three wrong codes lock pairing for a minute. Set
+`[pairing] enabled = false` once everything is paired if you'd rather not
+listen for requests at all.
+
+The older shared `secret` still works for devices you haven't paired. Use
+a long, random one, since anyone with it can send keystrokes to your agents.
 
 Through a relay the same TLS runs end to end between host and agent; the
 relay only forwards ciphertext. The relay key just controls who may use

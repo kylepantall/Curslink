@@ -23,6 +23,8 @@ for package in ("mediapipe",):
 # imports the gaze and input modules only when a config asks for them.
 hiddenimports += collect_submodules("pynput")
 hiddenimports += collect_submodules("curslink")
+# zeroconf (LAN discovery) is partly compiled and imported lazily.
+hiddenimports += collect_submodules("zeroconf") + ["ifaddr"]
 
 a = Analysis(
     [SPECPATH + "/../curslink/__main__.py"],
