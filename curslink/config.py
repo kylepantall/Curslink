@@ -90,6 +90,8 @@ class AgentConfig:
     host_id: str = ""                # which paired host to use if there are several
     modifier_map: dict[str, str] = field(default_factory=dict)
     animations: bool = True
+    # Play the host's moves back evenly (see curslink.smoothing).
+    smooth_pointer: bool = True
     relay: RelayTarget | None = None
     pairing: PairingConfig = field(default_factory=PairingConfig)
     gaze: AgentGazeConfig = field(default_factory=AgentGazeConfig)
@@ -300,6 +302,7 @@ def agent_config(raw: dict[str, Any], base_dir: Path = Path(".")) -> AgentConfig
         host_id=agent.get("host_id", ""),
         modifier_map=dict(agent.get("modifier_map", {})),
         animations=agent.get("animations", True),
+        smooth_pointer=bool(agent.get("smooth_pointer", True)),
         pairing=pairing_config(raw, base_dir),
         gaze=agent_gaze_config(agent.get("gaze", {})),
     )

@@ -9,15 +9,17 @@ Host -> agent
     welcome      {device_id, features}  features: optional list, e.g. ["facing"]
     enter        {x, y, effect}        agent now owns the pointer; warp to x, y
     leave        {}                    host took control back
-    move         {x, y}                absolute position in the agent's OS coords
+    move         {x, y, ts}            absolute position in the agent's OS coords;
+                                       ts (optional): when the host captured it,
+                                       host monotonic ms (see curslink.smoothing)
     button       {button, pressed}
     scroll       {dx, dy}
     key          {key, pressed}        see :mod:`curslink.inputs.keys`
-    ping         {n}
+    ping         {n, ts}               ts (optional): host monotonic ms
 
 Agent -> host
     hello        {v, device_id, name, platform, screens, auth, camera}
-    pong         {n}
+    pong         {n, ts}               ts: the ping's, echoed (times the round trip)
     facing       {facing}              the agent's own camera sees the user
                                        facing it (true) or not (false)
 
