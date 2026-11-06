@@ -245,6 +245,25 @@ class Curslink(QObject):
             self.tray.say("Curslink is running in the background",
                           f"It links by itself. Open it from the {self.tray.place()} icon.")
 
+    def restart(self) -> None:
+        """Quit and open Curslink again (macOS applies some permissions then)."""
+        import subprocess
+
+        if getattr(sys, "frozen", False):
+            argv = [sys.executable, "gui"]
+        else:
+            argv = [sys.executable, "-m", "curslink", "gui"]
+        log.info("restarting Curslink")
+        if sys.platform == "win32":
+            cmd = ["cmd", "/c", "timeout /t 2 >nul & " + subprocess.list2cmdline(argv)]
+            subprocess.Popen(cmd, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
+        else:
+            # Start once this copy has gone, or it would just show this window.
+            subprocess.Popen(["/bin/sh", "-c", 'sleep 2; exec "$@"', "curslink", *argv],
+                             start_new_session=True, stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.quit()
+
     def quit(self) -> None:
         self.quitting = True
         self.service.stop()

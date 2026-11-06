@@ -63,6 +63,9 @@ class Status(QObject):
         self.screen = ""
         self.gaze = False
         self.gaze_paused = False
+        self.looking_at = ""   # "device/screen" the host's camera says you're looking at
+        self.looking_seen = 0.0
+        self._looking_drawn: str | None = None
         self.agents: dict[str, Agent] = {}
         self.host_state = ""   # agent side: connected / disconnected / waiting
         self.host_detail = ""
@@ -75,6 +78,12 @@ class Status(QObject):
         self.reset()
         self.log, self.switches, self.log_seq = keep
         self.changed.emit()
+
+    def looking(self) -> str:
+        """Where you're looking now, or "" (the host stopped saying: no face)."""
+        if self.looking_at and time.monotonic() - self.looking_seen < 2.5:
+            return self.looking_at
+        return ""
 
     def add_log(self, level: str, message: str) -> None:
         self.log.append((time.time(), level, message))
@@ -105,6 +114,13 @@ class Status(QObject):
             self.switched.emit(switch)
         elif kind == "gaze":
             self.gaze_paused = bool(event.get("paused"))
+        elif kind == "looking":
+            looking = event.get("screen") or ""
+            fresh = time.monotonic() - self.looking_seen >= 2.5  # back after a gap
+            self.looking_at, self.looking_seen = looking, time.monotonic()
+            if looking == self._looking_drawn and not fresh:
+                return  # the once-a-second repeat: nothing new to draw
+            self._looking_drawn = looking
         elif kind == "host":
             self.host_state = event.get("state", "")
             self.host_detail = event.get("detail", "")

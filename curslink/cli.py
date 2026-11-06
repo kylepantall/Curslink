@@ -492,8 +492,29 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _keep_matplotlib_cache() -> None:
+    """MediaPipe imports matplotlib, and the packaged app's matplotlib gets a
+    new temporary config folder each launch, so it rebuilt its font cache
+    (several seconds) every time. Point it at a folder that lasts."""
+    if not getattr(sys, "frozen", False):
+        return
+    import os
+
+    from curslink.diagnostics import log_dir
+
+    folder = log_dir().parent / "matplotlib" if sys.platform != "darwin" else (
+        Path.home() / "Library" / "Caches" / "Curslink" / "matplotlib")
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        os.environ["MPLCONFIGDIR"] = str(folder)
+        os.environ.setdefault("MPLBACKEND", "Agg")
+    except OSError:
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
+    _keep_matplotlib_cache()
     if argv[:1] == ["_overlay-helper"]:
         # The packaged app re-runs itself as the animation helper (see overlay.py).
         from curslink.overlay import run_helper
@@ -506,6 +527,14 @@ def main(argv: list[str] | None = None) -> int:
         return dialog_main(argv[1:])
     if argv[:1] == ["_selftest"]:
         return _selftest()
+    if argv[:1] == ["_macperms"]:
+        # A fresh process: macOS caches these answers for the life of a process.
+        import json
+
+        from curslink import macperms
+
+        print(json.dumps({k: macperms.granted(k) for k in macperms.PERMISSIONS}))
+        return 0
     if argv[:1] == ["_install-kind"]:
         # How this copy was installed (used by CI to check the installers).
         from curslink.update import install_kind

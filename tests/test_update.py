@@ -190,3 +190,29 @@ def test_install_kind_command(monkeypatch, capsys):
     monkeypatch.delattr(sys, "frozen", raising=False)
     assert cli.main(["_install-kind"]) == 0
     assert capsys.readouterr().out.strip() == "source"
+
+
+def test_windows_setup_install_works_without_a_console(tmp_path, monkeypatch):
+    """Regression: v0.4.1 called sys.stdout.flush() in the windowed app,
+    where sys.stdout is None, and opened a console window for the setup."""
+    from curslink import update
+
+    setup = tmp_path / "curslink-9.0.0-windows-x64-setup.exe"
+    setup.write_bytes(b"MZ")
+    started = {}
+    monkeypatch.setattr(update.subprocess, "Popen", lambda cmd, **kw: started.update(cmd=cmd, **kw))
+    monkeypatch.setattr(update.sys, "stdout", None)
+    monkeypatch.setattr(update.sys, "stderr", None)
+
+    class Exited(Exception):
+        pass
+
+    def fake_exit(code):
+        raise Exited(code)
+
+    monkeypatch.setattr(update.os, "_exit", fake_exit)
+    with pytest.raises(Exited):
+        update.install(setup, "windows-setup", "9.0.0", relaunch=["gui"])
+    assert started["cmd"][:2] == ["cmd", "/c"]
+    assert started["creationflags"] & 0x08000000  # CREATE_NO_WINDOW
+    assert (tmp_path / "curslink-9.0.0-windows-x64-setup.cmd").exists()

@@ -35,14 +35,34 @@ def cache_dir() -> Path:
     return path
 
 
-def ensure_model(path: Path | None = None) -> Path:
-    path = path or cache_dir() / "face_landmarker.task"
+def default_model_path() -> Path:
+    return cache_dir() / "face_landmarker.task"
+
+
+def ensure_model(path: Path | None = None, progress: Callable[[int, int], None] | None = None) -> Path:
+    """The face model, downloaded the first time. ``progress(done, total)``
+    is called as bytes arrive (``total`` is 0 when the server doesn't say)."""
+    path = path or default_model_path()
     if not path.exists():
         log.info("downloading face landmark model to %s", path)
         started = time.monotonic()
         tmp = path.with_suffix(".part")
         try:
-            urllib.request.urlretrieve(MODEL_URL, tmp)
+            with urllib.request.urlopen(MODEL_URL, timeout=30) as resp, open(tmp, "wb") as out:
+                total = int(resp.headers.get("Content-Length") or 0)
+                done = 0
+                if progress:
+                    progress(0, total)
+                while True:
+                    chunk = resp.read(64 * 1024)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+                    done += len(chunk)
+                    if progress:
+                        progress(done, total)
+            if total and done != total:
+                raise OSError(f"the download stopped at {done} of {total} bytes")
         except Exception:
             log.exception("couldn't download the face model from %s", MODEL_URL)
             raise
@@ -148,6 +168,15 @@ class HeadPoseTracker:
         opened = time.monotonic()
         log.info("camera %s: opening", self.camera)
         cap = cv2.VideoCapture(self.camera)
+        for attempt in range(3):
+            # Just freed by the linking service, or macOS's camera prompt just
+            # answered: it can take a moment to open.
+            if cap.isOpened() or self._stop.is_set():
+                break
+            cap.release()
+            log.info("camera %s: not free yet, trying again (%d)", self.camera, attempt + 1)
+            time.sleep(1.0)
+            cap = cv2.VideoCapture(self.camera)
         if not cap.isOpened():
             estimator.close()
             log.error("camera %s: couldn't open it (in use by another app, unplugged, or no camera permission)",

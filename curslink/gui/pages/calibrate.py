@@ -5,10 +5,10 @@ from __future__ import annotations
 import logging
 
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QProgressBar, QVBoxLayout, QWidget
 
 from curslink.gui.camerapicker import CameraPicker
-from curslink.gui.common import in_background
+from curslink.gui.common import call_on_main, in_background
 from curslink.gui.overlay import LookHere
 from curslink.gui.screenmap import ScreenMap, screens_from_config
 from curslink.gui.service import RUNNING, STARTING
@@ -69,6 +69,16 @@ class CalibratePage(Page):
             words.addWidget(w)
         top.addLayout(words, 1)
         steps.body.addLayout(top)
+        # The first run downloads the face model: show how far it's got.
+        self.progress = QProgressBar()
+        self.progress.setTextVisible(False)
+        self.progress.setFixedHeight(6)
+        self.progress.setAccessibleName("Download progress")
+        self.progress_text = label("", "small")
+        steps.body.addWidget(self.progress)
+        steps.body.addWidget(self.progress_text)
+        self.progress.hide()
+        self.progress_text.hide()
         cam_row = QHBoxLayout()
         cam_row.addWidget(label("Camera", "small"))
         self.camera = CameraPicker()
@@ -98,6 +108,10 @@ class CalibratePage(Page):
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.tick)
+        # While linking, the host has the camera: light up where it says you look.
+        self.live_timer = QTimer(self)
+        self.live_timer.timeout.connect(self.live_tick)
+        self.live_timer.start(400)
         self.state = "idle"
         self.show_state()
         app.config_changed.connect(self.load_targets)
@@ -163,6 +177,17 @@ class CalibratePage(Page):
         self.show_state()
 
         def warm():
+            from curslink.gaze.tracker import default_model_path, ensure_model
+
+            if not default_model_path().exists():
+                call_on_main(lambda: self.show_download(0, 0))
+                ensure_model(progress=lambda done, total: call_on_main(lambda: self.show_download(done, total)))
+            call_on_main(self.show_starting)
+            from curslink import macperms
+
+            if not macperms.ensure_camera():
+                raise RuntimeError("Curslink isn't allowed to use the camera. Allow it in System Settings › "
+                                   "Privacy & Security › Camera, then try again.")
             cal = Calibrator(index)
             cal.start()
             if not cal.wait_for_face(20):
@@ -174,6 +199,32 @@ class CalibratePage(Page):
             return cal
 
         in_background(warm, self.warmed, self.failed)
+
+    def show_download(self, done: int, total: int) -> None:
+        if self.state != "warming":
+            return
+        self.prompt.setText("Downloading the face model…")
+        self.prompt_detail.setText("Only the first time. Curslink keeps it for next time.")
+        mb = 1024 * 1024
+        if total:
+            self.progress.setRange(0, total)
+            self.progress.setValue(done)
+            self.progress_text.setText(f"{done / mb:.1f} of {total / mb:.1f} MB · {done * 100 // total}%")
+        else:
+            self.progress.setRange(0, 0)  # unknown size: a moving bar
+            self.progress_text.setText(f"{done / mb:.1f} MB")
+        self.progress.show()
+        self.progress_text.show()
+
+    def show_starting(self) -> None:
+        if self.state != "warming":
+            return
+        self.prompt.setText("Looking for your face…")
+        self.prompt_detail.setText("Starting the camera. Sit facing it in good light.")
+        self.progress.setRange(0, 0)
+        self.progress_text.setText("Starting the camera")
+        self.progress.show()
+        self.progress_text.show()
 
     def warmed(self, cal) -> None:
         if self.state != "warming":  # cancelled meanwhile
@@ -294,6 +345,34 @@ class CalibratePage(Page):
                 best, best_d = target.key, d
         return best
 
+    def linking_camera(self) -> bool:
+        """The linking service is running gaze, so it has the camera."""
+        st = self.app.status
+        return self.app.role == "host" and st.running and st.gaze
+
+    def idle_readout(self) -> str:
+        if not self.linking_camera():
+            return "Camera off"
+        st = self.app.status
+        if st.gaze_paused:
+            return "Camera on · gaze switching paused"
+        names = {t.key: n for t, n in self.targets}
+        looking = st.looking()
+        return f"Camera on · you're looking at {names.get(looking, looking)}" if looking else \
+            "Camera on · no face in view"
+
+    def live_tick(self) -> None:
+        if self.calibrator is not None or self.state not in ("idle", "done", "error"):
+            return
+        looking = self.app.status.looking() if self.linking_camera() else ""
+        looking = looking or None
+        text = self.idle_readout()
+        if looking != self.looking:
+            self.looking = looking
+            self.draw_map()
+        if self.readout.text() != text:
+            self.readout.setText(text)
+
     # -- drawing --------------------------------------------------------------
     def draw_map(self) -> None:
         busy = self.state in ("ready", "recording")
@@ -330,6 +409,9 @@ class CalibratePage(Page):
     def show_state(self) -> None:
         s, n = self.state, len(self.targets)
         busy = s in ("warming", "ready", "recording")
+        if s != "warming":
+            self.progress.hide()
+            self.progress_text.hide()
         self.camera_row.setVisible(not busy)
         self.cancel_button.setVisible(busy)
         self.secondary.setVisible(s == "ready")
@@ -341,11 +423,11 @@ class CalibratePage(Page):
             self.prompt_detail.setText("A \"Look here\" card shows on each screen in turn. Look at it and press Space. "
                                        "It takes about a minute.")
             self.primary.setText("Start")
-            self.readout.setText("Camera off")
+            self.readout.setText(self.idle_readout())
         elif s == "warming":
             self.step_title.setText("STARTING THE CAMERA")
-            self.prompt.setText("Looking for your face…")
-            self.prompt_detail.setText("The first run downloads the face model (a few MB).")
+            self.prompt.setText("Getting ready…")
+            self.prompt_detail.setText("Starting the camera.")
             self.primary.setText("Record")
             self.readout.setText("Starting the camera…")
         elif s in ("ready", "recording"):
@@ -361,7 +443,7 @@ class CalibratePage(Page):
             self.prompt.setText("Calibration saved")
             self.prompt_detail.setText(self.message + " Gaze switching is on.")
             self.primary.setText("Calibrate again")
-            self.readout.setText("Camera off")
+            self.readout.setText(self.idle_readout())
         elif s == "error":
             msg = self.message.lower()
             art = "no-face" if "no face" in msg else "camera-off"
@@ -369,7 +451,7 @@ class CalibratePage(Page):
             self.prompt.setText("That didn't work")
             self.prompt_detail.setText(self.message)
             self.primary.setText("Try again")
-            self.readout.setText("Camera off")
+            self.readout.setText(self.idle_readout())
         set_spot(self.art, art, 120, 90)
 
         self.list_card.clear_rows()

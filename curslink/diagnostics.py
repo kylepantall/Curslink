@@ -324,7 +324,8 @@ def _write_report(process: str, kind: str, body: str, when: _dt.datetime | None 
         path.write_text(text, encoding="utf-8")
     except OSError:
         try:
-            sys.stderr.write(text)
+            if sys.stderr is not None:  # None in the windowed app
+                sys.stderr.write(text)
         except Exception:
             pass
         return None

@@ -173,14 +173,53 @@ def test_macos_permissions_card(desktop, qapp, monkeypatch):
 
     desktop.window.pages["setup"].create()
     card = desktop.window.pages["status"].permissions
-    have = {"accessibility": False, "input-monitoring": False}
+    have = {"accessibility": False, "input-monitoring": False, "camera": False, "local-network": True}
     monkeypatch.setattr(macperms, "MAC", True)
     monkeypatch.setattr(macperms, "granted", lambda k: have[k])
     asked = []
     monkeypatch.setattr(macperms, "request", lambda k: asked.append(k))
-    card.refresh()
-    assert not card.isHidden() and card.rows.count() == 2  # a host needs both
+    monkeypatch.setattr(macperms, "missing_fresh", macperms.missing)
+    card.apply(macperms.missing("host"))
+    assert not card.isHidden() and card.rows.count() == 4  # all three, plus "Restart Curslink"
+    assert card.restart_row.isHidden()
+    card.allow("accessibility")
+    assert asked == ["accessibility"] and not card.restart_row.isHidden()
     have["accessibility"] = have["input-monitoring"] = True
-    card.refresh()
+    card.apply(macperms.missing("host"))
+    assert card.rows.count() == 2  # camera, plus "Restart Curslink"
+    have["camera"] = True
+    card.apply(macperms.missing("host"))
     assert card.isHidden()
-    assert macperms.needed("agent") == ["accessibility"]
+    have["local-network"] = False
+    card.apply(macperms.missing("host"))
+    assert not card.isHidden() and card.rows.count() == 2  # local network, plus "Restart Curslink"
+    assert macperms.needed("agent") == ["accessibility", "local-network"]
+    assert macperms.needed("host") == ["accessibility", "input-monitoring", "camera", "local-network"]
+
+
+def test_live_looking_lights_the_calibrate_map(desktop, qapp):
+    desktop.window.pages["setup"].create()
+    page = desktop.window.pages["calibrate"]
+    page.load_targets()
+    key = page.targets[0][0].key
+    st = desktop.status
+    st.apply({"event": "running", "role": "host", "device_id": "me", "gaze": True})
+    assert page.idle_readout() == "Camera on · no face in view"
+    st.apply({"event": "looking", "screen": key})
+    assert st.looking() == key
+    page.live_tick()
+    assert page.looking == key and "looking" in page.map.states[key]
+    assert page.readout.text().startswith("Camera on · you're looking at")
+    st.looking_seen -= 10  # the host stopped saying (no face)
+    page.live_tick()
+    assert page.looking is None
+
+
+def test_devices_page_shows_this_computer(desktop, qapp):
+    from curslink.pairing.discovery import local_hostname
+
+    desktop.window.pages["setup"].create()
+    page = desktop.window.pages["devices"]
+    page.refresh()
+    texts = " ".join(w.text() for w in page.this.findChildren(type(page.search_state)))
+    assert local_hostname() in texts

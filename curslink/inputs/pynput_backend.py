@@ -22,6 +22,24 @@ from curslink.inputs.keys import normalize_char
 log = logging.getLogger(__name__)
 
 _BUTTON_NAMES = {"left", "right", "middle", "x1", "x2"}
+_primed = threading.Lock()
+
+
+def _prime_macos() -> None:
+    """Load the pyobjc names pynput's listener threads look up, once, here.
+    Two listeners starting together race pyobjc's lazy loader, and the loser
+    dies with KeyError: 'AXIsProcessTrusted'."""
+    if sys.platform != "darwin":
+        return
+    with _primed:
+        try:
+            import HIServices
+            import Quartz
+
+            HIServices.AXIsProcessTrusted  # noqa: B018
+            Quartz.CGEventTapCreate  # noqa: B018
+        except Exception:
+            log.debug("couldn't preload pyobjc names", exc_info=True)
 
 
 def key_to_name(key) -> str | None:
@@ -93,6 +111,7 @@ class PynputCapture:
     def _restart(self) -> None:
         from pynput import keyboard, mouse
 
+        _prime_macos()
         self.stop()
         with self._lock:
             suppress = self._grabbed
