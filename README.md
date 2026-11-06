@@ -1,15 +1,36 @@
+<!-- App icon: added here once the desktop app's icon lands (docs/images/icon.png). -->
+
 # Curslink
 
 **Look at a device, and your mouse and keyboard follow.**
 
-Curslink shares one keyboard and mouse between several computers. A webcam
-watches which way your head is turned and, when you look at another
-device's screen, your pointer and keystrokes go there. You can also just
-push the pointer off the edge of a screen into the next device, with a
-"pop" or "blink" animation so you always see where it landed.
+Curslink lets one keyboard and mouse drive all your computers. A webcam
+notices which screen you're looking at and sends your pointer and typing
+there. Or push the pointer off the edge of one screen and it pops out on the
+next computer, with a quick "pop" or "blink" so you always see where it went.
 
-> Status: MVP foundation. Windows, macOS and Linux (X11) for the host and
-> agents. Android is on the roadmap (see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)).
+[**Download the latest release**](https://github.com/kylepantall/Curslink/releases/latest) ·
+[How it works](#how-it-works) · [Getting started](#getting-started) ·
+[FAQ](#faq)
+
+## Why Curslink
+
+* **Look to switch.** Glance at your laptop and your keyboard and mouse are
+  on your laptop. No hotkeys, no reaching for a KVM switch.
+* **Or slide across.** Arrange your screens like your desk and move the
+  pointer between computers as if they were one big display.
+* **Any mouse, any keyboard.** Your Bluetooth or USB devices stay connected
+  to one computer; Curslink forwards their input over your network in
+  milliseconds, instead of slowly re-pairing.
+* **Pair with a code.** Devices find each other on your network. Type a
+  6-digit code once and they're linked, with their own encryption key.
+* **Works across the internet too**, through a small relay you host yourself.
+* **Windows, macOS and Linux.** Android is on the roadmap.
+* **Keeps itself up to date**, with every download checked before it installs.
+
+> Curslink is young (0.x). It works day to day, but expect rough edges, and
+> please [open an issue](https://github.com/kylepantall/Curslink/issues)
+> when you hit one.
 
 ## How it works
 
@@ -21,62 +42,32 @@ push the pointer off the edge of a screen into the next device, with a
  └──────────────────────────────────────────────────────────┘        └───────────────┘
 ```
 
-* The **host** is the computer your keyboard and mouse are connected to.
-  It captures input and, while another device is active, suppresses it
-  locally and forwards it.
-* Each other computer runs an **agent**, which replays what it receives.
-* Your Bluetooth devices stay paired to the host. Curslink redirects their
-  input in software instead of re-pairing, which takes milliseconds rather
-  than several seconds and works with any mouse or keyboard.
+* The **host** is the computer your keyboard, mouse and webcam are plugged
+  into. It captures your input and, while you're using another computer,
+  sends it there instead.
+* Every other computer runs an **agent**, which plays back what it receives
+  and shows the switch animation.
+* The webcam only estimates which way your head is turned, on the host
+  itself. No video leaves your computer.
 
-## Quick start
+## Getting started
 
-Install Curslink on each device from the
-[latest release](https://github.com/kylepantall/Curslink/releases/latest).
-The builds include camera switching and need no Python.
+### 1. Install it on every computer
 
-| Platform | Installer | Installs to |
+| Platform | Download | What it does |
 | --- | --- | --- |
-| Windows | `curslink-X.Y.Z-windows-x64-setup.exe` | `%LOCALAPPDATA%\Programs\Curslink` (no admin needed), added to your PATH |
-| macOS (Apple silicon) | `curslink-X.Y.Z-macos-arm64.pkg` | `/usr/local/lib/curslink`, with `curslink` in `/usr/local/bin` |
-| Linux (Debian, Ubuntu) | `curslink-X.Y.Z-linux-x64.deb` | `/opt/curslink`, with `curslink` in `/usr/bin` (`sudo apt install ./curslink-*.deb`) |
+| Windows 10/11 | `curslink-X.Y.Z-windows-x64-setup.exe` | Installs for your user (no admin needed) and adds `curslink` to your PATH |
+| macOS (Apple silicon) | `curslink-X.Y.Z-macos-arm64.pkg` | Installs `curslink` to `/usr/local/bin` |
+| Debian / Ubuntu | `curslink-X.Y.Z-linux-x64.deb` | `sudo apt install ./curslink-*.deb` |
 
-The installers aren't code-signed yet: on Windows click "More info" then
-"Run anyway" in SmartScreen; on macOS right-click the `.pkg` and choose
-Open. Portable archives (`.zip`, `.tar.gz`) are there too if you'd rather
-unpack and run `curslink` from the folder.
+Get them from the [latest release](https://github.com/kylepantall/Curslink/releases/latest).
+They include everything, so you don't need Python. Portable `.zip` and
+`.tar.gz` builds are there too if you'd rather not install.
 
-### Updates
+The installers aren't code-signed yet. On Windows, click **More info**, then
+**Run anyway**. On macOS, right-click the `.pkg` and choose **Open**.
 
-An installed Curslink keeps itself up to date. Each time `curslink host` or
-`curslink agent` starts, it checks GitHub for a newer release, downloads the
-installer for your platform, checks it against the release's
-`SHA256SUMS.txt`, installs it and restarts with the same arguments. On macOS
-and Linux installing asks for your password; on Windows it runs silently. While
-running, it checks once a day and logs when a new version is out, which then
-installs at the next start.
-
-* `curslink update` updates by hand (`--check` only looks, `--pre` includes
-  release candidates).
-* Turn it off or down in `curslink.toml`, or set `CURSLINK_NO_UPDATE=1`:
-
-  ```toml
-  [update]
-  check = true        # look for new releases
-  auto = true         # install them at startup (false: just say so)
-  prerelease = false
-  ```
-* While the repository is private, set `CURSLINK_GITHUB_TOKEN` to a GitHub
-  token that can read it, or the check can't see the releases.
-
-Or install from source with Python 3.13+:
-
-```bash
-# on every device
-pip install "curslink @ git+https://github.com/kylepantall/Curslink"
-# on the host, for camera switching
-pip install "curslink[gaze] @ git+https://github.com/kylepantall/Curslink"
-```
+### 2. Set it up
 
 1. Copy [`examples/curslink.toml`](examples/curslink.toml) to each device and
    edit it: describe every device's screens in one shared layout (arranged
@@ -136,6 +127,54 @@ Hotkeys on the host:
 
 Try the animations with `curslink overlay-test --effect pop`.
 
+### Install from source
+
+Prefer Python? With Python 3.13+:
+
+```bash
+pip install "curslink @ git+https://github.com/kylepantall/Curslink"          # every device
+pip install "curslink[gaze] @ git+https://github.com/kylepantall/Curslink"    # host, for the camera
+```
+
+### Updates
+
+Installed copies keep themselves up to date. When `curslink host` or
+`curslink agent` starts, it checks for a newer release, downloads the
+installer for your platform, checks it against the release's
+`SHA256SUMS.txt`, installs it and carries on with the new version. macOS and
+Linux ask for your password; Windows updates silently. While it runs, it
+checks once a day and installs what it finds at the next start.
+
+* `curslink update` updates right now (`--check` only looks, `--pre`
+  includes release candidates).
+* To turn it down or off, set `CURSLINK_NO_UPDATE=1` or add this to
+  `curslink.toml`:
+
+  ```toml
+  [update]
+  check = true        # look for new releases
+  auto = true         # install them at startup (false: just tell me)
+  prerelease = false
+  ```
+
+## FAQ
+
+**Does the camera record me?** No. Frames are processed in memory on the
+host to estimate head angle, then thrown away. Nothing is saved or sent.
+
+**Do I need a webcam?** No. Without one, use edge switching (push the
+pointer off a screen) and the hotkeys.
+
+**Will it work with my Bluetooth mouse and keyboard?** Yes. They stay
+connected to the host as they are; Curslink forwards their input in
+software, so any mouse or keyboard works.
+
+**Is my typing safe on the network?** Yes. Everything is encrypted, and
+only devices you've paired can connect. See [Security](#security).
+
+**Wayland?** Not yet; Wayland blocks global input capture. Use an X11
+session for now.
+
 ## Platform notes
 
 * **macOS**: allow Accessibility and Input Monitoring for your terminal (or
@@ -170,7 +209,10 @@ relay only forwards ciphertext. The relay key just controls who may use
 your relay. A pairing code contains the pairing secret, so share it like a
 password.
 
-## Development
+## Contributing
+
+Issues and pull requests are welcome. To work on Curslink:
+
 
 ```bash
 pip install -e ".[dev]"
@@ -180,7 +222,7 @@ pytest
 To build the packaged app locally: `pip install ".[gaze]" pyinstaller`, then
 `pyinstaller packaging/curslink.spec` (output in `dist/curslink/`).
 
-Releasing: bump the version in `pyproject.toml` and `curslink/__init__.py`,
+Releasing (maintainers): bump the version in `pyproject.toml` and `curslink/__init__.py`,
 then push a tag such as `v0.2.0`. The Release workflow builds every platform
 and publishes a GitHub release with the installers, the archives and
 `SHA256SUMS.txt`; installed copies pick it up on their next start. To build an
