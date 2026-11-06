@@ -61,6 +61,28 @@ conventions: the camera can sit on any monitor.
 Gaze never switches while a mouse button is held (no yanking mid-drag),
 and can be paused with a hotkey.
 
+### Confirming with the agent's own camera
+
+When an agent has its own screen (two laptops and one monitor, say), the
+host's camera can see your head turn away from its screens but can't be
+sure you're now looking at the laptop. An agent with `[agent.gaze]`
+enabled runs its own head-pose tracker and tells the host, in `facing`
+frames, whether a face is looking straight at it (within `facing_deg` of
+the camera's "straight on", debounced, refreshed every second). The host
+(`curslink/gaze/confirm.py`) then only switches when both cameras agree:
+
+* a gaze switch to an agent with a camera waits until that agent reports
+  you facing it;
+* an agent reporting you facing it gets the pointer when the host's
+  camera confirms you've turned away from the host's screens (or towards
+  that agent's calibrated screen). Losing your face on the host camera
+  counts as turned away, as long as that camera is still working.
+
+So the agent doesn't need to be calibrated on the host at all. Agents
+without a camera keep the host-only behaviour, and `confirm_with_agents =
+false` in `[gaze]` turns the check off. Agents only send `facing` to a
+host that lists it in `welcome.features`, so mixed versions keep working.
+
 Head pose, not eye tracking, was chosen for the MVP because it is robust
 on ordinary webcams at desk distance. Separate monitors are usually 20 to
 40 degrees apart, which head pose resolves well. Adding eye gaze for finer
@@ -193,6 +215,7 @@ grid); `packaging/icons/make_icons.py` turns them into the committed `.ico`,
 | `curslink/layout.py` | Virtual desktop geometry, edge crossing, OS coordinate mapping |
 | `curslink/gaze/headpose.py` | Rotation → yaw/pitch, 1-euro filter |
 | `curslink/gaze/zones.py` | Calibration file, gaze classifier |
+| `curslink/gaze/confirm.py` | Agent "facing me" detector, host two-camera arbiter |
 | `curslink/gaze/tracker.py` | Webcam + MediaPipe thread |
 | `curslink/inputs/` | pynput capture (host) and injection (agent), key names |
 | `curslink/net/` | Host server, agent client, relay server and relay client |

@@ -20,6 +20,9 @@ log = logging.getLogger(__name__)
 
 # With a relay configured too, give up on the LAN address this quickly.
 LAN_ATTEMPT_TIMEOUT_S = 2.0
+# Resend our camera's facing state this often, so the host can tell a
+# fresh report from a stale one.
+FACING_REFRESH_S = 1.0
 
 
 class AgentSession:
@@ -131,6 +134,24 @@ class AgentClient:
         self.connected = asyncio.Event()
         # ("connected", via) / ("disconnected", reason) / ("waiting", why), for the desktop app.
         self.on_state: Callable[[str, str], None] = lambda state, detail: None
+        # Set when this agent runs its own camera: says whether the user is
+        # facing this device right now (see curslink.gaze.confirm).
+        self.facing_source: Callable[[], bool] | None = None
+        self._writer: asyncio.StreamWriter | None = None
+        self._host_takes_facing = False
+
+    def report_facing(self, facing: bool) -> None:
+        """Tell the host straight away that our camera's view changed."""
+        writer = self._writer
+        if writer is None or not self._host_takes_facing or writer.transport.is_closing():
+            return
+        writer.write(encode("facing", facing=bool(facing)))
+
+    async def _refresh_facing(self) -> None:
+        while True:
+            if self.facing_source is not None:
+                self.report_facing(self.facing_source())
+            await asyncio.sleep(FACING_REFRESH_S)
 
     async def _open(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         """LAN first (fast, direct); fall back to the relay when there is one."""
@@ -167,6 +188,8 @@ class AgentClient:
                 platform=f"{platform.system()} {platform.release()}",
                 screens=detect_screens(),
             )
+            if self.facing_source is not None:
+                hello["camera"] = True
             if self.auth_key is not None:
                 binding = channel_binding(writer.get_extra_info("ssl_object"))
                 hello["auth"] = hello_auth(self.auth_key, binding, self.device_id)
@@ -175,16 +198,30 @@ class AgentClient:
             if welcome is None or welcome.t != "welcome":
                 raise ProtocolError("host did not welcome us")
             log.info("connected to host via %s", self.via)
+            features = welcome.get("features")
+            self._host_takes_facing = isinstance(features, list) and "facing" in features
+            if self.facing_source is not None and not self._host_takes_facing:
+                log.info("the host is too old to use this device's camera for gaze confirmation")
+            self._writer = writer
             self.connected.set()
             self.on_state("connected", self.via)
-            while True:
-                msg = await read_message(reader)
-                if msg is None:
-                    break
-                reply = self.session.handle(msg)
-                if reply:
-                    writer.write(reply)
+            refresher = None
+            if self.facing_source is not None and self._host_takes_facing:
+                refresher = asyncio.create_task(self._refresh_facing())
+            try:
+                while True:
+                    msg = await read_message(reader)
+                    if msg is None:
+                        break
+                    reply = self.session.handle(msg)
+                    if reply:
+                        writer.write(reply)
+            finally:
+                if refresher is not None:
+                    refresher.cancel()
         finally:
+            self._writer = None
+            self._host_takes_facing = False
             if self.connected.is_set():
                 self.on_state("disconnected", "")
             self.connected.clear()
