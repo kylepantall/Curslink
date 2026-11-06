@@ -1,3 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16" role="img" aria-label="Layout" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-<rect x="1.5" y="3.5" width="6" height="5" rx="1"/><rect x="8.5" y="5.5" width="6" height="7" rx="1"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+  <title>Layout</title>
+  <rect x="1.5" y="3.5" width="6" height="5" rx="1"/>
+  <rect x="8.5" y="5.5" width="6" height="7" rx="1"/>
 </svg>

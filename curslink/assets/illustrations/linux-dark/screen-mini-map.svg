@@ -1,13 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="150" height="96" viewBox="0 0 150 96" role="img" aria-label="Screen mini map with the right screen active" >
-
-<style>
-  .halo { transform-origin: 102px 43px; animation: pulse 2.4s ease-in-out infinite; }
-  @keyframes pulse { 0%, 100% { transform: scale(.6); opacity: .3; } 50% { transform: scale(1); opacity: .15; } }
-  @media (prefers-reduced-motion: reduce) { .halo { display: none; } }
-</style>
-<rect x="5" y="34" width="53" height="40" rx="5" fill="#2E2E32" stroke="rgba(255,255,255,.50)" stroke-width="2"/>
-<rect x="66" y="17" width="72" height="52" rx="5" fill="none" stroke="#78AEED" stroke-width="8" stroke-opacity=".18"/>
-<rect x="66" y="17" width="72" height="52" rx="5" fill="rgba(120,174,237,.18)" stroke="#78AEED" stroke-width="2"/>
-<circle class="halo" cx="102" cy="43" r="10" fill="#78AEED" opacity=".18"/>
-<circle cx="102" cy="43" r="5" fill="#78AEED"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="150" height="96" viewBox="0 0 150 96" role="img" aria-labelledby="title description">
+<title id="title">Connected screens</title>
+<desc id="description">Two displays; the right display is active. The active dot pulses every 2.4 seconds unless reduced motion is requested.</desc>
+<style>@keyframes pulse{0%,100%{r:6px;opacity:.14}50%{r:10px;opacity:.06}}.pulse{animation:pulse 2.4s ease-in-out infinite}@media(prefers-reduced-motion:reduce){.pulse{animation:none}}</style><rect x="8" y="27" width="62" height="42" rx="5" fill="#2E2E32" stroke="#FFFFFF" stroke-opacity=".50" stroke-width="2" /><path d="M39 70v8M28 78h22" fill="none" stroke="#FFFFFF" stroke-opacity=".50" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /><rect x="76" y="17" width="66" height="46" rx="7" fill="none" stroke="#78AEED" stroke-width="4" opacity=".18"/><rect x="77" y="18" width="64" height="44" rx="5" fill="#78AEED" fill-opacity=".18" stroke="#78AEED" stroke-width="2" /><path d="M109 63v9M98 72h22" fill="none" stroke="#78AEED" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /><circle cx="109" cy="40" r="6" fill="#78AEED" class="pulse" opacity=".14"/><circle cx="109" cy="40" r="5" fill="#78AEED" />
 </svg>

@@ -1,171 +1,267 @@
-"""Draws the in-app spot illustrations into curslink/assets/illustrations/spot.
+#!/usr/bin/env python3
+"""Generate Curslink's 160 × 120 transparent spot illustrations (UI spec §5.4).
 
-    python packaging/illustrations/make_spot.py
-
-Brand palette on a transparent background, so one file reads on light and
-dark. 160 x 120 view box. See docs/design/desktop-ui-spec.md, section 5.4.
+Python standard library only. Run from any directory; assets are resolved
+relative to this script. Every glyph uses the same device and status geometry.
 """
-import os
-import sys
 from pathlib import Path
+from html import escape
+import xml.etree.ElementTree as ET
 
-OUT = sys.argv[1] if len(sys.argv) > 1 else str(Path(__file__).resolve().parents[2] / "curslink" / "assets" / "illustrations" / "spot")
-os.makedirs(OUT, exist_ok=True)
+OUT = Path(__file__).resolve().parents[2] / 'curslink/assets/illustrations/spot'
+SLATE = '#7A8BA6'
+NAVY = '#1D3A66'
+SKY = '#B6DFFF'
+BLUE = '#3FA9FF'
+GOOD = '#2EC27E'
+WARN = '#E5A50A'
+ERROR = '#E5534B'
+DEEP = '#1467B8'
 
-N1 = "#7A8BA6"           # outline (slate, works on both themes)
-N2 = "#7A8BA6" ; N2O = ".16"  # neutral fill
-ACC = "#3FA9FF"; DEEP = "#1467B8"; SKY = "#B6DFFF"; NAVY = "#1D3A66"
-GOOD = "#2EC27E"; WARN = "#E5A50A"; BAD = "#E5534B"
 
-DEFS = f'''<defs>
-<linearGradient id="scr" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="{SKY}"/><stop offset="1" stop-color="{ACC}"/></linearGradient>
-<linearGradient id="tile" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#24497F"/><stop offset="1" stop-color="#0F1B2D"/></linearGradient>
-</defs>'''
+def path(d, stroke=SLATE, width=2, fill='none', extra=''):
+    return f'<path d="{d}" fill="{fill}" stroke="{stroke}" stroke-width="{width}" stroke-linecap="round" stroke-linejoin="round" {extra}/>'
 
-def screen(x, y, w, h, active=False, dashed=False, faded=False):
+
+def rect(x, y, w, h, rx=4, fill=SLATE, opacity=.16, stroke=SLATE, extra=''):
+    return f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="{rx}" fill="{fill}" fill-opacity="{opacity}" stroke="{stroke}" stroke-width="2" {extra}/>'
+
+
+def circle(x, y, r, fill='none', stroke=SLATE, extra=''):
+    return f'<circle cx="{x}" cy="{y}" r="{r}" fill="{fill}" stroke="{stroke}" stroke-width="2" {extra}/>'
+
+
+def group(body, extra=''):
+    return f'<g {extra}>{body}</g>'
+
+
+def screen(x, y, w, h, active=False, stand=True, extra=''):
+    body = rect(x, y, w, h, 4, 'url(#screen)' if active else SLATE, 1 if active else .16)
     if active:
-        return (f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="6" fill="url(#scr)" fill-opacity=".9" stroke="{ACC}" stroke-width="2.5"/>'
-                f'<rect x="{x+4}" y="{y+4}" width="{w-8}" height="{h-8}" rx="3" fill="{NAVY}" fill-opacity=".85"/>')
-    dash = ' stroke-dasharray="4 4"' if dashed else ""
-    op = ' opacity=".55"' if faded else ""
-    fill = "none" if dashed else N2
-    return f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="6" fill="{fill}" fill-opacity="{N2O}" stroke="{N1}" stroke-width="2"{dash}{op}/>'
+        body += f'<rect x="{x+4}" y="{y+4}" width="{w-8}" height="{h-9}" rx="2" fill="{NAVY}"/>'
+        body += path(f'M{x+8} {y+h-12}h{max(5,w*.20)}', SKY, 2, extra='opacity=".45"')
+    if stand:
+        body += path(f'M{x+w/2} {y+h}v7m-9 0h18')
+    return group(body, extra)
 
-def stand(cx, y, faded=False):
-    op = ' opacity=".55"' if faded else ""
-    return f'<path d="M{cx} {y}v7M{cx-9} {y+8}h18" stroke="{N1}" stroke-width="2" stroke-linecap="round"{op}/>'
 
-def laptop(x, y, w, active=False, dashed=False, faded=False):
-    h = round(w * 0.62)
-    s = screen(x, y, w, h, active, dashed, faded)
-    op = ' opacity=".55"' if faded else ""
-    dash = ' stroke-dasharray="4 4"' if dashed else ""
-    base = f'<path d="M{x-6} {y+h+2}h{w+12}l-4 6h-{w+4}z" fill="{N2}" fill-opacity=".3" stroke="{N1}" stroke-width="2" stroke-linejoin="round"{op}{dash}/>'
-    return s + base
+def laptop(x, y, w, h, active=True, extra=''):
+    body = screen(x, y, w, h, active, False)
+    body += path(f'M{x-5} {y+h+1}h{w+10}l-4 5H{x-1}z', SLATE, 2, NAVY if active else SLATE, '' if active else 'fill-opacity=".16"')
+    body += path(f'M{x+w/2-5} {y+h+2}h10', SKY if active else SLATE, 1.5)
+    return group(body, extra)
 
-def pointer(x, y, s=1.0):
-    # arrow tip at (x, y)
-    return (f'<path transform="translate({x} {y}) scale({s})" d="M0 0l0 17l4.6-4.3l3.3 7.4l3.2-1.4l-3.3-7.2l6.4-.3z" '
-            f'fill="#FFFFFF" stroke="{NAVY}" stroke-width="1.6" stroke-linejoin="round"/>')
 
-def arc(d, dashed=False, color=ACC, width=3):
-    dash = ' stroke-dasharray="5 5"' if dashed else ""
-    return f'<path d="{d}" fill="none" stroke="{color}" stroke-width="{width}" stroke-linecap="round"{dash}/>'
+def pointer(x, y, scale=1):
+    return group(path('M0 0l5 25 5-8 9 4 3-6-9-4 7-7z', NAVY, 2, SKY), f'transform="translate({x} {y}) scale({scale})"')
 
-def badge(cx, cy, kind):
-    color = {"good": GOOD, "warn": WARN, "bad": BAD, "acc": DEEP}[kind]
-    mark = {"good": f'<path d="M{cx-5} {cy}l3.5 3.5l6.5-7" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>',
-            "warn": f'<path d="M{cx} {cy-5.5}v6.5" stroke="#fff" stroke-width="2.6" stroke-linecap="round"/><circle cx="{cx}" cy="{cy+5}" r="1.6" fill="#fff"/>',
-            "bad": f'<path d="M{cx-4.5} {cy-4.5}l9 9M{cx+4.5} {cy-4.5}l-9 9" stroke="#fff" stroke-width="2.4" stroke-linecap="round"/>',
-            "acc": f'<path d="M{cx} {cy-6}v12M{cx-6} {cy}h12" stroke="#fff" stroke-width="2.4" stroke-linecap="round"/>'}[kind]
-    return f'<circle cx="{cx}" cy="{cy}" r="11" fill="{color}"/>{mark}'
 
-def sparkle(x, y, r=4, color=ACC, op="1"):
-    return (f'<path d="M{x} {y-r}Q{x} {y} {x+r} {y}Q{x} {y} {x} {y+r}Q{x} {y} {x-r} {y}Q{x} {y} {x} {y-r}z" fill="{color}" opacity="{op}"/>')
+def badge(x, y, kind, color):
+    body = circle(x, y, 11, color, 'none')
+    shapes = {
+        'check': f'M{x-5} {y}l3.5 3.5 6.5-7',
+        'cross': f'M{x-3.5} {y-3.5}l7 7m0-7-7 7',
+        'clock': f'M{x} {y-4}v4l3 2',
+        'arrow': f'M{x} {y-5}v9m-4-4 4 4 4-4',
+        'warn': f'M{x} {y-5}v5m0 4h.01',
+    }
+    if kind == 'clock':
+        body += circle(x, y, 6, 'none', '#FFFFFF')
+    body += path(shapes[kind], '#FFFFFF', 2)
+    return body
 
-def shadow(cx, cy, rx):
-    return f'<ellipse cx="{cx}" cy="{cy}" rx="{rx}" ry="4" fill="{N1}" fill-opacity=".14"/>'
 
-def head(cx, cy, r=13, dashed=False, color=None):
-    c = color or N1
-    dash = ' stroke-dasharray="4 4"' if dashed else ""
-    fill = "none" if dashed else N2
-    return (f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="{fill}" fill-opacity=".3" stroke="{c}" stroke-width="2"{dash}/>'
-            f'<path d="M{cx-r*1.7} {cy+r*2.5}q0-{r*1.3} {r*1.7}-{r*1.3}q{r*1.7} 0 {r*1.7} {r*1.3}" fill="{fill}" fill-opacity=".3" stroke="{c}" stroke-width="2" stroke-linecap="round"{dash}/>')
+def broken_link(y=61):
+    return path(f'M65 {y}h8m14 0h8', BLUE, 2, extra='stroke-dasharray="5 5"') + path(f'M80 {y-8}l-4 5m8 7-4 5', SLATE)
 
-def camera(cx, cy, w=46, h=32):
-    x, y = cx - w/2, cy - h/2
-    return (f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="8" fill="{N2}" fill-opacity=".2" stroke="{N1}" stroke-width="2"/>'
-            f'<circle cx="{cx}" cy="{cy}" r="{h*0.3}" fill="{NAVY}" stroke="{N1}" stroke-width="2"/><circle cx="{cx+2}" cy="{cy-2}" r="2" fill="{SKY}"/>'
-            f'<path d="M{cx+w/2} {cy-5}l9-5v20l-9-5z" fill="{N2}" fill-opacity=".2" stroke="{N1}" stroke-width="2" stroke-linejoin="round"/>')
 
-ART = {}
+def welcome():
+    return (path('M43 34C65 8 110 12 124 34', BLUE, 2, extra='stroke-dasharray="5 5"')
+            + screen(14, 49, 52, 36) + screen(94, 38, 52, 36, True)
+            + pointer(75, 51, 1.05))
 
-ART["welcome"] = ("Two screens linked by the pointer",
-    shadow(80, 104, 62) + screen(14, 46, 62, 42) + stand(45, 88) + screen(84, 26, 64, 44, active=True) + stand(116, 70)
-    + arc("M38 66C60 66 92 58 110 44") + pointer(108, 38) + sparkle(138, 16, 5) + sparkle(24, 30, 3.5, SKY) + sparkle(150, 84, 3, ACC, ".6"))
 
-ART["role-host"] = ("A computer with the keyboard and mouse",
-    shadow(80, 106, 58) + screen(38, 14, 84, 54, active=True) + stand(80, 68)
-    + f'<rect x="30" y="86" width="74" height="16" rx="4" fill="{ACC}" fill-opacity=".18" stroke="{ACC}" stroke-width="2"/>'
-    + "".join(f'<rect x="{36+i*10}" y="91" width="6" height="2.5" rx="1" fill="{ACC}"/>' for i in range(6))
-    + f'<rect x="114" y="82" width="15" height="22" rx="7.5" fill="{ACC}" fill-opacity=".18" stroke="{ACC}" stroke-width="2"/><path d="M121.5 82v7" stroke="{ACC}" stroke-width="2"/>')
+def role_host():
+    b = screen(43, 20, 74, 49, True)
+    b += rect(31, 87, 70, 15, 4)
+    for y in [92, 97]:
+        b += path(f'M38 {y}h4m5 0h4m5 0h4m5 0h4m5 0h4m5 0h4', SLATE, 1.5)
+    b += rect(114, 84, 15, 21, 7) + path('M121.5 88v4', SLATE)
+    b += pointer(77, 35, .66)
+    return b
 
-ART["role-agent"] = ("A laptop that the pointer arrives on",
-    shadow(92, 106, 54) + laptop(54, 30, 76, active=True) + arc("M12 40C30 26 52 34 74 52", dashed=True) + pointer(74, 50) + sparkle(20, 66, 3.5, SKY))
 
-ART["devices-empty"] = ("No devices paired yet",
-    shadow(80, 106, 64) + laptop(18, 40, 54) + screen(100, 36, 46, 34, dashed=True) + stand(123, 70, faded=True)
-    + arc("M58 54C74 40 92 40 104 50", dashed=True, color=N1, width=2) + badge(141, 34, "acc"))
+def role_agent():
+    return (laptop(38, 47, 84, 48)
+            + path('M23 65C13 27 57 13 81 37', BLUE, 2, extra='stroke-dasharray="5 5"')
+            + pointer(79, 32, .98))
 
-ART["searching"] = ("Looking for devices on the network",
-    shadow(80, 106, 40) + laptop(56, 56, 48)
-    + "".join(f'<path d="M{80-r} {54-r*0.15}A{r} {r} 0 0 1 {80+r} {54-r*0.15}" fill="none" stroke="{ACC}" stroke-width="3" stroke-linecap="round" opacity="{op}"/>' for r, op in ((16, "1"), (30, ".6"), (44, ".3")))
-    + sparkle(30, 30, 3, SKY) + sparkle(132, 24, 3.5, ACC, ".7"))
 
-ART["pairing"] = ("Two devices sharing a pairing key",
-    shadow(80, 106, 66) + laptop(14, 46, 44) + screen(108, 40, 42, 32) + stand(129, 72)
-    + arc("M52 58H68", dashed=True, color=N1, width=2) + arc("M92 58H110", dashed=True, color=N1, width=2)
-    + f'<path d="M80 34l16 6v12c0 11-7 18-16 22c-9-4-16-11-16-22V40z" fill="{NAVY}" stroke="{ACC}" stroke-width="2.5" stroke-linejoin="round"/>'
-    + f'<circle cx="80" cy="51" r="4.5" fill="{SKY}"/><path d="M80 54v8" stroke="{SKY}" stroke-width="3" stroke-linecap="round"/>')
+def devices_empty():
+    return (laptop(14, 54, 55, 35)
+            + path('M77 69h17', BLUE, extra='stroke-dasharray="5 5"')
+            + rect(102, 36, 42, 48, 5, extra='stroke-dasharray="5 5"')
+            + path('M116 60h14m-7-7v14', SLATE)
+            + path('M116 92h14', SLATE))
 
-ART["paired"] = ("Devices paired",
-    shadow(80, 106, 66) + laptop(14, 46, 44) + screen(108, 40, 42, 32, active=True) + stand(129, 72)
-    + arc("M52 58C72 46 90 46 110 56") + badge(80, 34, "good"))
 
-ART["calibrate"] = ("Look at each screen in turn",
-    screen(10, 18, 40, 28) + screen(60, 8, 40, 28, active=True) + screen(110, 18, 40, 28)
-    + arc("M80 76L80 42", dashed=True) + arc("M74 78L36 50", dashed=True, color=N1, width=2) + arc("M86 78L124 50", dashed=True, color=N1, width=2)
-    + head(80, 88, 11) + f'<circle cx="80" cy="22" r="4" fill="{SKY}"/>')
+def searching():
+    return (path('M100 27a43 43 0 0 1 38 40', SLATE, extra='opacity=".45"')
+            + path('M98 41a29 29 0 0 1 26 27', BLUE, extra='opacity=".65"')
+            + path('M96 55a15 15 0 0 1 14 14', BLUE)
+            + circle(96, 72, 3, BLUE, 'none')
+            + laptop(23, 65, 61, 35)
+            + circle(121, 33, 2, SKY, 'none'))
 
-ART["calibrated"] = ("Calibration saved",
-    screen(10, 22, 40, 28) + screen(60, 12, 40, 28) + screen(110, 22, 40, 28)
-    + "".join(f'<path d="M{x-6} {y}l4 4l8-8" fill="none" stroke="{GOOD}" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>' for x, y in ((30, 36), (80, 26), (130, 36)))
-    + head(80, 90, 11) + badge(104, 86, "good"))
 
-ART["camera-off"] = ("The camera can't be opened",
-    shadow(78, 100, 44) + camera(74, 60, 56, 38) + f'<path d="M38 28L118 94" stroke="{BAD}" stroke-width="3.5" stroke-linecap="round"/>' + badge(124, 34, "bad"))
+def pairing():
+    b = screen(10, 43, 43, 31, True) + laptop(107, 48, 43, 29)
+    b += path('M52 59h56', BLUE, extra='stroke-dasharray="5 5"')
+    b += path('M80 30l21 9v20c0 15-11 25-21 31-10-6-21-16-21-31V39z', SLATE, 2, 'url(#screen)')
+    b += path('M80 36l15 6v17c0 11-7 19-15 25-8-6-15-14-15-25V42z', 'none', 0, NAVY)
+    b += path('M74 56v-5a6 6 0 0 1 12 0v5', SKY)
+    b += rect(71, 56, 18, 15, 3, SKY, 1, 'none')
+    b += path('M80 61v5', NAVY)
+    return b
 
-ART["no-face"] = ("No face in view",
-    "".join(f'<path d="{d}" fill="none" stroke="{N1}" stroke-width="2.5" stroke-linecap="round"/>' for d in ("M40 22h-10v12", "M120 22h10v12", "M40 102h-10v-12", "M120 102h10v-12"))
-    + head(80, 50, 15, dashed=True) + badge(126, 30, "warn"))
 
-ART["not-linking"] = ("Not linking",
-    shadow(80, 104, 62) + screen(14, 40, 56, 38) + stand(42, 78) + screen(90, 40, 56, 38) + stand(118, 78)
-    + f'<path d="M66 59h6" stroke="{N1}" stroke-width="3" stroke-linecap="round"/><path d="M88 59h6" stroke="{N1}" stroke-width="3" stroke-linecap="round"/>'
-    + f'<path d="M76 52l-2-6M84 52l2-6M80 50v-7" stroke="{N1}" stroke-width="2" stroke-linecap="round"/>')
+def paired():
+    return (screen(13, 35, 53, 37, True) + laptop(96, 45, 52, 35)
+            + path('M40 82v8h70', BLUE, extra='stroke-dasharray="5 5"')
+            + badge(81, 90, 'check', GOOD))
 
-ART["waiting-for-host"] = ("Waiting for the host",
-    shadow(80, 106, 64) + laptop(92, 44, 52) + screen(12, 34, 52, 36, faded=True) + stand(38, 70, faded=True)
-    + "".join(f'<circle cx="{x}" cy="54" r="3.2" fill="{ACC}" opacity="{op}"/>' for x, op in ((70, ".35"), (78, ".6"), (86, "1"))))
 
-ART["connection-lost"] = ("The connection dropped",
-    shadow(80, 106, 66) + laptop(14, 46, 44) + screen(108, 40, 42, 32) + stand(129, 72)
-    + arc("M52 58C60 52 66 50 72 50", color=N1, width=2.5) + arc("M88 50C96 50 102 52 110 56", color=N1, width=2.5)
-    + f'<path d="M76 44l4 6l-4 6" fill="none" stroke="{WARN}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>' + badge(80, 30, "warn"))
+def calibrate():
+    b = screen(8, 29, 39, 27) + screen(61, 17, 39, 27, True) + screen(113, 29, 39, 27)
+    b += path('M80 75V56', BLUE)
+    b += path('M65 78 35 65m60 13 30-13', SLATE, extra='stroke-dasharray="5 5" opacity=".65"')
+    b += circle(80, 87, 11, SLATE, SLATE, 'fill-opacity=".16"')
+    b += path('M61 111c1-11 8-16 19-16s18 5 19 16', SLATE, 2, SLATE, 'fill-opacity=".16"')
+    b += path('M76 78q4-3 8 0', BLUE)
+    return b
 
-ART["update"] = ("A new version is ready",
-    shadow(80, 106, 34) + f'<rect x="50" y="26" width="60" height="60" rx="15" fill="url(#tile)" stroke="{ACC}" stroke-opacity=".5" stroke-width="1.5"/>'
-    + f'<path d="M80 42v26M70 58l10 10l10-10" fill="none" stroke="{SKY}" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>'
-    + sparkle(122, 26, 5) + sparkle(40, 80, 3.5, SKY))
 
-ART["diagnostics"] = ("A crash report was saved",
-    shadow(80, 108, 36) + f'<path d="M54 14h38l16 16v70a4 4 0 0 1-4 4H54a4 4 0 0 1-4-4V18a4 4 0 0 1 4-4z" fill="{N2}" fill-opacity=".14" stroke="{N1}" stroke-width="2" stroke-linejoin="round"/>'
-    + f'<path d="M92 14v16h16" fill="none" stroke="{N1}" stroke-width="2" stroke-linejoin="round"/>'
-    + f'<path d="M58 62h10l5-12l8 24l6-14l4 2h11" fill="none" stroke="{ACC}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>'
-    + "".join(f'<path d="M60 {y}h{w}" stroke="{N1}" stroke-width="2" stroke-linecap="round" opacity=".6"/>' for y, w in ((84, 36), (92, 26))))
+def calibrated():
+    b = ''
+    for x, y in [(8, 44), (61, 28), (114, 44)]:
+        b += screen(x, y, 38, 29, True)
+        b += path(f'M{x+13} {y+13}l4 4 8-8', '#FFFFFF')
+    b += path('M28 90h103', SLATE, extra='stroke-dasharray="5 5"')
+    b += badge(80, 90, 'check', GOOD)
+    return b
 
-ART["background"] = ("Curslink keeps running in the tray or menu bar",
-    f'<rect x="8" y="16" width="144" height="18" rx="5" fill="{N2}" fill-opacity=".2" stroke="{N1}" stroke-width="1.5"/>'
-    + f'<rect x="104" y="19" width="16" height="12" rx="3" fill="{ACC}" fill-opacity=".3"/><path d="M108 28l0-6l5 3z" fill="{ACC}"/>'
-    + f'<circle cx="132" cy="25" r="2" fill="{N1}"/><circle cx="140" cy="25" r="2" fill="{N1}"/>'
-    + f'<rect x="64" y="40" width="72" height="62" rx="8" fill="{N2}" fill-opacity=".14" stroke="{N1}" stroke-width="2"/>'
-    + f'<rect x="70" y="47" width="60" height="10" rx="3" fill="{ACC}"/>'
-    + "".join(f'<path d="M72 {y}h{w}" stroke="{N1}" stroke-width="2.5" stroke-linecap="round" opacity=".7"/>' for y, w in ((68, 40), (78, 48), (88, 32)))
-    + f'<circle cx="77" cy="52" r="2" fill="#fff"/>')
 
-for name, (label, body) in ART.items():
-    svg = (f'<svg xmlns="http://www.w3.org/2000/svg" width="160" height="120" viewBox="0 0 160 120" role="img" aria-label="{label}">'
-           f'{DEFS}{body}</svg>\n')
-    open(os.path.join(OUT, f"{name}.svg"), "w").write(svg)
-print(len(ART), "illustrations")
+def camera_off():
+    b = rect(29, 38, 80, 52, 8)
+    b += path('M109 53l21-11v44l-21-11z', SLATE, 2, SLATE, 'fill-opacity=".16"')
+    b += circle(67, 64, 15) + circle(67, 64, 7)
+    b += path('M29 100 126 22', SLATE, 2)
+    b += badge(119, 94, 'cross', ERROR)
+    return b
+
+
+def no_face():
+    b = path('M34 43V25h18m56 0h18v18M34 77v18h18m56 0h18V77')
+    b += circle(80, 51, 15, SLATE, SLATE, 'fill-opacity=".16" stroke-dasharray="5 5"')
+    b += path('M53 90c2-17 12-25 27-25s25 8 27 25', SLATE, 2, SLATE, 'fill-opacity=".16" stroke-dasharray="5 5"')
+    b += badge(119, 94, 'warn', WARN)
+    return b
+
+
+def not_linking():
+    return (screen(13, 41, 49, 34) + screen(99, 41, 49, 34)
+            + broken_link(57) + badge(80, 92, 'cross', ERROR))
+
+
+def waiting_for_host():
+    return (screen(15, 27, 53, 36, extra='opacity=".4"')
+            + laptop(95, 59, 51, 34)
+            + path('M70 43h26q24 0 24 11', BLUE, extra='stroke-dasharray="5 5"')
+            + badge(64, 89, 'clock', WARN))
+
+
+def connection_lost():
+    return (screen(13, 41, 49, 34, True) + laptop(99, 46, 48, 33)
+            + broken_link(60) + badge(80, 94, 'warn', WARN))
+
+
+def app_tile(x, y, size=64):
+    s = size / 64
+    b = rect(0, 0, 64, 64, 14, NAVY, 1)
+    b += rect(10, 24, 23, 19, 3, 'none', 1, BLUE)
+    b += rect(33, 16, 23, 19, 3, 'none', 1, BLUE)
+    b += path('M21.5 43v5m-5 0h10M44.5 35v5m-5 0h10', BLUE)
+    b += pointer(30, 28, .55)
+    return group(b, f'transform="translate({x} {y}) scale({s})"')
+
+
+def update():
+    return (app_tile(35, 26, 68) + path('M120 33v31m-8-8 8 8 8-8', BLUE)
+            + badge(115, 88, 'arrow', DEEP))
+
+
+def diagnostics():
+    b = path('M48 18h45l19 19v65H48z', SLATE, 2, SLATE, 'fill-opacity=".16"')
+    b += path('M93 18v19h19M59 32h21M59 43h17')
+    b += path('M35 68h24l7-12 10 28 9-22 6 6h34', BLUE)
+    b += path('M59 92h22', SLATE)
+    b += badge(113, 98, 'cross', ERROR)
+    return b
+
+
+def background():
+    b = rect(15, 23, 130, 18, 5)
+    b += path('M24 32h12m7 0h13', SLATE)
+    b += rect(107, 26, 22, 12, 3, BLUE, .16, 'none')
+    b += path('M111 29h6v5h-6zM119 28h6v5h-6z', BLUE, 1.5)
+    b += path('M117 34v2m-4 0h9', BLUE, 1.5)
+    b += rect(66, 46, 78, 60, 6, NAVY, 1)
+    b += circle(78, 60, 3, GOOD, 'none')
+    b += path('M87 60h43', SKY)
+    b += path('M73 71h64', SLATE, 1, extra='opacity=".5"')
+    b += path('M77 82h43M77 95h26', SKY, 2)
+    b += path('M27 55v40h26', SLATE, extra='stroke-dasharray="5 5"')
+    return b
+
+
+ILLUSTRATIONS = {
+    'welcome': ('Welcome', 'Two screens joined by an arcing cursor path.', welcome),
+    'role-host': ('Host', 'A desktop monitor with a keyboard and mouse.', role_host),
+    'role-agent': ('Agent', 'A pointer arriving on a laptop.', role_agent),
+    'devices-empty': ('No devices yet', 'A laptop with a dashed link to an empty device.', devices_empty),
+    'searching': ('Looking for devices', 'A laptop sending discovery rings into the network.', searching),
+    'pairing': ('Pairing', 'Two computers connected through a protective shield and lock.', pairing),
+    'paired': ('Paired', 'Two linked devices with a green confirmation check.', paired),
+    'calibrate': ('Calibrate gaze', 'A head facing the middle of three screens.', calibrate),
+    'calibrated': ('Calibration saved', 'Three screens marked with checks.', calibrated),
+    'camera-off': ('Camera unavailable', 'A crossed-out camera with an error badge.', camera_off),
+    'no-face': ('No face found', 'A dashed head silhouette inside a camera viewfinder.', no_face),
+    'not-linking': ('Not linking', 'Two inactive screens separated by a broken link.', not_linking),
+    'waiting-for-host': ('Waiting for the host', 'An agent laptop waiting for a faded host monitor.', waiting_for_host),
+    'connection-lost': ('Connection lost', 'A gap between two linked computers and a warning badge.', connection_lost),
+    'update': ('Update ready', 'The Curslink app tile with a download arrow.', update),
+    'diagnostics': ('Diagnostics', 'A folded report page with a pulse line and error badge.', diagnostics),
+    'background': ('Running in the background', 'A menu bar with the Curslink status menu open.', background),
+}
+
+
+def render(title, description, body):
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" width="160" height="120" viewBox="0 0 160 120" role="img" aria-labelledby="title description">
+  <title id="title">{escape(title)}</title>
+  <desc id="description">{escape(description)}</desc>
+  <defs><linearGradient id="screen" x1="0" y1="0" x2="1" y2="1"><stop stop-color="{SKY}"/><stop offset="1" stop-color="{BLUE}"/></linearGradient></defs>
+  {body}
+</svg>\n'''
+
+
+def main():
+    OUT.mkdir(parents=True, exist_ok=True)
+    for name, (title, description, draw) in ILLUSTRATIONS.items():
+        svg = render(title, description, draw())
+        ET.fromstring(svg)
+        (OUT / f'{name}.svg').write_text(svg, encoding='utf-8')
+    print(f'Generated {len(ILLUSTRATIONS)} spot illustrations in {OUT}')
+
+
+if __name__ == '__main__':
+    main()

@@ -1,17 +1,12 @@
 # Curslink desktop UI assets
 
-Generated from the draft desktop UI spec dated 6 November 2026. The vector icon redraw follows the two screens and cursor in the installed Curslink icon, with the navy and blue palette from the draft.
+Open `preview.html` from the extracted folder to compare the tray glyph at native size, switch among six illustration themes inspect the spot illustrations on light and dark surfaces, and replay the switch effects.
 
-| Location | Contents |
-|---|---|
-| `curslink/assets/` | 1024 px app icon SVG with an 824 px tile, 256 px small icon PNG and 512 px black tray template PNG. The small icon and tray glyph also have editable SVG masters. |
-| `curslink/assets/navigation/` | Five 16 px SVG glyphs using `currentColor`. For Qt, resolve it to the active theme colour at load time. |
-| `curslink/assets/illustrations/` | Mini map, layout canvas, head plot and sample pairing code card for Windows, macOS and Linux in light and dark. Also includes 180 px switch pop and blink animations. |
-| `packaging/icons/` | macOS ICNS, multi-resolution Windows ICO, Linux hicolor PNGs and tray PNGs at 16, 22, 32, 44 and 64 px. |
-
-The macOS tray PNGs are black templates. Set the native image's template flag so the system can tint it. Windows and Linux tray exports include good, warning and off states in light and dark.
-
-## Navigation mapping
+- `curslink/assets/` contains editable SVG icon masters and the small icon and tray PNG masters.
+- `curslink/assets/navigation/` contains five 16 px glyphs. Resolve `currentColor` to the applicable Qt palette colour when loading the SVG.
+- `curslink/assets/illustrations/` contains four UI illustrations per theme and two switch effects.
+- `curslink/assets/illustrations/spot/` contains the 17 transparent 160 × 120 SVGs from section 5.4. Use the same SVG in light and dark. Render at 96 × 72 for notices, 160 × 120 for cards and empty states, or 240 × 180 for first run. Keep titles and actions in the app UI.
+- `packaging/icons/` contains macOS ICNS, Windows ICO, Linux hicolor PNGs and five tray sizes. Mark the monochrome image as a template on macOS.
 
 | Page | Segoe Fluent Icons | SF Symbols |
 |---|---|---|
@@ -21,12 +16,8 @@ The macOS tray PNGs are black templates. Set the native image's template flag so
 | Calibrate | E7B3 | scope |
 | Settings | E713 | gearshape |
 
-## Integration
+Use the illustration SVGs as drawing references for live layouts, head pose and pairing codes in Qt. They contain sample data. The switch SVGs are browser animations with reduced-motion support. Use native animation for the Qt implementation.
 
-Use the illustration SVGs as visual references for drawing live layouts, head positions and pairing codes. The device names, geometry and code are sample data. macOS variants use the fallback blue accent from the spec. The animated SVGs use CSS and honour reduced motion in a browser. For native Qt widgets, implement motion using the app's animation system.
+To regenerate platform icon exports, run `python3 packaging/icons/make_icons_macos.py` on macOS (or `packaging/icons/make_icons.py` anywhere, with PySide6) with Pillow installed.
 
-Regenerate the PNG, ICO and ICNS exports on macOS with Python, Pillow, `sips` and `iconutil`.
-
-```sh
-python3 packaging/icons/make_icons.py
-```
+To regenerate the spot SVGs, run `python3 packaging/illustrations/make_spot.py`.
