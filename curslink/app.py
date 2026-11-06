@@ -27,26 +27,72 @@ log = logging.getLogger(__name__)
 
 
 class LoopBridge:
-    """Hands input callbacks from pynput's threads to the asyncio loop."""
+    """Hands input callbacks from pynput's threads to the asyncio loop.
+
+    Relative motion is added up until the loop gets to it, so a fast mouse
+    (1000 reports a second) sends the agent one move per loop turn instead
+    of a backlog of tiny ones it then replays late. Buttons, scrolls and keys
+    take any motion still waiting with them, so a click lands where the
+    pointer was when you clicked.
+    """
 
     def __init__(self, loop: asyncio.AbstractEventLoop, router: Router):
         self._loop = loop
         self._router = router
+        self._lock = threading.Lock()
+        self._dx = 0.0
+        self._dy = 0.0
+        self._pending = False
+        self._gen = 0  # a flush scheduled before the last take is stale
 
     def on_pointer(self, x, y):
         self._loop.call_soon_threadsafe(self._router.on_pointer, x, y)
 
     def on_motion(self, dx, dy):
-        self._loop.call_soon_threadsafe(self._router.on_motion, dx, dy)
+        with self._lock:
+            self._dx += dx
+            self._dy += dy
+            if self._pending:
+                return
+            self._pending = True
+            gen = self._gen
+        self._loop.call_soon_threadsafe(self._flush, gen)
+
+    def _take(self) -> tuple[float, float]:
+        with self._lock:
+            dx, dy = self._dx, self._dy
+            self._dx = self._dy = 0.0
+            self._pending = False
+            self._gen += 1
+        return dx, dy
+
+    def _flush(self, gen: int) -> None:
+        with self._lock:
+            if gen != self._gen:
+                return  # a button or key took this motion with it
+        dx, dy = self._take()
+        if dx or dy:
+            self._router.on_motion(dx, dy)
+
+    def _after_motion(self, fn, *args):
+        """Run ``fn`` on the loop after the motion waiting now."""
+        dx, dy = self._take()
+
+        def run():
+            if dx or dy:
+                self._router.on_motion(dx, dy)
+            fn(*args)
+
+        self._loop.call_soon_threadsafe(run)
 
     def on_button(self, button, pressed):
-        self._loop.call_soon_threadsafe(self._router.on_button, button, pressed)
+        self._after_motion(self._router.on_button, button, pressed)
 
     def on_scroll(self, dx, dy):
-        self._loop.call_soon_threadsafe(self._router.on_scroll, dx, dy)
+        self._after_motion(self._router.on_scroll, dx, dy)
 
     def on_key(self, key, pressed):
-        self._loop.call_soon_threadsafe(self._router.on_key, key, pressed)
+        self._after_motion(self._router.on_key, key, pressed)
 
 
 class Pairing:
