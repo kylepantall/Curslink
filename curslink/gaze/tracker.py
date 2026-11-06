@@ -35,14 +35,34 @@ def cache_dir() -> Path:
     return path
 
 
-def ensure_model(path: Path | None = None) -> Path:
-    path = path or cache_dir() / "face_landmarker.task"
+def default_model_path() -> Path:
+    return cache_dir() / "face_landmarker.task"
+
+
+def ensure_model(path: Path | None = None, progress: Callable[[int, int], None] | None = None) -> Path:
+    """The face model, downloaded the first time. ``progress(done, total)``
+    is called as bytes arrive (``total`` is 0 when the server doesn't say)."""
+    path = path or default_model_path()
     if not path.exists():
         log.info("downloading face landmark model to %s", path)
         started = time.monotonic()
         tmp = path.with_suffix(".part")
         try:
-            urllib.request.urlretrieve(MODEL_URL, tmp)
+            with urllib.request.urlopen(MODEL_URL, timeout=30) as resp, open(tmp, "wb") as out:
+                total = int(resp.headers.get("Content-Length") or 0)
+                done = 0
+                if progress:
+                    progress(0, total)
+                while True:
+                    chunk = resp.read(64 * 1024)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+                    done += len(chunk)
+                    if progress:
+                        progress(done, total)
+            if total and done != total:
+                raise OSError(f"the download stopped at {done} of {total} bytes")
         except Exception:
             log.exception("couldn't download the face model from %s", MODEL_URL)
             raise

@@ -506,6 +506,14 @@ def main(argv: list[str] | None = None) -> int:
         return dialog_main(argv[1:])
     if argv[:1] == ["_selftest"]:
         return _selftest()
+    if argv[:1] == ["_macperms"]:
+        # A fresh process: macOS caches these answers for the life of a process.
+        import json
+
+        from curslink import macperms
+
+        print(json.dumps({k: macperms.granted(k) for k in macperms.PERMISSIONS}))
+        return 0
     if argv[:1] == ["_install-kind"]:
         # How this copy was installed (used by CI to check the installers).
         from curslink.update import install_kind

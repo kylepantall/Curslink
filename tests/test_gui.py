@@ -173,14 +173,22 @@ def test_macos_permissions_card(desktop, qapp, monkeypatch):
 
     desktop.window.pages["setup"].create()
     card = desktop.window.pages["status"].permissions
-    have = {"accessibility": False, "input-monitoring": False}
+    have = {"accessibility": False, "input-monitoring": False, "camera": False}
     monkeypatch.setattr(macperms, "MAC", True)
     monkeypatch.setattr(macperms, "granted", lambda k: have[k])
     asked = []
     monkeypatch.setattr(macperms, "request", lambda k: asked.append(k))
-    card.refresh()
-    assert not card.isHidden() and card.rows.count() == 2  # a host needs both
+    monkeypatch.setattr(macperms, "missing_fresh", macperms.missing)
+    card.apply(macperms.missing("host"))
+    assert not card.isHidden() and card.rows.count() == 4  # all three, plus "Restart Curslink"
+    assert card.restart_row.isHidden()
+    card.allow("accessibility")
+    assert asked == ["accessibility"] and not card.restart_row.isHidden()
     have["accessibility"] = have["input-monitoring"] = True
-    card.refresh()
+    card.apply(macperms.missing("host"))
+    assert card.rows.count() == 2  # camera, plus "Restart Curslink"
+    have["camera"] = True
+    card.apply(macperms.missing("host"))
     assert card.isHidden()
     assert macperms.needed("agent") == ["accessibility"]
+    assert macperms.needed("host") == ["accessibility", "input-monitoring", "camera"]

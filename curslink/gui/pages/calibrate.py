@@ -5,10 +5,10 @@ from __future__ import annotations
 import logging
 
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QProgressBar, QVBoxLayout, QWidget
 
 from curslink.gui.camerapicker import CameraPicker
-from curslink.gui.common import in_background
+from curslink.gui.common import call_on_main, in_background
 from curslink.gui.overlay import LookHere
 from curslink.gui.screenmap import ScreenMap, screens_from_config
 from curslink.gui.service import RUNNING, STARTING
@@ -69,6 +69,16 @@ class CalibratePage(Page):
             words.addWidget(w)
         top.addLayout(words, 1)
         steps.body.addLayout(top)
+        # The first run downloads the face model: show how far it's got.
+        self.progress = QProgressBar()
+        self.progress.setTextVisible(False)
+        self.progress.setFixedHeight(6)
+        self.progress.setAccessibleName("Download progress")
+        self.progress_text = label("", "small")
+        steps.body.addWidget(self.progress)
+        steps.body.addWidget(self.progress_text)
+        self.progress.hide()
+        self.progress_text.hide()
         cam_row = QHBoxLayout()
         cam_row.addWidget(label("Camera", "small"))
         self.camera = CameraPicker()
@@ -163,6 +173,12 @@ class CalibratePage(Page):
         self.show_state()
 
         def warm():
+            from curslink.gaze.tracker import default_model_path, ensure_model
+
+            if not default_model_path().exists():
+                call_on_main(lambda: self.show_download(0, 0))
+                ensure_model(progress=lambda done, total: call_on_main(lambda: self.show_download(done, total)))
+            call_on_main(self.show_starting)
             cal = Calibrator(index)
             cal.start()
             if not cal.wait_for_face(20):
@@ -174,6 +190,32 @@ class CalibratePage(Page):
             return cal
 
         in_background(warm, self.warmed, self.failed)
+
+    def show_download(self, done: int, total: int) -> None:
+        if self.state != "warming":
+            return
+        self.prompt.setText("Downloading the face model…")
+        self.prompt_detail.setText("Only the first time. Curslink keeps it for next time.")
+        mb = 1024 * 1024
+        if total:
+            self.progress.setRange(0, total)
+            self.progress.setValue(done)
+            self.progress_text.setText(f"{done / mb:.1f} of {total / mb:.1f} MB · {done * 100 // total}%")
+        else:
+            self.progress.setRange(0, 0)  # unknown size: a moving bar
+            self.progress_text.setText(f"{done / mb:.1f} MB")
+        self.progress.show()
+        self.progress_text.show()
+
+    def show_starting(self) -> None:
+        if self.state != "warming":
+            return
+        self.prompt.setText("Looking for your face…")
+        self.prompt_detail.setText("Starting the camera. Sit facing it in good light.")
+        self.progress.setRange(0, 0)
+        self.progress_text.setText("Starting the camera")
+        self.progress.show()
+        self.progress_text.show()
 
     def warmed(self, cal) -> None:
         if self.state != "warming":  # cancelled meanwhile
@@ -330,6 +372,9 @@ class CalibratePage(Page):
     def show_state(self) -> None:
         s, n = self.state, len(self.targets)
         busy = s in ("warming", "ready", "recording")
+        if s != "warming":
+            self.progress.hide()
+            self.progress_text.hide()
         self.camera_row.setVisible(not busy)
         self.cancel_button.setVisible(busy)
         self.secondary.setVisible(s == "ready")
@@ -344,8 +389,8 @@ class CalibratePage(Page):
             self.readout.setText("Camera off")
         elif s == "warming":
             self.step_title.setText("STARTING THE CAMERA")
-            self.prompt.setText("Looking for your face…")
-            self.prompt_detail.setText("The first run downloads the face model (a few MB).")
+            self.prompt.setText("Getting ready…")
+            self.prompt_detail.setText("Starting the camera.")
             self.primary.setText("Record")
             self.readout.setText("Starting the camera…")
         elif s in ("ready", "recording"):

@@ -9,6 +9,7 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout
 
 from curslink import macperms
+from curslink.gui.common import in_background
 from curslink.gui.widgets import Card, button, label, pill, spot, text_block
 
 log = logging.getLogger(__name__)
@@ -34,13 +35,36 @@ class PermissionsCard(Card):
         head.addLayout(words, 1)
         self.body.insertLayout(0, head)
         self._missing: list[str] = []
+        self._checking = False
+        self.asked = False  # pressed Allow at least once
         self.timer = QTimer(self)
-        self.timer.timeout.connect(self.refresh)
-        self.refresh()
+        self.timer.timeout.connect(self.check)
+        # First answer from this process (instant); after that each check runs
+        # in a new process, because macOS keeps a process's first answer.
+        self.apply(macperms.missing(app.role) if app.has_config() else [])
 
     def refresh(self) -> None:
+        self.check()
+
+    def check(self) -> None:
+        if self._checking or not self.app.has_config():
+            return
+        if not macperms.needed(self.app.role):
+            self.apply([])
+            return
+        self._checking = True
         role = self.app.role
-        now = macperms.missing(role) if self.app.has_config() else []
+
+        def done(now):
+            self._checking = False
+            self.apply(now)
+
+        def failed(_exc):
+            self._checking = False
+
+        in_background(lambda: macperms.missing_fresh(role), done, failed, name="curslink-macperms")
+
+    def apply(self, now: list[str]) -> None:
         if now != self._missing:
             granted = [k for k in self._missing if k not in now]
             self._missing = now
@@ -52,7 +76,7 @@ class PermissionsCard(Card):
                     self.app.service.restart()
         self.setVisible(bool(now))
         if now and not self.timer.isActive():
-            self.timer.start(2000)
+            self.timer.start(3000)
         elif not now:
             self.timer.stop()
 
@@ -65,4 +89,14 @@ class PermissionsCard(Card):
         for key in self._missing:
             perm = macperms.PERMISSIONS[key]
             self.add_row(text_block(perm.title, perm.why), pill("Needed", "wait"),
-                         button("Allow…", "primary", lambda _=False, k=key: macperms.request(k)))
+                         button("Allow…", "primary", lambda _=False, k=key: self.allow(k)))
+        self.restart_row = self.add_row(
+            text_block("Already allowed?", "macOS sometimes only applies these after Curslink restarts."),
+            button("Restart Curslink", None, self.app.restart))
+        self.restart_row.setVisible(self.asked)
+
+    def allow(self, key: str) -> None:
+        macperms.request(key)
+        self.asked = True
+        self.restart_row.setVisible(True)
+        self.check()
