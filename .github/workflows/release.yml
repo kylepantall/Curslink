@@ -54,6 +54,10 @@ jobs:
   build:
     needs: check
     uses: ./.github/workflows/build.yml
+    # A called workflow gets no secrets unless passed: without this the Mac
+    # build never saw MACOS_SIGN_P12 and was signed ad hoc, so macOS forgot
+    # Curslink's permissions at every update.
+    secrets: inherit
     with:
       tag: ${{ inputs.tag || github.ref_name }}
 

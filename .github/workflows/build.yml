@@ -109,8 +109,14 @@ jobs:
         env:
           MACOS_SIGN_P12: ${{ secrets.MACOS_SIGN_P12 }}
           MACOS_SIGN_PASSWORD: ${{ secrets.MACOS_SIGN_PASSWORD }}
+          RELEASE_TAG: ${{ inputs.tag }}
         run: |
-          [ -n "$MACOS_SIGN_P12" ] || { echo "no MACOS_SIGN_P12 secret: signing ad hoc"; exit 0; }
+          if [ -z "$MACOS_SIGN_P12" ]; then
+            # A release signed ad hoc makes every Mac forget Curslink's
+            # permissions on update, so don't publish one by accident.
+            [ -z "$RELEASE_TAG" ] || { echo "::error::releases must be signed: no MACOS_SIGN_P12 secret reached this job"; exit 1; }
+            echo "no MACOS_SIGN_P12 secret: signing ad hoc"; exit 0
+          fi
           keychain="$RUNNER_TEMP/signing.keychain-db"
           pass=$(uuidgen)
           echo "$MACOS_SIGN_P12" | base64 --decode > "$RUNNER_TEMP/sign.p12"
