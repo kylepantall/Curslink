@@ -85,3 +85,76 @@ def test_layout_page_saves_moves(desktop, qapp):
     assert page.dirty
     page.save()
     assert next(d for d in desktop.config().devices() if d["id"] == "laptop")["screens"][0]["y"] == 250
+
+
+def test_theme_modes_and_looks(desktop, qapp, monkeypatch):
+    from curslink.gui import theme
+
+    for look in ("win", "mac", "linux"):
+        monkeypatch.setenv("CURSLINK_LOOK", look)
+        for mode in ("light", "dark"):
+            theme.manager().set_mode(mode)
+            th = theme.current()
+            assert th.platform == look and th.dark == (mode == "dark")
+            assert "QPushButton#primary" in theme.stylesheet(th)
+    theme.manager().set_mode("system")
+
+
+def test_camera_picker_keeps_the_name(qapp):
+    from curslink.gaze.cameras import Camera
+    from curslink.gui.camerapicker import CameraPicker
+
+    picker = CameraPicker()
+    picked = []
+    picker.picked.connect(lambda i, n: picked.append((i, n)))
+    picker.set_current(0, "Logitech C920")
+    picker._fill([Camera(0, "FaceTime HD Camera", "Built in"), Camera(1, "Logitech C920", "USB")])
+    assert picker.current() == (1, "Logitech C920")  # found by name though the index moved
+    assert picked == []  # loading isn't a choice
+    picker.setCurrentIndex(0)
+    assert picked == [(0, "FaceTime HD Camera")]
+
+
+def test_calibrate_draws_the_layout_without_angles(desktop, qapp):
+    desktop.window.pages["setup"].create()
+    cfg = desktop.config()
+    cfg.add_device("laptop", "Work laptop")
+    cfg.save()
+    desktop.config_saved(restart=False)
+    page = desktop.window.pages["calibrate"]
+    desktop.window.show_page("calibrate")
+    qapp.processEvents()
+    assert len(page.map.screens) == len(page.targets) >= 2
+    page.state, page.step = "ready", 1
+    page.results = {page.targets[0][1]: (3.0, -1.0)}
+    page.show_state()
+    first, second = page.targets[0][0].key, page.targets[1][0].key
+    assert page.map.states[first] == {"done"}
+    assert "target" in page.map.states[second]
+    page.cancel()
+    assert page.overlay.layers == []
+
+
+def test_look_here_overlay_on_this_computer(qapp):
+    from curslink.gui.overlay import LookHere, qscreen_for
+
+    assert qscreen_for("main") is not None
+    assert qscreen_for("screen99") is None
+    hits = []
+    lh = LookHere(lambda: hits.append("record"), lambda: hits.append("cancel"))
+    assert lh.show("main", "Step 1 of 2")
+    assert len(lh.layers) == len(qapp.screens())
+    lh.layers[0].record.emit()
+    lh.hide()
+    assert hits == ["record"] and lh.layers == []
+
+
+def test_a_paired_agent_starts_hidden(desktop, qapp):
+    setup = desktop.window.pages["setup"]
+    setup.agent_choice.setChecked(True)
+    setup.create()
+    assert desktop.role == "agent"
+    assert not desktop.agent_paired()
+    store = desktop.window.pages["devices"].store()
+    store.add("desk", "Desk PC", "host", b"k" * 32)
+    assert desktop.agent_paired()

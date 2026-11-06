@@ -55,6 +55,10 @@ class Tray(QSystemTrayIcon):
         QGuiApplication.instance().paletteChanged.connect(lambda _p: self.refresh())
         self.refresh()
 
+    @staticmethod
+    def place() -> str:
+        return "menu bar" if MAC else "tray"
+
     def available(self) -> bool:
         return QSystemTrayIcon.isSystemTrayAvailable()
 

@@ -6,32 +6,29 @@ import asyncio
 import threading
 import time
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QHBoxLayout, QLineEdit, QMessageBox, QVBoxLayout
 
 from curslink.config import agent_config, host_config
-from curslink.gui.common import in_background
-from curslink.gui.widgets import Card, Page, button, label, pill, text_block
-
-
-class _PairSignals(QObject):
-    code = Signal(str, str)      # code, peer name
-    finished = Signal(object)    # PairingResult
-    failed = Signal(str)
+from curslink.gui.common import call_on_main, in_background, main_thread
+from curslink.gui.widgets import Card, EmptyState, Page, button, label, pill, spot, text_block
 
 
 class Pairing:
     """One outgoing pairing attempt, on its own thread and event loop."""
 
-    def __init__(self, me, address: str, port: int):
+    def __init__(self, me, address: str, port: int, on_code, on_finished, on_failed):
         self.me, self.address, self.port = me, address, port
-        self.signals = _PairSignals()
+        # Called on the Qt thread: on_code(code, peer_name), on_finished(PairingResult),
+        # on_failed(message). No QObject lives here, so nothing Qt is freed off-thread.
+        self.on_code, self.on_finished, self.on_failed = on_code, on_finished, on_failed
+        main_thread()  # made here, on the Qt thread, before the worker needs it
         self._loop: asyncio.AbstractEventLoop | None = None
         self._task: asyncio.Task | None = None
         self.cancelled = False
 
     def start(self) -> None:
-        threading.Thread(target=self._run, daemon=True).start()
+        threading.Thread(target=self._run, name="curslink-pairing", daemon=True).start()
 
     def cancel(self) -> None:
         self.cancelled = True
@@ -42,6 +39,9 @@ class Pairing:
             except RuntimeError:
                 pass
 
+    def _fail(self, message: str) -> None:
+        call_on_main(lambda: self.on_failed(message))
+
     def _run(self) -> None:
         from curslink.pairing.handshake import PairingError, initiate
 
@@ -49,7 +49,7 @@ class Pairing:
             reader, writer = await asyncio.wait_for(asyncio.open_connection(self.address, self.port), 5)
             try:
                 return await initiate(reader, writer, self.me,
-                                      lambda code, peer: self.signals.code.emit(code, peer.name))
+                                      lambda code, peer: call_on_main(lambda: self.on_code(code, peer.name)))
             finally:
                 writer.close()
 
@@ -62,15 +62,15 @@ class Pairing:
         try:
             result = loop.run_until_complete(main())
         except asyncio.CancelledError:
-            self.signals.failed.emit("")
+            self._fail("")
         except PairingError as exc:
-            self.signals.failed.emit(f"Pairing failed: {exc}")
+            self._fail(f"Pairing failed: {exc}")
         except (OSError, asyncio.TimeoutError) as exc:
-            self.signals.failed.emit(f"Couldn't reach {self.address}: {exc or 'timed out'}")
+            self._fail(f"Couldn't reach {self.address}: {exc or 'timed out'}")
         except Exception as exc:  # a bug, but don't take the app down
-            self.signals.failed.emit(f"Pairing failed: {exc}")
+            self._fail(f"Pairing failed: {exc}")
         else:
-            self.signals.finished.emit(result)
+            call_on_main(lambda: self.on_finished(result))
         finally:
             loop.close()
 
@@ -83,8 +83,10 @@ class DevicesPage(Page):
         self.found = []
 
         self.code_card = Card()
-        self.code_card.setObjectName("darkCard")
+        self.code_card.setObjectName("accentCard")
         row = QHBoxLayout()
+        row.setSpacing(18)
+        row.addWidget(spot("pairing", 120, 90))
         words = QVBoxLayout()
         self.code_intro = label("", wrap=True)
         self.code = label("", "code")
@@ -162,7 +164,10 @@ class DevicesPage(Page):
             self.paired.add_row(label(f"Can't read the pairing store: {exc}", "small"))
             return
         if not peers:
-            self.paired.add_row(label("Nothing yet. Pair with a device below.", "small"))
+            other = "an agent" if self.app.role == "host" else "your host"
+            self.paired.rows.addWidget(EmptyState(
+                "devices-empty", "Nothing paired yet",
+                f"Open Curslink on {other}, on the same network, and pair with it below."))
         connected = {a.device_id for a in self.app.status.agents.values() if a.connected}
         if self.app.status.host_state == "connected":
             connected |= {p.device_id for p in peers if p.role == "host"}
@@ -195,8 +200,9 @@ class DevicesPage(Page):
             )
         if not want:
             other = "agents" if me.role == "host" else "hosts"
-            self.nearby.add_row(label(
-                f"No {other} found yet. Open Curslink on the other computer, on the same network.", "small"))
+            self.nearby.rows.addWidget(EmptyState(
+                "searching", f"Looking for {other}…",
+                "Open Curslink on the other computer, on the same network.", size=(120, 90)))
 
     def search(self) -> None:
         from curslink.pairing.discovery import browse
@@ -242,10 +248,7 @@ class DevicesPage(Page):
         self.code.setText("")
         self.code_hint.hide()
         self.code_card.show()
-        self.pairing = Pairing(me, address, port)
-        self.pairing.signals.code.connect(self.show_code)
-        self.pairing.signals.finished.connect(self.paired_ok)
-        self.pairing.signals.failed.connect(self.pair_failed)
+        self.pairing = Pairing(me, address, port, self.show_code, self.paired_ok, self.pair_failed)
         self.pairing.start()
 
     def show_code(self, code: str, peer: str) -> None:
@@ -286,6 +289,12 @@ class DevicesPage(Page):
                 self.app.config_saved()
         self.say(note, ok=True)
         self.refresh()
+        if self.app.role == "agent":
+            # An agent has nothing to show once it's paired: keep running in
+            # the tray / menu bar instead of leaving a window open.
+            if not self.app.linking:
+                self.app.start_linking()
+            QTimer.singleShot(1800, self.app.hide_to_tray)
 
     def unpair(self, peer) -> None:
         answer = QMessageBox.question(
@@ -298,8 +307,8 @@ class DevicesPage(Page):
         self.refresh()
 
     def say(self, text: str, ok: bool = False) -> None:
-        self.message.setObjectName("" if ok else "warn")
-        self.message.setStyleSheet(
-            "background: #E3F4EC; color: #1A6B48; border-radius: 10px; padding: 10px 12px;" if ok else "")
+        self.message.setObjectName("info" if ok else "warn")
+        self.message.style().unpolish(self.message)
+        self.message.style().polish(self.message)
         self.message.setText(text)
         self.message.show()

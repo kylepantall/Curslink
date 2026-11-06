@@ -1,61 +1,20 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-labelledby="title">
-  <title id="title">Curslink</title>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" fill="none">
+  <title>Curslink</title>
+  <desc>Two blue screens connected by a sky-blue pointer crossing into the next screen. Navy tile on the Apple 824-pixel grid.</desc>
   <defs>
-    <linearGradient id="rim" x1="0" y1="0" x2="0.7" y2="1">
-      <stop stop-color="#47658E"/>
-      <stop offset=".5" stop-color="#203B60"/>
-      <stop offset="1" stop-color="#0A1423"/>
+    <linearGradient id="tile" x1="198" y1="100" x2="824" y2="924" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1D3A66"/>
+      <stop offset="1" stop-color="#0F1B2D"/>
     </linearGradient>
-    <linearGradient id="tile" x1=".24" y1="1" x2=".72" y2="0">
-      <stop stop-color="#0F1B2D"/>
-      <stop offset=".56" stop-color="#142843"/>
-      <stop offset="1" stop-color="#1F3B63"/>
+    <linearGradient id="glass" x1="262" y1="294" x2="754" y2="660" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#3FA9FF" stop-opacity=".16"/>
+      <stop offset="1" stop-color="#3FA9FF" stop-opacity=".03"/>
     </linearGradient>
-    <radialGradient id="light" cx=".68" cy=".29" r=".63">
-      <stop stop-color="#3FA9FF" stop-opacity=".19"/>
-      <stop offset="1" stop-color="#3FA9FF" stop-opacity="0"/>
-    </radialGradient>
-    <linearGradient id="source" x1="0" y1="1" x2=".7" y2="0">
-      <stop stop-color="#3679C5"/>
-      <stop offset="1" stop-color="#6AC6FF"/>
-    </linearGradient>
-    <linearGradient id="target" x1="0" y1="1" x2=".8" y2="0">
-      <stop stop-color="#3FA9FF"/>
-      <stop offset="1" stop-color="#B7E8FF"/>
-    </linearGradient>
-    <linearGradient id="glass" x1="0" y1="1" x2=".7" y2="0">
-      <stop stop-color="#122845"/>
-      <stop offset="1" stop-color="#204A76"/>
-    </linearGradient>
-    <linearGradient id="pointer" x1=".15" y1="1" x2=".82" y2="0">
-      <stop stop-color="#B6DFFF"/>
-      <stop offset=".55" stop-color="#EAF2FD"/>
-      <stop offset="1" stop-color="#FFF"/>
-    </linearGradient>
-    <linearGradient id="trail" gradientUnits="userSpaceOnUse" x1="310" y1="603" x2="589" y2="479">
-      <stop stop-color="#3FA9FF" stop-opacity=".30"/>
-      <stop offset=".6" stop-color="#3FA9FF"/>
-      <stop offset="1" stop-color="#A4E0FF"/>
-    </linearGradient>
-    <path id="cursor" d="M700 363Q711 359 709 371L667 514Q664 523 656 518L621 493L596 531Q592 538 585 534L557 515Q550 510 555 503L581 465L539 449Q530 445 539 438Z"/>
   </defs>
-
-  <rect x="100" y="100" width="824" height="824" rx="192" fill="url(#rim)"/>
-  <rect x="104" y="104" width="816" height="814" rx="189" fill="url(#tile)"/>
-  <rect x="104" y="104" width="816" height="814" rx="189" fill="url(#light)"/>
-
-  <g stroke-linejoin="round">
-    <rect x="226" y="472" width="329" height="234" rx="53" fill="#0A1729" stroke="#0A1729" stroke-width="35" opacity=".72"/>
-    <rect x="226" y="458" width="329" height="234" rx="53" fill="#142D50" stroke="url(#source)" stroke-width="35"/>
-    <rect x="457" y="302" width="339" height="248" rx="55" fill="#0C1E34" stroke="#0C1E34" stroke-width="62"/>
-    <rect x="457" y="294" width="339" height="248" rx="55" fill="url(#glass)" stroke="url(#target)" stroke-width="35"/>
-  </g>
-
-  <g fill="none" stroke-linecap="round">
-    <path d="M310 600C410 608 493 558 573 492" stroke="#112641" stroke-width="43"/>
-    <path d="M310 600C410 608 493 558 573 492" stroke="url(#trail)" stroke-width="25"/>
-    <path d="M712 330L714 319M738 346L749 338M743 373L756 375" stroke="#79D1FF" stroke-width="9"/>
-  </g>
-  <use href="#cursor" xmlns:xlink="http://www.w3.org/1999/xlink" xlink:href="#cursor" fill="#0B1E35" stroke="#0B1E35" stroke-linejoin="round" stroke-width="15" transform="translate(0 6)"/>
-  <use href="#cursor" xmlns:xlink="http://www.w3.org/1999/xlink" xlink:href="#cursor" fill="url(#pointer)"/>
+  <rect x="100" y="100" width="824" height="824" rx="184" fill="url(#tile)"/>
+  <rect x="101" y="101" width="822" height="822" rx="183" stroke="#B6DFFF" stroke-opacity=".13" stroke-width="2"/>
+  <rect x="232" y="374" width="238" height="266" rx="30" fill="url(#glass)" stroke="#3FA9FF" stroke-width="28"/>
+  <rect x="554" y="284" width="238" height="266" rx="30" fill="url(#glass)" stroke="#3FA9FF" stroke-width="28"/>
+  <path d="M294 700H408M351 640V700M616 610H730M673 550V610" stroke="#3FA9FF" stroke-width="28" stroke-linecap="round"/>
+  <path d="M614 356L559 567L523 495L465 553L427 515L485 457L413 421Z" fill="#B6DFFF" stroke="#12233C" stroke-width="20" stroke-linejoin="round"/>
 </svg>

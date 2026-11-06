@@ -348,6 +348,8 @@ def cmd_gui(args) -> int:
               'Install it with: pip install "curslink[gui]"', file=sys.stderr)
         return 1
     argv = ["--minimized"] if args.minimized else []
+    if args.verbose:
+        argv.append("--verbose")
     if args.config:
         argv += ["--config", args.config]
     return gui_main(argv)
@@ -509,10 +511,15 @@ def main(argv: list[str] | None = None) -> int:
         argv = ["gui"]
     args = build_parser().parse_args(argv)
     args.argv = argv
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    from curslink import diagnostics
+
+    process = args.command if args.command in ("host", "agent", "relay") else "cli"
+    if args.command == "gui":
+        # The app sets up its own logs once it knows it's the only copy running.
+        logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
+                            format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    else:
+        diagnostics.setup(process, verbose=args.verbose)
     try:
         return args.func(args)
     except ConfigError as exc:

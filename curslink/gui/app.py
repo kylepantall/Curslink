@@ -13,14 +13,14 @@ import logging
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QTimer, Signal
+from PySide6.QtCore import QObject, QTimer, Signal, qInstallMessageHandler, qVersion
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from curslink import __version__, update
+from curslink import __version__, diagnostics, update
 from curslink.config import ConfigError, agent_config, host_config, load_raw
 from curslink.configedit import ConfigFile
-from curslink.gui.common import STYLE, Status, app_icon, in_background
+from curslink.gui.common import Status, app_icon, call_on_main, in_background, main_thread
 from curslink.gui.prefs import Prefs
 from curslink.gui.service import FAILED, RUNNING, STARTING, STOPPED, Service
 
@@ -54,6 +54,8 @@ class Curslink(QObject):
         self.quitting = False
         self.window = None
         self.tray = None
+        diagnostics.on_crash(lambda path: call_on_main(
+            lambda: self.status.add_log("error", f"Something went wrong; a report was saved to {path}")))
 
     # -- the config file ----------------------------------------------------
     @property
@@ -65,6 +67,19 @@ class Curslink(QObject):
 
     def config(self) -> ConfigFile:
         return ConfigFile(self.config_path)
+
+    def device_name(self) -> str:
+        """This computer's name, as other devices see it."""
+        try:
+            cfg = self.config()
+            raw = cfg.raw()
+            if cfg.role == "host":
+                me = raw.get("host", {}).get("device_id")
+                return next((d.get("name", me) for d in raw.get("devices", []) if d.get("id") == me), me) or ""
+            agent = raw.get("agent", {})
+            return agent.get("name", agent.get("device_id", ""))
+        except Exception:
+            return ""
 
     @property
     def role(self) -> str | None:
@@ -181,6 +196,33 @@ class Curslink(QObject):
         self.window.raise_()
         self.window.activateWindow()
 
+    def agent_paired(self) -> bool:
+        """An agent with a host to link to (so it can run without a window)."""
+        if self.role != "agent":
+            return False
+        try:
+            from curslink.config import pairing_config
+            from curslink.pairing.store import PairingStore
+
+            store = pairing_config(self.config().raw(), self.config_path.parent).store
+            return bool(PairingStore(store).peers("host"))
+        except Exception:
+            return False
+
+    def hide_to_tray(self, force_note: bool = False) -> None:
+        """Close the window and keep running in the tray, saying so once."""
+        if self.window is None or self.tray is None or not self.tray.available():
+            return
+        self.window.hide()
+        from curslink.gui import native
+
+        native.set_dock_icon(False)
+        if force_note or not self.prefs.told_about_tray:
+            self.prefs.told_about_tray = True
+            self.prefs.save()
+            self.tray.say("Curslink is running in the background",
+                          f"It links by itself. Open it from the {self.tray.place()} icon.")
+
     def quit(self) -> None:
         self.quitting = True
         self.service.stop()
@@ -220,6 +262,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="curslink gui", description="Open the Curslink app.")
     parser.add_argument("--minimized", action="store_true", help="start in the tray without opening the window")
     parser.add_argument("-c", "--config", help="use this curslink.toml (remembered for next time)")
+    parser.add_argument("-v", "--verbose", action="store_true", help="log at debug level")
     args, qt_args = parser.parse_known_args(argv if argv is not None else [])
 
     qt = QApplication.instance() or QApplication([sys.argv[0], *qt_args])
@@ -230,17 +273,25 @@ def main(argv: list[str] | None = None) -> int:
     qt.setDesktopFileName("curslink")
     qt.setWindowIcon(app_icon())
     qt.setStyle("Fusion")
-    qt.setStyleSheet(STYLE)
     qt.setQuitOnLastWindowClosed(False)
 
     name = instance_name()
     if _already_running(name):
         return 0
 
+    # Only the copy that stays running owns the log files.
+    diagnostics.setup("gui", verbose=args.verbose)
+    qInstallMessageHandler(diagnostics.qt_message_handler)
+    main_thread()  # created on the Qt thread before any worker needs it
+    log.info("Qt %s, platform plugin %s", qVersion(), qt.platformName())
+
     prefs = Prefs.load()
     if args.config:
         prefs.config = str(Path(args.config).expanduser().resolve())
         prefs.save()
+    from curslink.gui import native, theme
+
+    theme.manager(prefs.theme).apply()
     app = Curslink(prefs)
     server = _listen(name, app)  # noqa: F841 - kept alive by its parent
 
@@ -258,19 +309,35 @@ def main(argv: list[str] | None = None) -> int:
     else:
         if prefs.start_linking:
             app.start_linking()
-        if not (args.minimized or prefs.start_minimized) or not tray_ok:
+        # Agents have nothing to look at once paired, so they start hidden.
+        hidden = args.minimized or prefs.start_minimized or app.agent_paired()
+        if not hidden or not tray_ok:
             app.show_window()
+        else:
+            native.set_dock_icon(False)
+            if not prefs.told_about_tray:
+                prefs.told_about_tray = True
+                prefs.save()
+                QTimer.singleShot(1200, lambda: app.tray.say(
+                    "Curslink is running in the background",
+                    f"It links by itself. Open it from the {app.tray.place()} icon."))
     if not tray_ok and args.minimized:
         QMessageBox.information(
             app.window, "Curslink",
             "There's no system tray here, so Curslink stays open in a window. "
             "Minimise it to keep it out of the way.",
         )
+    crashed = diagnostics.last_native_crash()
+    if crashed is not None and tray_ok:
+        QTimer.singleShot(1500, lambda: app.tray.say(
+            "Curslink closed unexpectedly last time",
+            "A crash report was saved. Settings > Diagnostics has it."))
     QTimer.singleShot(4000, app.check_for_update)
     daily = QTimer(app)
     daily.timeout.connect(app.check_for_update)
     daily.start(24 * 3600 * 1000)
 
     code = qt.exec()
+    log.info("quitting (exit code %s)", code)
     app.service.stop()
     return code

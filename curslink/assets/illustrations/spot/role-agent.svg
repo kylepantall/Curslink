@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="160" height="120" viewBox="0 0 160 120" role="img" aria-labelledby="title description">
+  <title id="title">Agent</title>
+  <desc id="description">A pointer arriving on a laptop.</desc>
+  <defs><linearGradient id="screen" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#B6DFFF"/><stop offset="1" stop-color="#3FA9FF"/></linearGradient></defs>
+  <g ><g ><rect x="38" y="47" width="84" height="48" rx="4" fill="url(#screen)" fill-opacity="1" stroke="#7A8BA6" stroke-width="2" /><rect x="42" y="51" width="76" height="39" rx="2" fill="#1D3A66"/><path d="M46 83h16.8" fill="none" stroke="#B6DFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity=".45"/></g><path d="M33 96h94l-4 5H37z" fill="#1D3A66" stroke="#7A8BA6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /><path d="M75.0 97h10" fill="none" stroke="#B6DFFF" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></g><path d="M23 65C13 27 57 13 81 37" fill="none" stroke="#3FA9FF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="5 5"/><g transform="translate(79 32) scale(0.98)"><path d="M0 0l5 25 5-8 9 4 3-6-9-4 7-7z" fill="#B6DFFF" stroke="#1D3A66" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></g>
+</svg>

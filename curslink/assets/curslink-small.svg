@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" fill="none">
+  <title>Curslink small icon</title>
+  <desc>Optical simplification for 16–24 pixels. Two screens and a pointer crossing into the next screen.</desc>
+  <rect x="16" y="16" width="224" height="224" rx="48" fill="#142945"/>
+  <path d="M110 104H62V176H110M146 152H194V80H146" stroke="#3FA9FF" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M166 78L150 155L132 133L106 157L88 139L114 115L92 97Z" fill="#B6DFFF" stroke="#142945" stroke-width="9" stroke-linejoin="round"/>
+</svg>

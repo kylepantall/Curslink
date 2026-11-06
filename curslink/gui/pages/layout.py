@@ -20,11 +20,25 @@ from PySide6.QtWidgets import (
 )
 
 from curslink.configedit import snap, touching_edges
+from curslink.gui import theme
 from curslink.gui.widgets import Card, Page, button, label
 
 SCALE = 0.1  # scene units per layout pixel
-HOME_FILL, HOME_TEXT = QColor("#DCEBFA"), QColor("#0F3B66")
-OTHER_FILL, OTHER_TEXT = QColor("#E7E3F6"), QColor("#3A2F6B")
+
+
+def _colours(home: bool, selected: bool) -> tuple[QColor, QPen, QColor]:
+    """Fill, border and text for a screen, from the theme (spec 4.3)."""
+    t = theme.current().tokens
+    if home:
+        fill = theme.over(t["accent_soft"], t["card"])
+        border = QColor(t["ink3"])
+    else:
+        fill = QColor(theme.OTHER_DEVICE)
+        fill.setAlphaF(0.16)
+        border = QColor(theme.OTHER_DEVICE)
+        border.setAlphaF(0.7)
+    pen = QPen(theme.qcolor(t["accent"]), 3) if selected else QPen(border, 1.2)
+    return fill, pen, theme.qcolor(t["ink"])
 
 
 def detect_screens() -> list[dict]:
@@ -77,10 +91,11 @@ class ScreenItem(QGraphicsRectItem):
     def refresh(self) -> None:
         w, h = self.screen["width"] * SCALE, self.screen["height"] * SCALE
         self.setRect(0, 0, w, h)
-        self.setBrush(QBrush(HOME_FILL if self.home else OTHER_FILL))
-        self.setPen(QPen(QColor("#1467B8"), 3) if self.isSelected() else QPen(QColor("#9FB0C4"), 1))
+        fill, pen, ink = _colours(self.home, self.isSelected())
+        self.setBrush(QBrush(fill))
+        self.setPen(pen)
         self.text.setText(f"{self.device_name}\n{self.screen['id']} · {self.screen['width']}×{self.screen['height']}")
-        self.text.setBrush(HOME_TEXT if self.home else OTHER_TEXT)
+        self.text.setBrush(ink)
         self.text.setPos(w * 0.05, h * 0.08)
 
     def paint(self, painter, option, widget=None) -> None:
@@ -109,8 +124,11 @@ class LayoutView(QGraphicsView):
         super().__init__(scene)
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.setMinimumHeight(260)
-        self.setBackgroundBrush(QColor("#F7F9FB"))
-        self.setStyleSheet("border: 0;")
+        self.setStyleSheet("border: 0; background: transparent;")
+        self.restyle()
+
+    def restyle(self) -> None:
+        self.setBackgroundBrush(theme.qcolor(theme.current().tokens["plot"]))
 
     def fit(self) -> None:
         rect = self.scene().itemsBoundingRect().adjusted(-40, -40, 40, 40)
@@ -123,7 +141,8 @@ class LayoutView(QGraphicsView):
 
     def drawBackground(self, painter, rect: QRectF) -> None:  # noqa: N802
         super().drawBackground(painter, rect)
-        painter.setPen(QPen(QColor("#D5DCE5"), 0))
+        th = theme.current()
+        painter.setPen(QPen(QColor(255, 255, 255, 22) if th.dark else theme.qcolor(th.tokens["stroke"]), 0))
         step = 16
         x0 = int(rect.left()) - int(rect.left()) % step
         y0 = int(rect.top()) - int(rect.top()) % step
@@ -188,6 +207,12 @@ class LayoutPage(Page):
         self.load()
 
     # -- loading and saving -----------------------------------------------------
+    def theme_changed(self) -> None:
+        self.view.restyle()
+        for item in self.items:
+            item.refresh()
+        self.view.viewport().update()
+
     def shown(self) -> None:
         self.load_if_clean()
 

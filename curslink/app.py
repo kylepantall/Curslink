@@ -247,6 +247,7 @@ def host_command(router: Router, stop: asyncio.Event, command: str) -> None:
 
 
 def start_gaze(cfg: HostConfig, router: Router, loop: asyncio.AbstractEventLoop, server: HostServer | None = None):
+    from curslink.gaze.cameras import resolve
     from curslink.gaze.tracker import HeadPoseTracker
 
     if not cfg.gaze.calibration.exists():
@@ -261,7 +262,7 @@ def start_gaze(cfg: HostConfig, router: Router, loop: asyncio.AbstractEventLoop,
 
     tracker = HeadPoseTracker(
         lambda t, yaw, pitch: loop.call_soon_threadsafe(arbiter.on_sample, t, yaw, pitch),
-        camera=cfg.gaze.camera,
+        camera=resolve(cfg.gaze.camera, cfg.gaze.camera_name),
         preview=cfg.gaze.preview,
     )
     tracker.start()
@@ -393,6 +394,7 @@ class FacingCamera:
 
 def start_facing(cfg: AgentConfig, client: AgentClient, loop: asyncio.AbstractEventLoop) -> FacingCamera | None:
     try:
+        from curslink.gaze.cameras import resolve
         from curslink.gaze.tracker import HeadPoseTracker
     except ImportError as exc:  # pragma: no cover - the gaze extra is missing
         log.error("[agent.gaze] needs the gaze extra (pip install curslink[gaze]): %s", exc)
@@ -403,7 +405,8 @@ def start_facing(cfg: AgentConfig, client: AgentClient, loop: asyncio.AbstractEv
     def on_sample(t: float, yaw: float, pitch: float) -> None:  # tracker thread
         loop.call_soon_threadsafe(camera.on_sample, t, yaw, pitch)
 
-    tracker = HeadPoseTracker(on_sample, camera=cfg.gaze.camera, preview=cfg.gaze.preview)
+    tracker = HeadPoseTracker(on_sample, camera=resolve(cfg.gaze.camera, cfg.gaze.camera_name),
+                              preview=cfg.gaze.preview)
     camera = FacingCamera(detector, client, tracker, loop)
     client.facing_source = lambda: detector.facing
     camera.start()
@@ -470,15 +473,24 @@ class Calibrator:
             self.latest = (yaw, pitch)
 
     def start(self) -> None:
+        log.info("calibration: starting camera")
         self.tracker.start()
 
     def stop(self) -> None:
+        log.info("calibration: stopping camera")
         self.tracker.stop()
 
     def wait_for_face(self, timeout: float = 15.0) -> bool:
         deadline = time.monotonic() + timeout
+        alive = getattr(self.tracker, "alive", None)
         while self.latest is None and time.monotonic() < deadline:
+            if alive is not None and not alive():
+                log.warning("calibration: the camera stopped before a face was found: %s",
+                            getattr(self.tracker, "error", None))
+                return False
             time.sleep(0.1)
+        if self.latest is None:
+            log.warning("calibration: no face within %.0fs", timeout)
         return self.latest is not None
 
     def record(self, target: Target, seconds: float = 1.5, settle: float = 0.2) -> tuple[float, float] | None:
@@ -491,10 +503,14 @@ class Calibrator:
         with self._lock:
             samples = [(y, p) for t, y, p in self._samples if t >= start + settle]
         if len(samples) < 5:
+            log.warning("calibration: only %d samples for %s, skipped", len(samples), target)
             return None
         for yaw, pitch in samples:
             self.calibration.add(target, yaw, pitch)
-        return self.calibration.centroids()[target]
+        centre = self.calibration.centroids()[target]
+        log.info("calibration: %s at yaw %+.1f, pitch %+.1f from %d samples", target, centre[0], centre[1],
+                 len(samples))
+        return centre
 
 
 def close_pairs(cal: Calibration, margin_deg: float) -> list[tuple[Target, Target, float]]:

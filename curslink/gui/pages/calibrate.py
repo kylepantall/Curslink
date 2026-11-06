@@ -2,64 +2,23 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QPainter, QPen
-from PySide6.QtWidgets import QHBoxLayout, QSpinBox, QVBoxLayout, QWidget
+import logging
 
-from curslink.gui.common import ACCENT_BRIGHT, NAVY, NAVY_2, in_background
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
+
+from curslink.gui.camerapicker import CameraPicker
+from curslink.gui.common import in_background
+from curslink.gui.overlay import LookHere
+from curslink.gui.screenmap import ScreenMap, screens_from_config
 from curslink.gui.service import RUNNING, STARTING
-from curslink.gui.widgets import Card, Page, button, clear_layout, label
+from curslink.gui.widgets import Card, Page, button, label, pill, set_spot, spot
 
-YAW_RANGE, PITCH_RANGE = 50.0, 32.0
+log = logging.getLogger(__name__)
 
-
-class HeadPlot(QWidget):
-    """Where your head points (yaw across, pitch up), plus each recorded screen."""
-
-    def __init__(self):
-        super().__init__()
-        self.current: tuple[float, float] | None = None
-        self.points: dict[str, tuple[float, float]] = {}
-        self.setMinimumSize(QSize(320, 220))
-        self.setAccessibleName("Head direction")
-
-    def sizeHint(self) -> QSize:
-        return QSize(420, 260)
-
-    def to_px(self, yaw: float, pitch: float) -> QPointF:
-        r = self.rect().adjusted(16, 16, -16, -16)
-        x = r.center().x() + max(-1, min(1, yaw / YAW_RANGE)) * r.width() / 2
-        y = r.center().y() - max(-1, min(1, pitch / PITCH_RANGE)) * r.height() / 2
-        return QPointF(x, y)
-
-    def paintEvent(self, _event) -> None:  # noqa: N802
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.fillRect(self.rect(), QColor(NAVY_2))
-        p.setPen(QPen(QColor("#4A5D78"), 1))
-        c = self.to_px(0, 0)
-        p.drawLine(QPointF(16, c.y()), QPointF(self.width() - 16, c.y()))
-        p.drawLine(QPointF(c.x(), 16), QPointF(c.x(), self.height() - 16))
-        f = QFont()
-        f.setPointSizeF(8.5)
-        p.setFont(f)
-        p.setPen(QColor("#8FA3BC"))
-        p.drawText(QRectF(20, 18, 200, 16), "head turned: left ← → right")
-        for name, (yaw, pitch) in self.points.items():
-            pt = self.to_px(yaw, pitch)
-            p.setPen(QPen(QColor("#E8F2FF"), 2))
-            p.setBrush(Qt.BrushStyle.NoBrush)
-            p.drawRoundedRect(QRectF(pt.x() - 9, pt.y() - 6, 18, 12), 3, 3)
-            p.setPen(QColor("#C3D0DF"))
-            p.drawText(QRectF(pt.x() - 70, pt.y() + 8, 140, 16), Qt.AlignmentFlag.AlignHCenter, name)
-        if self.current is not None:
-            pt = self.to_px(*self.current)
-            p.setPen(QPen(QColor(ACCENT_BRIGHT), 2))
-            p.setBrush(Qt.BrushStyle.NoBrush)
-            p.drawEllipse(pt, 14, 14)
-            p.setBrush(QColor(ACCENT_BRIGHT))
-            p.drawEllipse(pt, 5, 5)
-        p.end()
+# How close (degrees) your head has to point to a recorded screen for the map
+# to say you're looking at it.
+LOOKING_DEG = 12.0
 
 
 class CalibratePage(Page):
@@ -81,32 +40,38 @@ class CalibratePage(Page):
         self.add(self.agent_note)
 
         self.body = QWidget()
-        row = QHBoxLayout(self.body)
-        row.setContentsMargins(0, 0, 0, 0)
+        col = QVBoxLayout(self.body)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(16)
+
+        # The layout, drawn: which screens are done, which to look at, and
+        # which one you're looking at now. No angles, just the picture.
+        mapcard = Card()
+        self.map = ScreenMap()
+        mapcard.body.addWidget(self.map, 1)
+        self.readout = label("Camera off", "muted")
+        mapcard.body.addWidget(self.readout)
+        col.addWidget(mapcard)
+
+        row = QHBoxLayout()
         row.setSpacing(16)
-
-        cam = Card()
-        cam.setObjectName("darkCard")
-        cam.setStyleSheet(f"QFrame#darkCard {{ background: {NAVY}; }}")
-        self.plot = HeadPlot()
-        cam.body.addWidget(self.plot, 1)
-        self.readout = label("Camera off", "mono")
-        self.readout.setStyleSheet("color: #C3D0DF;")
-        cam.body.addWidget(self.readout)
-        row.addWidget(cam, 1)
-
         steps = Card()
-        self.step_title = label("", "small")
-        self.prompt = label("", "h2", wrap=True)
-        self.prompt.setStyleSheet("font-size: 20px; font-weight: 700;")
+        top = QHBoxLayout()
+        top.setSpacing(16)
+        self.art = spot("calibrate", 120, 90)
+        top.addWidget(self.art)
+        words = QVBoxLayout()
+        words.setSpacing(4)
+        self.step_title = label("", "eyebrow")
+        self.prompt = label("", "prompt", wrap=True)
         self.prompt_detail = label("", "muted", wrap=True)
         for w in (self.step_title, self.prompt, self.prompt_detail):
-            steps.body.addWidget(w)
+            words.addWidget(w)
+        top.addLayout(words, 1)
+        steps.body.addLayout(top)
         cam_row = QHBoxLayout()
         cam_row.addWidget(label("Camera", "small"))
-        self.camera = QSpinBox()
-        self.camera.setRange(0, 9)
-        self.camera.setAccessibleName("Camera number")
+        self.camera = CameraPicker()
         cam_row.addWidget(self.camera)
         cam_row.addStretch(1)
         self.camera_row = QWidget()
@@ -120,13 +85,16 @@ class CalibratePage(Page):
             buttons.addWidget(b)
         buttons.addStretch(1)
         steps.body.addLayout(buttons)
-        self.list_box = QVBoxLayout()
-        self.list_box.setSpacing(6)
-        steps.body.addLayout(self.list_box)
         steps.body.addStretch(1)
-        row.addWidget(steps, 1)
+        row.addWidget(steps, 3)
+
+        self.list_card = Card("Screens", rows=True)
+        row.addWidget(self.list_card, 2)
+        col.addLayout(row)
         self.add(self.body)
         self.finish()
+        self.overlay = LookHere(self.overlay_record, self.cancel, self.skip)
+        self.looking: str | None = None
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.tick)
@@ -135,8 +103,13 @@ class CalibratePage(Page):
         app.config_changed.connect(self.load_targets)
 
     def shown(self) -> None:
+        if not self.camera.loaded:
+            self.camera.refresh()
         if self.state == "idle":
             self.load_targets()
+
+    def theme_changed(self) -> None:
+        self.show_state()
 
     # -- setup ----------------------------------------------------------------
     def load_targets(self) -> None:
@@ -150,7 +123,8 @@ class CalibratePage(Page):
         if not is_host:
             return
         cfg = self.app.config()
-        self.camera.setValue(int(cfg.get("gaze", "camera", 0) or 0))
+        self.camera.set_current(int(cfg.get("gaze", "camera", 0) or 0), str(cfg.get("gaze", "camera_name", "") or ""))
+        self.map.set_screens(screens_from_config(cfg))
         names = {d.get("id"): d.get("name", d.get("id")) for d in cfg.devices()}
         self.targets = []
         for d in cfg.devices():
@@ -158,7 +132,6 @@ class CalibratePage(Page):
                 sid = str(s.get("id", f"screen{i}"))
                 self.targets.append((Target(d.get("id"), sid), f"{names[d.get('id')]} / {sid}"))
         self.results = {}
-        self.plot.points = {}
         self.show_state()
 
     # -- the flow -------------------------------------------------------------
@@ -178,20 +151,25 @@ class CalibratePage(Page):
         if self.was_linking:
             self.app.stop_linking()  # the host holds the camera
         cfg = self.app.config()
-        if int(cfg.get("gaze", "camera", 0) or 0) != self.camera.value():
-            cfg.set("gaze", "camera", self.camera.value())
+        index, name = self.camera.current()
+        if (int(cfg.get("gaze", "camera", 0) or 0), str(cfg.get("gaze", "camera_name", "") or "")) != (index, name):
+            cfg.set("gaze", "camera", index)
+            if name:
+                cfg.set("gaze", "camera_name", name)
             cfg.save()
         self.step = 0
         self.results = {}
-        self.plot.points = {}
         self.state = "warming"
         self.show_state()
 
         def warm():
-            cal = Calibrator(self.camera.value())
+            cal = Calibrator(index)
             cal.start()
             if not cal.wait_for_face(20):
                 cal.stop()
+                why = getattr(cal.tracker, "error", None)
+                if why:
+                    raise RuntimeError(f"The camera stopped: {why}. Settings > Diagnostics has the full log.")
                 raise RuntimeError("No face found. Check the camera is free and you're facing it in good light.")
             return cal
 
@@ -207,16 +185,21 @@ class CalibratePage(Page):
         self.show_state()
 
     def record(self) -> None:
+        if self.state != "ready":
+            return
         target, name = self.targets[self.step]
         self.state = "recording"
         self.show_state()
         cal = self.calibrator
         in_background(lambda: cal.record(target, 1.5), lambda centre: self.recorded(name, centre), self.failed)
 
+    def overlay_record(self) -> None:
+        self.record()
+
     def recorded(self, name: str, centre) -> None:
+        if self.state != "recording":  # cancelled meanwhile
+            return
         self.results[name] = centre
-        if centre is not None:
-            self.plot.points[name] = centre
         self.next_step()
 
     def skip(self) -> None:
@@ -262,6 +245,7 @@ class CalibratePage(Page):
         self.resume_linking(force=True)
 
     def failed(self, exc) -> None:
+        log.warning("calibration stopped: %s", exc, exc_info=exc if not isinstance(exc, RuntimeError) else None)
         self.stop_camera()
         self.state, self.message = "error", str(exc)
         self.show_state()
@@ -275,6 +259,8 @@ class CalibratePage(Page):
 
     def stop_camera(self) -> None:
         self.timer.stop()
+        self.overlay.hide()
+        self.looking = None
         if self.calibrator is not None:
             cal, self.calibrator = self.calibrator, None
             in_background(cal.stop)
@@ -288,12 +274,59 @@ class CalibratePage(Page):
         cal = self.calibrator
         if cal is None or cal.latest is None:
             return
-        yaw, pitch = cal.latest
-        self.plot.current = (yaw, pitch)
-        self.plot.update()
-        self.readout.setText(f"yaw {yaw:+.1f}°   pitch {pitch:+.1f}°   camera {self.camera.value()}")
+        looking = self.nearest(cal.latest)
+        if looking != self.looking:
+            self.looking = looking
+            self.draw_map()
+            names = {t.key: n for t, n in self.targets}
+            self.readout.setText(f"You're looking at {names.get(looking, looking)}" if looking
+                                 else "Face found. Recorded screens light up as you look at them.")
+
+    def nearest(self, angles) -> str | None:
+        """The recorded screen your head points closest to, if near enough."""
+        cal = self.calibrator
+        if cal is None:
+            return None
+        best, best_d = None, LOOKING_DEG
+        for target, (yaw, pitch) in cal.calibration.centroids().items():
+            d = ((angles[0] - yaw) ** 2 + (angles[1] - pitch) ** 2) ** 0.5
+            if d < best_d:
+                best, best_d = target.key, d
+        return best
 
     # -- drawing --------------------------------------------------------------
+    def draw_map(self) -> None:
+        busy = self.state in ("ready", "recording")
+        states: dict[str, set[str]] = {}
+        for i, (target, name) in enumerate(self.targets):
+            st = set()
+            if name in self.results:
+                st.add("done" if self.results[name] is not None else "skipped")
+            if busy and i == self.step:
+                st.add("target")
+            if target.key == self.looking:
+                st.add("looking")
+            states[target.key] = st
+        self.map.set_states(states)
+
+    def update_overlay(self) -> None:
+        if self.state not in ("ready", "recording") or self.app.role != "host":
+            self.overlay.hide()
+            return
+        target, name = self.targets[self.step]
+        try:
+            me = self.app.config().get("host", "device_id")
+        except Exception:
+            me = None
+        step = f"Step {self.step + 1} of {len(self.targets)} · {name.split(' / ')[0]}"
+        done = {i for i, (_t, n) in enumerate(self.targets) if n in self.results}
+        if target.device_id == me:
+            self.overlay.show(target.screen_id, step, recording=self.state == "recording",
+                              total=len(self.targets), current=self.step, done=done)
+        else:
+            # Another computer's screen: the map and the prompt here show it.
+            self.overlay.hide()
+
     def show_state(self) -> None:
         s, n = self.state, len(self.targets)
         busy = s in ("warming", "ready", "recording")
@@ -301,55 +334,54 @@ class CalibratePage(Page):
         self.cancel_button.setVisible(busy)
         self.secondary.setVisible(s == "ready")
         self.primary.setEnabled(s not in ("warming", "recording"))
+        art = "calibrate"
         if s == "idle":
-            self.step_title.setText(f"{n} screen{'s' * (n != 1)} to calibrate")
+            self.step_title.setText(f"{n} screen{'s' * (n != 1)} to calibrate".upper())
             self.prompt.setText("Sit how you normally do, facing the camera")
-            self.prompt_detail.setText("You'll look at the centre of each screen and press Record. "
+            self.prompt_detail.setText("A \"Look here\" card shows on each screen in turn. Look at it and press Space. "
                                        "It takes about a minute.")
             self.primary.setText("Start")
             self.readout.setText("Camera off")
-            self.plot.current = None
         elif s == "warming":
-            self.step_title.setText("Starting the camera")
+            self.step_title.setText("STARTING THE CAMERA")
             self.prompt.setText("Looking for your face…")
             self.prompt_detail.setText("The first run downloads the face model (a few MB).")
             self.primary.setText("Record")
+            self.readout.setText("Starting the camera…")
         elif s in ("ready", "recording"):
             name = self.targets[self.step][1]
-            self.step_title.setText(f"Step {self.step + 1} of {n}")
-            self.prompt.setText(f"Look at the centre of {name}")
+            self.step_title.setText(f"STEP {self.step + 1} OF {n}")
+            self.prompt.setText(f"Look at {name}")
             self.prompt_detail.setText("Keep looking for a moment…" if s == "recording"
-                                       else "Then press Record and keep looking for a moment.")
+                                       else "Then press Record (or Space on the Look here card).")
             self.primary.setText("Recording…" if s == "recording" else "Record")
         elif s == "done":
-            self.step_title.setText("Done")
+            art = "calibrated"
+            self.step_title.setText("DONE")
             self.prompt.setText("Calibration saved")
             self.prompt_detail.setText(self.message + " Gaze switching is on.")
             self.primary.setText("Calibrate again")
+            self.readout.setText("Camera off")
         elif s == "error":
-            self.step_title.setText("Calibration stopped")
+            msg = self.message.lower()
+            art = "no-face" if "no face" in msg else "camera-off"
+            self.step_title.setText("CALIBRATION STOPPED")
             self.prompt.setText("That didn't work")
             self.prompt_detail.setText(self.message)
             self.primary.setText("Try again")
+            self.readout.setText("Camera off")
+        set_spot(self.art, art, 120, 90)
 
-        clear_layout(self.list_box)
+        self.list_card.clear_rows()
         for i, (_target, name) in enumerate(self.targets):
             if name in self.results:
-                c = self.results[name]
-                status, colour = (f"yaw {c[0]:+.1f}, pitch {c[1]:+.1f}", "#1A6B48") if c else ("skipped", "#8A5200")
+                p = pill("Recorded", "on") if self.results[name] is not None else pill("Skipped", "wait")
             elif busy and i == self.step:
-                status, colour = "now", "#12599E"
+                p = pill("Look here", "here")
             else:
-                status, colour = "next", "#556173"
-            row = QWidget()
-            row.setStyleSheet("background: #F3F5F8; border-radius: 8px;")
-            h = QHBoxLayout(row)
-            h.setContentsMargins(12, 8, 12, 8)
-            t = label(name)
-            t.setStyleSheet("font-weight: 600; background: transparent;")
-            h.addWidget(t, 1)
-            v = label(status, "mono")
-            v.setStyleSheet(f"color: {colour}; background: transparent;")
-            h.addWidget(v)
-            self.list_box.addWidget(row)
-        self.plot.update()
+                p = pill("Next", "off")
+            self.list_card.add_row(label(name), p)
+        if not self.targets:
+            self.list_card.add_row(label("Add screens on the Layout page first.", "small"))
+        self.draw_map()
+        self.update_overlay()

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" fill="none">
+  <title>Curslink tray template</title>
+  <desc>Black screen-handoff silhouette on transparency, optically drawn for a 16-pixel menu bar.</desc>
+  <path d="M176 160H64V352H176M336 288H448V96H336" stroke="#000000" stroke-width="40" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M344 96L304 300L264 248L196 316L152 272L220 204L168 164Z" fill="#000000"/>
+</svg>

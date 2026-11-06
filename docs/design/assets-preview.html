@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CursLink desktop assets</title>
+<style>
+:root{font:15px/1.5 system-ui,sans-serif;color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:#101927;color:#eef4fc}
+main{width:min(1120px,100%);margin:auto;padding:clamp(20px,5vw,64px)}
+header{border-bottom:1px solid #364459;padding-bottom:24px}
+h1{font-size:clamp(34px,6vw,64px);letter-spacing:-.055em;line-height:1;margin:7px 0 12px}
+h2{font-size:22px;margin:0 0 15px;letter-spacing:-.03em}
+p{margin:0;color:#b3c5dd}.kicker{color:#91d1ff;font-size:12px;letter-spacing:.15em;font-weight:700}
+section{margin-block:32px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,260px),1fr));gap:16px}
+.panel{background:#172337;border:1px solid #34445b;border-radius:16px;padding:20px;min-width:0}
+.brand{min-height:220px;display:grid;place-items:center}
+.nav{display:flex;flex-wrap:wrap;gap:12px}
+.nav div{display:grid;justify-items:center;gap:6px;font-size:12px}
+.nav img{background:#d9ebff;border-radius:4px;padding:4px;width:24px;height:24px}
+.sample{display:grid;grid-template-columns:repeat(4,1fr);justify-items:center;align-items:center;min-height:36px;border-radius:6px;margin-block:6px}
+.light{background:#f3f3f3}.dark{background:#202020}
+.legend{display:grid;grid-template-columns:repeat(4,1fr);text-align:center;font-size:11px;color:#b3c5dd}
+.titlebar{display:flex;flex-wrap:wrap;gap:10px 20px;align-items:center;justify-content:space-between;margin-bottom:16px}
+.titlebar h2{margin:0}
+select,button{font:inherit;border:1px solid #61748d;border-radius:7px;background:#22324a;color:white;padding:7px 12px}
+select:focus-visible,button:focus-visible{outline:2px solid #91d1ff;outline-offset:3px}
+.themed{display:grid;gap:12px;grid-template-columns:repeat(2,minmax(0,1fr));border-radius:16px;padding:16px;background:var(--surface);color:var(--ink)}
+figure{min-width:0;margin:0;padding:8px}figcaption{font-weight:650;margin-bottom:8px}
+figure img{display:block;max-width:100%;height:auto}
+.spots{display:grid;grid-template-columns:repeat(auto-fit,minmax(152px,1fr));gap:10px;padding:16px;border-radius:16px;background:var(--surface);color:var(--ink)}
+.spots figure{display:grid;justify-items:center;text-align:center;align-content:start}
+.spots figcaption{margin:4px 0 0;font-size:13px}
+.spots img{width:160px;height:auto}
+.effects{display:flex;flex-wrap:wrap;gap:16px}
+.effect{text-align:center}.effect img{display:block;margin:auto;width:140px;height:140px}
+@media(max-width:650px){.themed{grid-template-columns:1fr}}
+</style>
+<main>
+<header><div class="kicker">CURSLINK · DESKTOP</div><h1>Icons &amp; illustrations</h1><p>App icon masters, tray exports, navigation and themed UI graphics.</p></header>
+<section class="grid" aria-label="Icons">
+<div class="panel"><h2>App icon</h2><div class="brand"><img src="curslink/assets/curslink.svg" width="190" height="190" alt="CursLink app icon"></div></div>
+<div class="panel"><h2>Tray at actual size</h2><div id="tray"></div><div class="legend"><span>Template</span><span>Good</span><span>Waiting</span><span>Off</span></div></div>
+<div class="panel"><h2>Navigation</h2><div class="nav" id="nav"></div></div>
+</section>
+<section>
+<div class="titlebar"><h2>UI illustrations</h2><label>Theme <select id="theme">
+<option value="windows-light">Windows light</option><option value="windows-dark">Windows dark</option>
+<option value="macos-light">macOS light</option><option value="macos-dark">macOS dark</option>
+<option value="linux-light">Linux light</option><option value="linux-dark">Linux dark</option>
+</select></label></div><div class="themed" id="art"></div>
+</section>
+<section><h2>In-app graphics</h2><div class="spots" id="spots"></div></section>
+<section><h2>Switch effects</h2><div class="effects">
+<div class="panel effect"><div id="pop"></div><button data-effect="pop">Play pop</button></div>
+<div class="panel effect"><div id="blink"></div><button data-effect="blink">Play blink</button></div>
+</div></section>
+</main>
+<script>
+const assets = 'curslink/assets';
+const byId = id => document.getElementById(id);
+function image(src, alt) {
+  const img = document.createElement('img');
+  img.src = src;
+  img.alt = alt;
+  return img;
+}
+for (const size of [16, 22]) {
+  const label = document.createElement('strong');
+  label.textContent = size + ' px';
+  byId('tray').append(label);
+  for (const theme of ['light', 'dark']) {
+    const row = document.createElement('div');
+    row.className = 'sample ' + theme;
+    for (const status of ['template', 'good', 'warning', 'off']) {
+      const name = status === 'template' ? 'template' : 'windows-' + theme + '-' + status;
+      const img = image('packaging/icons/tray/' + name + '-' + size + '.png', theme + ' ' + status);
+      img.width = img.height = size;
+      if (theme === 'dark' && status === 'template') img.style.filter = 'invert(1)';
+      row.append(img);
+    }
+    byId('tray').append(row);
+  }
+}
+for (const label of ['Status', 'Devices', 'Layout', 'Calibrate', 'Settings']) {
+  const item = document.createElement('div');
+  item.append(image(assets + '/navigation/' + label.toLowerCase() + '.svg', ''), label);
+  byId('nav').append(item);
+}
+const surfaces = {
+  'windows-light':['#F3F3F3','#1B1B1B'],'windows-dark':['#202020','#FFFFFF'],
+  'macos-light':['#F6F6F8','#1D1D1F'],'macos-dark':['#1E1E20','#F5F5F7'],
+  'linux-light':['#FAFAFB','#1E1E22'],'linux-dark':['#222226','#FFFFFF'],
+};
+const spots = [
+  ['welcome', 'Welcome'],
+  ['role-host', 'Host'],
+  ['role-agent', 'Agent'],
+  ['devices-empty', 'No devices yet'],
+  ['searching', 'Looking for devices'],
+  ['pairing', 'Pairing'],
+  ['paired', 'Paired'],
+  ['calibrate', 'Calibrate gaze'],
+  ['calibrated', 'Calibration saved'],
+  ['camera-off', 'Camera unavailable'],
+  ['no-face', 'No face found'],
+  ['not-linking', 'Not linking'],
+  ['waiting-for-host', 'Waiting for the host'],
+  ['connection-lost', 'Connection lost'],
+  ['update', 'Update ready'],
+  ['diagnostics', 'Diagnostics'],
+  ['background', 'Running in the background'],
+];
+for (const [file, title] of spots) {
+  const figure = document.createElement('figure');
+  const caption = document.createElement('figcaption');
+  caption.textContent = title;
+  figure.append(image(assets + '/illustrations/spot/' + file + '.svg', ''), caption);
+  byId('spots').append(figure);
+}
+function render() {
+  const theme = byId('theme').value;
+  const [surface, ink] = surfaces[theme];
+  const art = byId('art');
+  for (const panel of [art, byId('spots')]) {
+    panel.style.setProperty('--surface', surface);
+    panel.style.setProperty('--ink', ink);
+  }
+  art.replaceChildren();
+  for (const [file, title] of [['layout-canvas','Layout canvas'],['head-plot','Head plot'],['screen-mini-map','Screen mini map'],['pairing-code-card','Pairing code card']]) {
+    const figure = document.createElement('figure');
+    const caption = document.createElement('figcaption');
+    caption.textContent = title;
+    figure.append(caption, image(assets + '/illustrations/' + theme + '/' + file + '.svg', title + ' example'));
+    art.append(figure);
+  }
+}
+byId('theme').addEventListener('change', render);
+render();
+for (const button of document.querySelectorAll('[data-effect]')) {
+  const effect = button.dataset.effect;
+  const url = assets + '/illustrations/switch-' + effect + '.svg';
+  const play = () => byId(effect).replaceChildren(image(url + '?play=' + Date.now(), effect + ' switch effect'));
+  button.addEventListener('click', play);
+  play();
+}
+</script>
