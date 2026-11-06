@@ -71,7 +71,8 @@ XML
     ;;
 
   linux-*)
-    arch=$(case "$platform" in *-x64) echo amd64 ;; *-arm64) echo arm64 ;; *) echo "${platform#linux-}" ;; esac)
+    arch=${platform#linux-}
+    [ "$arch" = x64 ] && arch=amd64
     pkg="$stage/pkg"
     mkdir -p "$pkg/DEBIAN" "$pkg/opt" "$pkg/usr/bin"
     cp -R "$app" "$pkg/opt/curslink"
