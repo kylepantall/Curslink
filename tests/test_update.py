@@ -44,6 +44,26 @@ def test_install_kind(tmp_path, monkeypatch):
     assert update.install_kind(tmp_path) == "portable"
 
 
+def test_install_kind_in_a_macos_bundle(tmp_path):
+    macos = tmp_path / "Curslink.app" / "Contents" / "MacOS"
+    macos.mkdir(parents=True)
+    (macos.parent / "Resources").mkdir()
+    assert update.install_kind(macos) == "portable"
+    (macos.parent / "Resources" / "install-kind").write_text("macos-pkg\n")
+    assert update.install_kind(macos) == "macos-pkg"
+
+
+def test_app_bundle(tmp_path, monkeypatch):
+    macos = tmp_path / "Curslink.app" / "Contents" / "MacOS"
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(update, "app_dir", lambda: macos)
+    assert update.app_bundle() == tmp_path / "Curslink.app"
+    monkeypatch.setattr(update, "app_dir", lambda: tmp_path / "curslink")
+    assert update.app_bundle() is None
+    monkeypatch.setattr(update, "app_dir", lambda: None)
+    assert update.app_bundle() is None
+
+
 def test_parse_sums():
     a, b = "a" * 64, "B" * 64
     sums = update.parse_sums(f"{a}  one.zip\n{b} *two.pkg\nnot a line\n")

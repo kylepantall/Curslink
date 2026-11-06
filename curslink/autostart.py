@@ -9,6 +9,7 @@ All three are per user, so none of them needs admin rights.
 
 from __future__ import annotations
 
+import logging
 import os
 import plistlib
 import shlex
@@ -16,7 +17,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+log = logging.getLogger(__name__)
+
 APP_ID = "io.github.kylepantall.curslink"
+
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_VALUE = "Curslink"
 
@@ -119,6 +123,18 @@ class Autostart:
                 }, fh)
         else:
             path.write_text(desktop_entry(command, autostart=True))
+
+    def refresh(self) -> bool:
+        """If start-at-sign-in is on but runs another command than this copy
+        would write (the executable moved in an update), rewrite it."""
+        if not getattr(sys, "frozen", False) or not self.is_enabled():
+            return False
+        want = launch_command(minimized=True)
+        if self.command() == want:
+            return False
+        log.info("start-at-sign-in pointed at an old copy; updating it")
+        self.set_enabled(True, want)
+        return True
 
     # -- Windows ------------------------------------------------------------
     def _read_run_value(self) -> str | None:

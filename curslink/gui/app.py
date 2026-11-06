@@ -249,7 +249,13 @@ class Curslink(QObject):
         """Quit and open Curslink again (macOS applies some permissions then)."""
         import subprocess
 
-        if getattr(sys, "frozen", False):
+        from curslink.update import app_bundle
+
+        bundle = app_bundle()
+        if bundle is not None:
+            # Opened as the app, so macOS checks the app's permissions again.
+            argv = ["/usr/bin/open", "-n", str(bundle)]
+        elif getattr(sys, "frozen", False):
             argv = [sys.executable, "gui"]
         else:
             argv = [sys.executable, "-m", "curslink", "gui"]
@@ -312,7 +318,10 @@ def main(argv: list[str] | None = None) -> int:
     qt.setApplicationVersion(__version__)
     qt.setOrganizationDomain("kylepantall.github.io")
     qt.setDesktopFileName("curslink")
-    qt.setWindowIcon(app_icon())
+    if not (sys.platform == "darwin" and getattr(sys, "frozen", False)):
+        # The packaged macOS app has its bundle's icon, drawn to Apple's
+        # icon shape; Qt's would replace it in the Dock once a window opens.
+        qt.setWindowIcon(app_icon())
     qt.setStyle("Fusion")
     qt.setQuitOnLastWindowClosed(False)
 
@@ -325,6 +334,13 @@ def main(argv: list[str] | None = None) -> int:
     qInstallMessageHandler(diagnostics.qt_message_handler)
     main_thread()  # created on the Qt thread before any worker needs it
     log.info("Qt %s, platform plugin %s", qVersion(), qt.platformName())
+
+    from curslink.autostart import Autostart
+
+    try:
+        Autostart().refresh()  # an update can move the executable (macOS: into Curslink.app)
+    except Exception:
+        log.warning("couldn't update start-at-sign-in", exc_info=True)
 
     prefs = Prefs.load()
     if args.config:

@@ -100,6 +100,30 @@ jobs:
           fi
           ls -l out
 
+      # Optional: a code signing certificate (MACOS_SIGN_P12, base64, and
+      # MACOS_SIGN_PASSWORD secrets; a self-signed one will do) keeps the
+      # app's signature the same across releases, so macOS keeps its
+      # permissions through updates. Without it the app is signed ad hoc.
+      - name: Load the macOS signing certificate
+        if: runner.os == 'macOS'
+        env:
+          MACOS_SIGN_P12: ${{ secrets.MACOS_SIGN_P12 }}
+          MACOS_SIGN_PASSWORD: ${{ secrets.MACOS_SIGN_PASSWORD }}
+        run: |
+          [ -n "$MACOS_SIGN_P12" ] || { echo "no MACOS_SIGN_P12 secret: signing ad hoc"; exit 0; }
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          pass=$(uuidgen)
+          echo "$MACOS_SIGN_P12" | base64 --decode > "$RUNNER_TEMP/sign.p12"
+          security create-keychain -p "$pass" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$pass" "$keychain"
+          security import "$RUNNER_TEMP/sign.p12" -k "$keychain" -P "$MACOS_SIGN_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$pass" "$keychain" > /dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          rm "$RUNNER_TEMP/sign.p12"
+          identity=$(security find-identity -p codesigning "$keychain" | awk 'NR==1 {print $2}')
+          echo "MACOS_SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
+
       - name: Build the installer
         run: packaging/make-installer.sh "$VERSION" ${{ matrix.platform }} out
 
@@ -121,7 +145,11 @@ jobs:
               sudo installer -pkg out/curslink-$VERSION-${{ matrix.platform }}.pkg -target /
               exe=/usr/local/bin/curslink
               want=macos-pkg
-              [ -x /Applications/Curslink.app/Contents/MacOS/Curslink ] || { echo "::error::no Curslink.app"; exit 1; } ;;
+              [ -x /Applications/Curslink.app/Contents/MacOS/curslink ] || { echo "::error::no Curslink.app"; exit 1; }
+              # macOS records permissions against this identity (packaging/curslink.spec).
+              codesign --verify --deep --strict /Applications/Curslink.app
+              codesign -dv /Applications/Curslink.app 2>&1 | grep -qx 'Identifier=io.github.kylepantall.curslink.app' \
+                || { echo "::error::Curslink.app isn't signed as io.github.kylepantall.curslink.app"; exit 1; } ;;
             Linux)
               sudo dpkg -i out/curslink-$VERSION-${{ matrix.platform }}.deb
               exe=/usr/bin/curslink

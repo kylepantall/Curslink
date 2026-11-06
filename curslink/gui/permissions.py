@@ -91,7 +91,10 @@ class PermissionsCard(Card):
             self.add_row(text_block(perm.title, perm.why), pill("Needed", "wait"),
                          button("Allow…", "primary", lambda _=False, k=key: self.allow(k)))
         self.restart_row = self.add_row(
-            text_block("Already allowed?", "macOS sometimes only applies these after Curslink restarts."),
+            text_block("Already allowed?",
+                       "macOS sometimes only applies these after Curslink restarts. Still asking? "
+                       "Select Curslink in System Settings, remove it with −, and allow it again: "
+                       "after an update macOS can keep showing an old switch that no longer applies."),
             button("Restart Curslink", None, self.app.restart))
         self.restart_row.setVisible(self.asked)
 

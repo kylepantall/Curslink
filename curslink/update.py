@@ -123,14 +123,28 @@ def app_dir() -> Path | None:
     return Path(sys.executable).resolve().parent
 
 
+def app_bundle() -> Path | None:
+    """macOS: the Curslink.app this packaged copy runs from, if it's one."""
+    folder = app_dir()
+    if sys.platform != "darwin" or folder is None:
+        return None
+    bundle = folder.parent.parent
+    return bundle if folder.name == "MacOS" and bundle.suffix == ".app" else None
+
+
 def install_kind(folder: Path | None = None) -> str | None:
     """``windows-setup``, ``macos-pkg``, ``deb``, ``portable``, or None from source."""
     folder = folder or app_dir()
     if folder is None:
         return None
-    try:
-        kind = (folder / "install-kind").read_text().strip()
-    except OSError:
+    # In a macOS app bundle it's in Contents/Resources, beside Contents/MacOS.
+    for path in (folder / "install-kind", folder.parent / "Resources" / "install-kind"):
+        try:
+            kind = path.read_text().strip()
+            break
+        except OSError:
+            continue
+    else:
         return "portable"
     return kind if kind in KINDS else "portable"
 

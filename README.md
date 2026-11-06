@@ -57,7 +57,7 @@ next computer, with a quick "pop" or "blink" so you always see where it went.
 | Platform | Download | What it does |
 | --- | --- | --- |
 | Windows 10/11 | `curslink-X.Y.Z-windows-x64-setup.exe` | Installs for your user (no admin needed) and adds `curslink` to your PATH |
-| macOS (Apple silicon) | `curslink-X.Y.Z-macos-arm64.pkg` | Installs `curslink` to `/usr/local/bin` |
+| macOS (Apple silicon) | `curslink-X.Y.Z-macos-arm64.pkg` | Installs `Curslink.app` to `/Applications` and `curslink` to `/usr/local/bin` |
 | Debian / Ubuntu | `curslink-X.Y.Z-linux-x64.deb` | `sudo apt install ./curslink-*.deb` |
 
 Get them from the [latest release](https://github.com/kylepantall/Curslink/releases/latest).
@@ -228,7 +228,8 @@ pytest
 ```
 
 To build the packaged app locally: `pip install ".[gaze]" pyinstaller`, then
-`pyinstaller packaging/curslink.spec` (output in `dist/curslink/`).
+`pyinstaller packaging/curslink.spec` (output in `dist/curslink/`, and on macOS
+also `dist/Curslink.app`).
 
 Releasing (maintainers): bump the version in `pyproject.toml` and `curslink/__init__.py`,
 then push a tag such as `v0.2.0`. The Release workflow builds every platform

@@ -100,6 +100,19 @@ def test_autostart_macos(tmp_path):
     assert not a.is_enabled()
 
 
+def test_autostart_follows_the_executable(tmp_path, monkeypatch):
+    a = autostart.Autostart(platform="darwin", home=tmp_path)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    new = ["/Applications/Curslink.app/Contents/MacOS/curslink", "gui", "--minimized"]
+    monkeypatch.setattr(autostart, "launch_command", lambda minimized=True: new)
+    assert not a.refresh()  # off: stays off
+    assert not a.is_enabled()
+    a.set_enabled(True, ["/usr/local/lib/curslink/curslink", "gui", "--minimized"])
+    assert a.refresh()
+    assert a.command() == new
+    assert not a.refresh()  # already right
+
+
 class FakeRegistry:
     HKEY_CURRENT_USER = "HKCU"
     REG_SZ = 1
