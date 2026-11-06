@@ -109,8 +109,10 @@ async def test_tampered_public_value_is_caught(tmp_path, monkeypatch):
 
     monkeypatch.setattr(handshake, "_keypair", keypair)
     real_commit = handshake._commit
-    # The initiator commits to one key but reveals another.
-    monkeypatch.setattr(handshake, "_commit", lambda pub: real_commit(b"\x00" + pub[1:]) if len(calls) == 1 else real_commit(pub))
+    # The initiator commits to one key but reveals another. (Flip a bit
+    # rather than zeroing the first byte, which is already zero about one
+    # run in 256 and then changes nothing.)
+    monkeypatch.setattr(handshake, "_commit", lambda pub: real_commit(bytes([pub[0] ^ 1]) + pub[1:]) if len(calls) == 1 else real_commit(pub))
     with pytest.raises(PairingError):
         await pair(tmp_path)
 
