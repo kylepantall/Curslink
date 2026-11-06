@@ -531,6 +531,10 @@ def main(argv: list[str] | None = None) -> int:
         # A fresh process: macOS caches these answers for the life of a process.
         import json
 
+        from curslink import macdock
+
+        macdock.hide()
+
         from curslink import macperms
 
         print(json.dumps({k: macperms.granted(k) for k in macperms.PERMISSIONS}))
@@ -548,6 +552,11 @@ def main(argv: list[str] | None = None) -> int:
     from curslink import diagnostics
 
     process = args.command if args.command in ("host", "agent", "relay") else "cli"
+    if args.command in ("host", "agent"):
+        # The linking service: the app has the Dock icon (see macdock).
+        from curslink import macdock
+
+        macdock.hide()
     if args.command == "gui":
         # The app sets up its own logs once it knows it's the only copy running.
         logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,

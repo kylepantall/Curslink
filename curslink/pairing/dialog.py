@@ -23,6 +23,9 @@ def run(name: str, role: str, device_id: str) -> int:
         root = tk.Tk()
     except Exception:
         return EXIT_NO_DISPLAY
+    from curslink import macdock
+
+    macdock.hide(macdock.ACCESSORY)  # its window shows, without a second Dock icon
     result: list[str] = []
 
     root.title("Curslink pairing request")

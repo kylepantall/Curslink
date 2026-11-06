@@ -386,3 +386,10 @@ def test_macos_capture_reads_deltas_and_survives_a_disabled_tap(monkeypatch):
     assert listener._handler(None, 0xFFFFFFFE, None, None) is None
     assert listener._handler(None, 5, "ev", None) == "ev"
     assert calls[1:] == [("enable", "tap", True), ("pynput", 5)]
+
+
+def test_hiding_from_the_dock_is_harmless_off_macos():
+    from curslink import macdock
+
+    macdock.hide()
+    macdock.hide(macdock.ACCESSORY)
