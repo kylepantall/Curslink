@@ -247,6 +247,7 @@ def host_command(router: Router, stop: asyncio.Event, command: str) -> None:
 
 
 def start_gaze(cfg: HostConfig, router: Router, loop: asyncio.AbstractEventLoop, server: HostServer | None = None):
+    from curslink.gaze.cameras import resolve
     from curslink.gaze.tracker import HeadPoseTracker
 
     if not cfg.gaze.calibration.exists():
@@ -261,7 +262,7 @@ def start_gaze(cfg: HostConfig, router: Router, loop: asyncio.AbstractEventLoop,
 
     tracker = HeadPoseTracker(
         lambda t, yaw, pitch: loop.call_soon_threadsafe(arbiter.on_sample, t, yaw, pitch),
-        camera=cfg.gaze.camera,
+        camera=resolve(cfg.gaze.camera, cfg.gaze.camera_name),
         preview=cfg.gaze.preview,
     )
     tracker.start()
@@ -393,6 +394,7 @@ class FacingCamera:
 
 def start_facing(cfg: AgentConfig, client: AgentClient, loop: asyncio.AbstractEventLoop) -> FacingCamera | None:
     try:
+        from curslink.gaze.cameras import resolve
         from curslink.gaze.tracker import HeadPoseTracker
     except ImportError as exc:  # pragma: no cover - the gaze extra is missing
         log.error("[agent.gaze] needs the gaze extra (pip install curslink[gaze]): %s", exc)
@@ -403,7 +405,8 @@ def start_facing(cfg: AgentConfig, client: AgentClient, loop: asyncio.AbstractEv
     def on_sample(t: float, yaw: float, pitch: float) -> None:  # tracker thread
         loop.call_soon_threadsafe(camera.on_sample, t, yaw, pitch)
 
-    tracker = HeadPoseTracker(on_sample, camera=cfg.gaze.camera, preview=cfg.gaze.preview)
+    tracker = HeadPoseTracker(on_sample, camera=resolve(cfg.gaze.camera, cfg.gaze.camera_name),
+                              preview=cfg.gaze.preview)
     camera = FacingCamera(detector, client, tracker, loop)
     client.facing_source = lambda: detector.facing
     camera.start()

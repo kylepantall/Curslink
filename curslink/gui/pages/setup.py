@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import shutil
 
+from PySide6.QtCore import QSize
 from PySide6.QtWidgets import QButtonGroup, QHBoxLayout, QLineEdit
 
 from curslink.configedit import new_agent_config, new_host_config, slug, this_computer_name
-from curslink.gui.widgets import Card, Page, button, label
+from curslink.gui.widgets import Card, Page, button, label, spot, svg_pixmap
 
 
 class SetupPage(Page):
@@ -16,13 +17,16 @@ class SetupPage(Page):
                          "Curslink moves one keyboard and mouse between your computers. "
                          "Tell it what this computer does.")
         self.app = app
+        self.header.insertWidget(0, spot("welcome", 120, 90))
 
         role_card = Card("What does this computer do?")
         choices = QHBoxLayout()
         self.roles = QButtonGroup(self)
-        self.host_choice = button("Host\nThe keyboard and mouse are plugged in here", "choice")
-        self.agent_choice = button("Agent\nAnother computer's keyboard and mouse control this one", "choice")
-        for b in (self.host_choice, self.agent_choice):
+        self.host_choice = button("Host\nThe keyboard and mouse\nare plugged in here", "choice")
+        self.agent_choice = button("Agent\nAnother computer's keyboard\nand mouse control this one", "choice")
+        for b, art in ((self.host_choice, "role-host"), (self.agent_choice, "role-agent")):
+            b.setIcon(svg_pixmap(f"illustrations/spot/{art}.svg", 72, 54))
+            b.setIconSize(QSize(72, 54))
             b.setCheckable(True)
             self.roles.addButton(b)
             choices.addWidget(b, 1)

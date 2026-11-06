@@ -9,12 +9,13 @@ from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QPlainTextEdit, QVBoxLay
 
 from curslink.gui.common import friendly_reason
 from curslink.gui.service import FAILED, RUNNING, STARTING
-from curslink.gui.widgets import Card, Page, Toggle, button, label, pill, set_pill, text_block
+from curslink.gui.screenmap import ScreenMap, screens_from_config
+from curslink.gui.widgets import Card, Page, Toggle, button, label, pill, set_spot, spot, text_block
 
 
 class StatusPage(Page):
     def __init__(self, app):
-        super().__init__("Status")
+        super().__init__("Status", " ")
         self.app = app
         self.run_button = button("Stop linking", None, self.toggle_run)
         self.header.addWidget(self.run_button)
@@ -26,6 +27,13 @@ class StatusPage(Page):
         # Where input is (host) / the link to the host (agent).
         self.where = Card()
         top = QHBoxLayout()
+        top.setSpacing(18)
+        # Host: a small map of the screens with the pointer's screen lit.
+        # Agent: a picture of the link's state.
+        self.mini = ScreenMap(compact=True)
+        top.addWidget(self.mini)
+        self.art = spot("waiting-for-host", 120, 90)
+        top.addWidget(self.art)
         words = QVBoxLayout()
         words.setSpacing(4)
         self.eyebrow = label("KEYBOARD AND MOUSE ARE ON", "eyebrow")
@@ -121,11 +129,10 @@ class StatusPage(Page):
         app, status, state = self.app, self.app.status, self.app.service.state
         role = app.role or "host"
         self.description.setText(
-            "This computer is the host: its keyboard and mouse follow you to your other devices."
+            "This computer's keyboard and mouse follow you to your other devices."
             if role == "host" else
-            "This computer is an agent: the host's keyboard and mouse work it when you look at it."
+            "Curslink runs in the background here. Your host's keyboard and mouse arrive when you look at this screen."
         )
-        self.description.show()
         self.run_button.setText("Stop linking" if app.linking else "Start linking")
         self.run_button.setObjectName("" if app.linking else "primary")
         self.run_button.style().unpolish(self.run_button)
@@ -138,7 +145,17 @@ class StatusPage(Page):
             self.error.hide()
 
         names = self.device_names()
+        self.mini.setVisible(role == "host")
+        self.art.setVisible(role != "host")
         if role == "host":
+            try:
+                self.mini.set_screens(screens_from_config(app.config()))
+            except Exception:
+                self.mini.set_screens([])
+            if state == RUNNING and status.active:
+                self.mini.set_states({f"{status.active}/{status.screen}": {"active"}})
+            else:
+                self.mini.set_states({})
             self.eyebrow.setText("KEYBOARD AND MOUSE ARE ON")
             if state == RUNNING:
                 self.big.setText(names.get(status.active, status.active or "This computer"))
@@ -154,12 +171,19 @@ class StatusPage(Page):
             self.eyebrow.setText("LINK TO THE HOST")
             self.home_button.hide()
             if state != RUNNING:
+                set_spot(self.art, "not-linking", 120, 90)
                 self.big.setText("Starting…" if state == STARTING else "Not linking")
                 self.detail.setText("Start linking so the host can reach this computer.")
             elif status.host_state == "connected":
+                set_spot(self.art, "paired", 120, 90)
                 self.big.setText("Connected")
                 self.detail.setText(f"Through {status.host_detail}. Look at this screen to use it.")
+            elif status.host_state == "disconnected":
+                set_spot(self.art, "connection-lost", 120, 90)
+                self.big.setText("Connection lost")
+                self.detail.setText(status.host_detail or "Trying to reach the host again…")
             else:
+                set_spot(self.art, "waiting-for-host", 120, 90)
                 self.big.setText("Waiting for the host")
                 self.detail.setText(status.host_detail or "Looking for the host…")
 

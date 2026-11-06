@@ -3,7 +3,8 @@
 Kept as JSON in the per-user Curslink folder, beside the pairing store::
 
     {"config": "/home/kyle/.config/curslink/curslink.toml",
-     "start_minimized": true, "start_linking": true, "told_about_tray": false}
+     "start_minimized": true, "start_linking": true, "told_about_tray": false,
+     "theme": "system", "glass": true}
 
 Whether Curslink starts at sign-in is not stored here: the operating system
 already knows (see :mod:`curslink.autostart`).
@@ -30,6 +31,8 @@ class Prefs:
     start_minimized: bool = True     # open to the tray, not the window
     start_linking: bool = True       # start the host/agent when the app opens
     told_about_tray: bool = False    # said "still running in the tray" once
+    theme: str = "system"            # system / light / dark
+    glass: bool = True               # Mica (Windows 11) or vibrancy (macOS) behind the window
 
     @property
     def config_path(self) -> Path:

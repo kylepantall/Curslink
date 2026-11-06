@@ -6,11 +6,12 @@ import asyncio
 import threading
 import time
 
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QHBoxLayout, QLineEdit, QMessageBox, QVBoxLayout
 
 from curslink.config import agent_config, host_config
 from curslink.gui.common import call_on_main, in_background, main_thread
-from curslink.gui.widgets import Card, Page, button, label, pill, text_block
+from curslink.gui.widgets import Card, EmptyState, Page, button, label, pill, spot, text_block
 
 
 class Pairing:
@@ -82,8 +83,10 @@ class DevicesPage(Page):
         self.found = []
 
         self.code_card = Card()
-        self.code_card.setObjectName("darkCard")
+        self.code_card.setObjectName("accentCard")
         row = QHBoxLayout()
+        row.setSpacing(18)
+        row.addWidget(spot("pairing", 120, 90))
         words = QVBoxLayout()
         self.code_intro = label("", wrap=True)
         self.code = label("", "code")
@@ -161,7 +164,10 @@ class DevicesPage(Page):
             self.paired.add_row(label(f"Can't read the pairing store: {exc}", "small"))
             return
         if not peers:
-            self.paired.add_row(label("Nothing yet. Pair with a device below.", "small"))
+            other = "an agent" if self.app.role == "host" else "your host"
+            self.paired.rows.addWidget(EmptyState(
+                "devices-empty", "Nothing paired yet",
+                f"Open Curslink on {other}, on the same network, and pair with it below."))
         connected = {a.device_id for a in self.app.status.agents.values() if a.connected}
         if self.app.status.host_state == "connected":
             connected |= {p.device_id for p in peers if p.role == "host"}
@@ -194,8 +200,9 @@ class DevicesPage(Page):
             )
         if not want:
             other = "agents" if me.role == "host" else "hosts"
-            self.nearby.add_row(label(
-                f"No {other} found yet. Open Curslink on the other computer, on the same network.", "small"))
+            self.nearby.rows.addWidget(EmptyState(
+                "searching", f"Looking for {other}…",
+                "Open Curslink on the other computer, on the same network.", size=(120, 90)))
 
     def search(self) -> None:
         from curslink.pairing.discovery import browse
@@ -282,6 +289,12 @@ class DevicesPage(Page):
                 self.app.config_saved()
         self.say(note, ok=True)
         self.refresh()
+        if self.app.role == "agent":
+            # An agent has nothing to show once it's paired: keep running in
+            # the tray / menu bar instead of leaving a window open.
+            if not self.app.linking:
+                self.app.start_linking()
+            QTimer.singleShot(1800, self.app.hide_to_tray)
 
     def unpair(self, peer) -> None:
         answer = QMessageBox.question(
@@ -294,8 +307,8 @@ class DevicesPage(Page):
         self.refresh()
 
     def say(self, text: str, ok: bool = False) -> None:
-        self.message.setObjectName("" if ok else "warn")
-        self.message.setStyleSheet(
-            "background: #E3F4EC; color: #1A6B48; border-radius: 10px; padding: 10px 12px;" if ok else "")
+        self.message.setObjectName("info" if ok else "warn")
+        self.message.style().unpolish(self.message)
+        self.message.style().polish(self.message)
         self.message.setText(text)
         self.message.show()

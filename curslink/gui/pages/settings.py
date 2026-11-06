@@ -8,11 +8,13 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QButtonGroup, QFileDialog, QGridLayout, QHBoxLayout, QLineEdit, QSlider, QSpinBox, QVBoxLayout
+from PySide6.QtWidgets import QButtonGroup, QFileDialog, QGridLayout, QHBoxLayout, QLineEdit, QSlider, QVBoxLayout
 
 from curslink import __version__, diagnostics
 from curslink.autostart import Autostart
-from curslink.gui.widgets import Card, Page, Toggle, button, label, text_block
+from curslink.gui import native, theme
+from curslink.gui.camerapicker import CameraPicker
+from curslink.gui.widgets import Card, Page, Segmented, Toggle, button, label, spot, text_block
 
 
 class SettingsPage(Page):
@@ -35,8 +37,24 @@ class SettingsPage(Page):
         name_row.addWidget(self.name)
         name_row.addStretch(1)
         me.body.addLayout(name_row)
-        me.body.addWidget(button("Set this computer up again…", None, lambda: app.show_window("setup")))
+        again = QHBoxLayout()
+        again.addWidget(button("Set this computer up again…", None, lambda: app.show_window("setup")))
+        again.addStretch(1)
+        me.body.addLayout(again)
         self.add(me)
+
+        # -- appearance -----------------------------------------------------------
+        look = Card("Appearance", rows=True)
+        self.theme_choice = Segmented([("system", "System"), ("light", "Light"), ("dark", "Dark")])
+        self.theme_choice.picked.connect(self.set_theme)
+        look.add_row(text_block("Theme", "System follows your computer's light or dark setting."), self.theme_choice)
+        self.glass = Toggle("Transparency effects")
+        self.glass.clicked.connect(lambda on: self.set_pref("glass", on))
+        effect = {"win": "Mica", "mac": "the glass sidebar"}.get(theme.current().platform, "")
+        if effect and native.can_glass():
+            look.add_row(text_block("Transparency effects", f"Use {effect} behind the window. Applies next time "
+                                    "Curslink opens."), self.glass)
+        self.add(look)
 
         # -- background ---------------------------------------------------------
         bg = Card("Running in the background", rows=True)
@@ -74,10 +92,8 @@ class SettingsPage(Page):
         grid.addLayout(effects, 1, 0)
 
         grid.addWidget(label("Camera", "small"), 0, 1)
-        self.camera = QSpinBox()
-        self.camera.setRange(0, 9)
-        self.camera.setAccessibleName("Camera number")
-        self.camera.valueChanged.connect(lambda v: self.set_config("gaze", "camera", v))
+        self.camera = CameraPicker()
+        self.camera.picked.connect(self.set_camera)
         grid.addWidget(self.camera, 1, 1)
 
         self.dwell_label = label("", "small")
@@ -109,6 +125,8 @@ class SettingsPage(Page):
 
         # -- updates --------------------------------------------------------------
         upd = Card("Updates", rows=True)
+        self.update_art = spot("update", 96, 72)
+        self.update_art.hide()
         self.upd_check = Toggle("Check for updates")
         self.upd_check.clicked.connect(lambda on: self.set_config("update", "check", on, restart=False))
         self.upd_auto = Toggle("Install updates automatically")
@@ -125,7 +143,9 @@ class SettingsPage(Page):
         self.check_button = button("Check now", None, self.check_now)
         self.install_button = button("Install update", "primary", self.install)
         self.install_button.hide()
-        upd.add_row(self.update_text, self.install_button, self.check_button)
+        row = upd.add_row(self.update_art, self.update_text, self.install_button, self.check_button,
+                          stretch_first=False)
+        row.layout().setStretch(1, 1)
         self.add(upd)
 
         # -- files ------------------------------------------------------------------
@@ -160,6 +180,8 @@ class SettingsPage(Page):
         self.load()
 
     def shown(self) -> None:
+        if not self.camera.loaded:
+            self.camera.refresh()
         self.load()
         self.load_diagnostics()
 
@@ -200,7 +222,9 @@ class SettingsPage(Page):
             effect = host.get("effect", "pop")
             for b in self.effect_group.buttons():
                 b.setChecked(b.property("effect") == effect)
-            self.camera.setValue(int(gaze.get("camera", 0) or 0))
+            self.camera.set_current(int(gaze.get("camera", 0) or 0), str(gaze.get("camera_name", "") or ""))
+            self.theme_choice.set_value(self.app.prefs.theme)
+            self.glass.setChecked(self.app.prefs.glass)
             self.dwell.setValue(int(gaze.get("dwell_ms", 350)))
             self.dwell_label.setText(f"Look for {self.dwell.value()} ms before switching")
             self.hotkeys.setText(f"Bring input home: {host.get('return_hotkey', 'ctrl+alt+home')}\n"
@@ -218,6 +242,19 @@ class SettingsPage(Page):
     def set_pref(self, key: str, value) -> None:
         setattr(self.app.prefs, key, value)
         self.app.prefs.save()
+
+    def set_theme(self, mode: str) -> None:
+        self.set_pref("theme", mode)
+        theme.manager().set_mode(mode)
+
+    def set_camera(self, index: int, name: str) -> None:
+        if self._loading:
+            return
+        cfg = self.app.config()
+        cfg.set("gaze", "camera", index)
+        cfg.set("gaze", "camera_name", name)
+        cfg.save()
+        self.app.config_saved()
 
     def set_login(self, on: bool) -> None:
         try:
@@ -267,6 +304,7 @@ class SettingsPage(Page):
 
     def show_release(self, release) -> None:
         self.update_text.setText(f"Curslink {release.version} is out (you have {__version__}).")
+        self.update_art.show()
         self.install_button.show()
 
     def install(self) -> None:

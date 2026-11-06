@@ -25,6 +25,9 @@ gaze = [
 # The desktop app (`curslink gui`): window, tray / menu bar icon.
 gui = [
     "PySide6-Essentials>=6.8",
+    # macOS: the window's glass (vibrancy), hiding the Dock icon, camera names.
+    "pyobjc-framework-Cocoa>=10; sys_platform == 'darwin'",
+    "pyobjc-framework-AVFoundation>=10; sys_platform == 'darwin'",
 ]
 dev = [
     "pytest>=8",

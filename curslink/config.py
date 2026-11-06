@@ -33,6 +33,7 @@ class ConfigError(ValueError):
 class GazeConfig:
     enabled: bool = False
     camera: int = 0
+    camera_name: str = ""            # follow this camera if its index changes
     calibration: Path = Path("calibration.json")
     preview: bool = False
     settings: GazeSettings = field(default_factory=GazeSettings)
@@ -248,6 +249,7 @@ def host_config(raw: dict[str, Any], base_dir: Path = Path(".")) -> HostConfig:
     gaze = GazeConfig(
         enabled=g.get("enabled", False),
         camera=_int(g, "camera", 0),
+        camera_name=str(g.get("camera_name", "") or ""),
         calibration=base_dir / g.get("calibration", "calibration.json"),
         preview=g.get("preview", False),
         settings=GazeSettings(
