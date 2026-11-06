@@ -12,8 +12,9 @@ this copy was installed, checks it against ``SHA256SUMS.txt`` and runs it:
   on Windows, unpacked beside it (a running program's folder can't be
   replaced there).
 
-While the repository is private, the update check needs a GitHub token
-that can read it, in ``CURSLINK_GITHUB_TOKEN`` (or ``GITHUB_TOKEN``).
+The repository is public, so no token is needed. ``CURSLINK_GITHUB_TOKEN``
+(or ``GITHUB_TOKEN``) is sent if set, e.g. for a private fork or to lift
+GitHub's rate limit for anonymous API calls.
 
 The installers drop an ``install-kind`` file next to the executable, which
 is how the updater knows which of these it is. ``curslink update`` does it
@@ -149,7 +150,7 @@ def asset_name(version: str, kind: str, plat: str | None = None) -> str:
 # --- Talking to GitHub -----------------------------------------------------
 
 def github_token() -> str | None:
-    """A token for a private repository: CURSLINK_GITHUB_TOKEN or GITHUB_TOKEN."""
+    """An optional token (CURSLINK_GITHUB_TOKEN or GITHUB_TOKEN), for a private fork or rate limits."""
     return os.environ.get("CURSLINK_GITHUB_TOKEN") or os.environ.get("GITHUB_TOKEN") or None
 
 
