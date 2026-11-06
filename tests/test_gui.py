@@ -158,3 +158,11 @@ def test_a_paired_agent_starts_hidden(desktop, qapp):
     store = desktop.window.pages["devices"].store()
     store.add("desk", "Desk PC", "host", b"k" * 32)
     assert desktop.agent_paired()
+
+
+def test_nothing_paired_means_setup_isnt_done(desktop, qapp):
+    desktop.window.pages["setup"].create()
+    assert desktop.role == "host" and not desktop.has_pairings()
+    desktop.window.pages["devices"].store().add("laptop", "Work laptop", "agent", b"k" * 32)
+    assert desktop.has_pairings()
+    assert not desktop.agent_paired()  # a host isn't an agent

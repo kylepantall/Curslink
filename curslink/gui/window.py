@@ -346,7 +346,7 @@ class MainWindow(QMainWindow):
 
     def hideEvent(self, event) -> None:  # noqa: N802
         super().hideEvent(event)
-        if self.app.tray is not None and self.app.tray.isVisible():
+        if self.app.tray_placed():
             native.set_dock_icon(False)
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802

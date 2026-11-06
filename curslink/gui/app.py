@@ -196,22 +196,42 @@ class Curslink(QObject):
         self.window.raise_()
         self.window.activateWindow()
 
-    def agent_paired(self) -> bool:
-        """An agent with a host to link to (so it can run without a window)."""
-        if self.role != "agent":
-            return False
+    def paired_peers(self, role: str | None = None) -> list:
         try:
             from curslink.config import pairing_config
             from curslink.pairing.store import PairingStore
 
             store = pairing_config(self.config().raw(), self.config_path.parent).store
-            return bool(PairingStore(store).peers("host"))
+            return PairingStore(store).peers(role)
         except Exception:
+            return []
+
+    def has_pairings(self) -> bool:
+        """Paired with at least one other device (until then, setup isn't done)."""
+        return self.has_config() and bool(self.paired_peers())
+
+    def agent_paired(self) -> bool:
+        """An agent with a host to link to (so it can run without a window)."""
+        return self.role == "agent" and bool(self.paired_peers("host"))
+
+    def tray_placed(self) -> bool:
+        """The tray / menu bar icon is really on screen (not just requested)."""
+        tray = self.tray
+        if tray is None or not tray.available() or not tray.isVisible():
             return False
+        # macOS reports where the menu bar item is; some Linux trays report
+        # nothing even though the icon is there, so only trust it on macOS.
+        return sys.platform != "darwin" or not tray.geometry().isEmpty()
+
+    def check_tray_placed(self) -> None:
+        if self.window is not None and not self.window.isVisible() and not self.tray_placed():
+            log.warning("the %s icon isn't showing (geometry %s); opening the window instead",
+                        self.tray.place() if self.tray else "tray", self.tray.geometry() if self.tray else None)
+            self.show_window()
 
     def hide_to_tray(self, force_note: bool = False) -> None:
         """Close the window and keep running in the tray, saying so once."""
-        if self.window is None or self.tray is None or not self.tray.available():
+        if self.window is None or not self.tray_placed():
             return
         self.window.hide()
         from curslink.gui import native
@@ -298,9 +318,11 @@ def main(argv: list[str] | None = None) -> int:
     from curslink.gui.tray import Tray
     from curslink.gui.window import MainWindow
 
+    log.info("building the window")
     app.window = MainWindow(app)
     app.tray = Tray(app)
     tray_ok = app.tray.available()
+    log.info("system tray %s", "available" if tray_ok else "not available")
     if sys.platform == "darwin":
         # Clicking the Dock icon re-activates the app: show the window, so
         # an icon in the Dock always leads somewhere.
@@ -315,6 +337,7 @@ def main(argv: list[str] | None = None) -> int:
         qt.applicationStateChanged.connect(on_state)
     if tray_ok:
         app.tray.show()
+        log.info("tray icon shown: visible %s, at %s", app.tray.isVisible(), app.tray.geometry())
 
     if not app.has_config():
         app.show_window("setup")
@@ -322,14 +345,18 @@ def main(argv: list[str] | None = None) -> int:
         if prefs.start_linking:
             app.start_linking()
         # Agents have nothing to look at once paired, so they start hidden.
-        hidden = args.minimized or prefs.start_minimized or app.agent_paired()
-        log.info("starting %s (minimized flag %s, start minimised %s, %s, tray %s)",
+        # Nothing paired yet means setup isn't finished: always show the window.
+        hidden = app.has_pairings() and (args.minimized or prefs.start_minimized or app.agent_paired())
+        log.info("starting %s (minimized flag %s, start minimised %s, %s, paired %s, tray %s)",
                  "hidden in the tray" if hidden and tray_ok else "with the window open", args.minimized,
-                 prefs.start_minimized, app.role, "available" if tray_ok else "unavailable")
+                 prefs.start_minimized, app.role, app.has_pairings(), "available" if tray_ok else "unavailable")
         if not hidden or not tray_ok:
             app.show_window()
         else:
             native.set_dock_icon(False)
+            # If the tray / menu bar icon never actually appeared, a hidden app
+            # can't be reached at all: open the window after all.
+            QTimer.singleShot(2500, app.check_tray_placed)
             if not prefs.told_about_tray:
                 prefs.told_about_tray = True
                 prefs.save()
