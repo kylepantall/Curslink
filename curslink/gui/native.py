@@ -39,7 +39,16 @@ def prepare(window) -> None:
 
     window.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
     if sys.platform == "darwin":
-        window.setUnifiedTitleAndToolBarOnMac(True)
+        # Let Qt own the unified title bar: it rewrites the window's style
+        # mask and titlebarAppearsTransparent from these flags whenever it
+        # updates the window, which undid setting them by hand (0.4.3 kept a
+        # grey title bar). ExpandedClientAreaHint (Qt 6.9+) shares its value
+        # with the older MaximizeUsingFullscreenGeometryHint, which is the
+        # name PySide exposes.
+        expanded = getattr(Qt.WindowType, "ExpandedClientAreaHint",
+                           Qt.WindowType.MaximizeUsingFullscreenGeometryHint)
+        window.setWindowFlag(expanded, True)
+        window.setWindowFlag(Qt.WindowType.NoTitleBarBackgroundHint, True)
 
 
 def apply_glass(window, dark: bool) -> bool:

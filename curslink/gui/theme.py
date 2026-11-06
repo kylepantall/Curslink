@@ -67,14 +67,14 @@ TOKENS: dict[str, dict[str, dict[str, str]]] = {
                      navsel="rgba(255,255,255,.06)", plot="#1C1C1C"),
     },
     "mac": {
-        "light": dict(win="#F6F6F8", glass="rgba(246,246,248,.80)", side="#ECECEF", side_glass="rgba(255,255,255,.30)",
-                      content="#F6F6F8", content_glass="rgba(246,246,248,.86)", card="#FFFFFF", card2="#F0F0F2",
+        "light": dict(win="#F6F6F8", glass="transparent", side="#ECECEF", side_glass="rgba(255,255,255,.42)",
+                      content="#F6F6F8", content_glass="rgba(246,246,248,.92)", card_glass="rgba(255,255,255,.78)", card="#FFFFFF", card2="#F0F0F2",
                       stroke="rgba(0,0,0,.10)", ink="#1D1D1F", ink2="#6E6E73", ink3="#8E8E93", accent="#007AFF",
                       accent_ink="#FFFFFF", accent_soft="rgba(0,122,255,.12)", ctl="#FFFFFF",
                       ctl_stroke="rgba(0,0,0,.16)", ctl_bottom="rgba(0,0,0,.16)", navsel="rgba(0,0,0,.08)",
                       plot="#EFEFF2"),
-        "dark": dict(win="#1E1E20", glass="rgba(30,30,32,.70)", side="#28282B", side_glass="rgba(60,60,67,.30)",
-                     content="#1E1E20", content_glass="rgba(30,30,32,.84)", card="#2A2A2D", card2="#252528",
+        "dark": dict(win="#1E1E20", glass="transparent", side="#28282B", side_glass="rgba(60,60,67,.36)",
+                     content="#1E1E20", content_glass="rgba(30,30,32,.90)", card_glass="rgba(255,255,255,.06)", card="#2A2A2D", card2="#252528",
                      stroke="rgba(255,255,255,.10)", ink="#F5F5F7", ink2="#A1A1A6", ink3="#8E8E93", accent="#0A84FF",
                      accent_ink="#FFFFFF", accent_soft="rgba(10,132,255,.22)", ctl="#3A3A3D",
                      ctl_stroke="rgba(255,255,255,.14)", ctl_bottom="rgba(255,255,255,.14)",
@@ -174,6 +174,11 @@ class Theme:
         return t["side"]
 
     @property
+    def card_bg(self) -> str:
+        t = self.tokens
+        return t.get("card_glass", t["card"]) if self.glass else t["card"]
+
+    @property
     def content_bg(self) -> str:
         t = self.tokens
         return t.get("content_glass", t["content"]) if self.glass else t["content"]
@@ -204,6 +209,18 @@ def stylesheet(th: Theme) -> str:
         side_round = "border-radius: 14px; margin: 8px;" if th.glass else ""
     else:
         side_round = ""
+    # Segmented controls: a recessed track with a raised thumb (macOS look,
+    # used everywhere; Windows gets a hairline track, as Fluent does).
+    if plat == "mac":
+        seg_track = "rgba(120,120,128,.24)" if th.dark else "rgba(120,120,128,.14)"
+        seg_track_border = "0"
+        seg_thumb = "rgba(255,255,255,.22)" if th.dark else "#FFFFFF"
+        seg_thumb_ink = ""
+    else:
+        seg_track = t["card2"]
+        seg_track_border = f"1px solid {t['stroke']}" if plat == "win" else "0"
+        seg_thumb = t["ctl"]
+        seg_thumb_ink = f"color: {t['accent']};" if plat == "win" else ""
     return f"""
 * {{ font-size: {s['font_px']}px; }}
 QMainWindow, QWidget#root {{ background: {th.window_bg}; color: {t['ink']}; }}
@@ -235,7 +252,7 @@ QLabel#warn {{ background: {t['warn_bg']}; color: {t['ink']}; border-radius: {s[
 QLabel#error {{ background: {t['bad_bg']}; color: {t['ink']}; border-radius: {s['r_card']}px; padding: 10px 12px; }}
 QLabel#info {{ background: {t['accent_soft']}; color: {t['ink']}; border-radius: {s['r_card']}px; padding: 10px 12px; }}
 
-QFrame#card {{ background: {t['card']}; border: 1px solid {t['stroke']}; border-radius: {s['r_card']}px; }}
+QFrame#card {{ background: {th.card_bg}; border: 1px solid {t['stroke']}; border-radius: {s['r_card']}px; }}
 QFrame#accentCard {{ background: {t['accent_soft']}; border: 0; border-radius: {s['r_card']}px; }}
 QFrame#row {{ background: transparent; border: 0; border-top: 1px solid {t['stroke']}; }}
 QFrame#rowFirst {{ background: transparent; border: 0; }}
@@ -253,8 +270,11 @@ QPushButton#primary:disabled {{ background: {t['ctl']}; color: {t['ink3']}; }}
 QPushButton#danger {{ color: {t['bad']}; {'background: ' + t['bad_bg'] + ';' if plat == 'linux' else ''} }}
 QPushButton#choice {{ text-align: left; padding: 14px 16px; border: {'2px solid transparent' if plat == 'linux' else '1px solid ' + t['ctl_stroke']}; border-radius: {s['r_card']}px; }}
 QPushButton#choice:checked {{ border: 2px solid {t['accent']}; background: {t['accent_soft']}; }}
-QPushButton#seg {{ min-height: {s['btn_h'] - 6}px; padding: 0 14px; }}
-QPushButton#seg:checked {{ background: {t['accent']}; color: {t['accent_ink']}; border-color: {t['accent']}; font-weight: 600; }}
+QFrame#segTrack {{ background: {seg_track}; border: {seg_track_border}; border-radius: {s['r_ctl'] + 1}px; }}
+QPushButton#seg {{ min-height: {s['btn_h'] - 8}px; padding: 0 14px; border: 1px solid transparent; background: transparent;
+    border-radius: {s['r_ctl'] - 1}px; }}
+QPushButton#seg:hover {{ border-color: transparent; color: {t['ink']}; }}
+QPushButton#seg:checked {{ background: {seg_thumb}; border: 1px solid {t['ctl_stroke']}; font-weight: 600; {seg_thumb_ink} }}
 QPushButton#link {{ border: 0; background: transparent; color: {t['accent']}; padding: 0; min-height: 0; }}
 
 QLineEdit, QComboBox, QSpinBox {{
