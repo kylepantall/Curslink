@@ -241,6 +241,47 @@ On macOS, SF Symbols: `display`, `laptopcomputer.and.iphone`,
 | Pairing code card | Devices | `accent-soft` card, code in 38 px mono split 3 + 3. |
 | Switch animation | On the target screen | 180 px square, colour `#3FA9FF`, 380 ms. Pop: ring grows from 10 px to 76 px radius, stroke 9 px to 1 px, with a 7 px dot fading out. Blink: 34 px ring, 6 px stroke, plus 9 px dot, flashed twice. |
 
+### 5.4 In-app graphics (spot illustrations)
+
+Files: `curslink/assets/illustrations/spot/<name>.svg`, drawn by
+`packaging/illustrations/make_spot.py`. Each is 160 × 120 on a transparent
+background in the brand palette, so one file works in light and dark.
+
+**Palette:** outline slate `#7A8BA6` (2 px, round caps), neutral fill the same
+slate at 16%, active screen sky-to-link-blue gradient (`#B6DFFF` → `#3FA9FF`)
+with a navy `#1D3A66` panel, accents `#3FA9FF`, badges 22 px circles in good
+`#2EC27E`, warning `#E5A50A`, error `#E5534B` or deep blue `#1467B8` with a
+white glyph. Dashed lines are 5 on, 5 off.
+
+**Placement:** draw at 160 × 120 in an empty state or a card; at 96 × 72 beside
+a banner or notice; at 240 × 180 on the first-run page. Centre it above a 17 px
+semibold title and one line of 13.5 px `ink2` text, 12 px apart, with the
+action button 16 px below.
+
+| Name | Shows | Where it's used | Title and line under it |
+|---|---|---|---|
+| `welcome` | Two screens joined by the pointer's arc | First run, top of the page | "Set up Curslink" |
+| `role-host` | Monitor with keyboard and mouse | First run, Host choice | "Host" |
+| `role-agent` | Laptop the pointer arrives on | First run, Agent choice | "Agent" |
+| `devices-empty` | Laptop with a dashed link to an empty device | Devices, nothing paired | "No devices yet" / "Open Curslink on your other computer to pair it." |
+| `searching` | Laptop sending out rings | Devices, nearby list while searching and finding nothing | "Looking for devices" / "Make sure the other computer is on the same network." |
+| `pairing` | Two devices with a shield between them | Devices, pairing code card | (beside the code) |
+| `paired` | Linked devices with a check | Devices, right after pairing | "Paired with Work laptop" |
+| `calibrate` | Head looking at the middle of three screens | Calibrate, before you start | "Calibrate gaze" / "Look at each screen in turn; about a minute." |
+| `calibrated` | Three ticked screens | Calibrate, done | "Calibration saved" |
+| `camera-off` | Camera crossed out | Calibrate and Status, camera won't open | "Camera unavailable" / "Another app may be using it, or Curslink needs camera permission." with Open camera settings |
+| `no-face` | Dashed head in a viewfinder | Calibrate, no face found | "No face found" / "Face the camera in good light." |
+| `not-linking` | Two screens with the link broken | Status, stopped | "Not linking" / Start linking |
+| `waiting-for-host` | Agent waiting for a faded host | Agent status, waiting | "Waiting for the host" |
+| `connection-lost` | Link with a gap and a warning | Status, host or agent dropped | "Connection lost" / "Retrying…" |
+| `update` | App tile with a down arrow | Settings, update ready; update notice | "Curslink 0.4.1 is ready" |
+| `diagnostics` | Report with a pulse line | Settings, Diagnostics after a crash; crash notice | "Curslink closed unexpectedly" / Save diagnostics file |
+| `background` | Menu bar with the Curslink menu open | First-launch notice when Curslink starts hidden; the no-tray fallback window | "Curslink is running in the background" |
+
+The platform illustrations from Kyle's asset set (`illustrations/<platform>-<theme>/`:
+screen mini map, layout canvas, head plot, pairing card) are the reference for
+the live widgets in 5.3, which draw real data instead.
+
 ---
 
 ## 6. Motion
