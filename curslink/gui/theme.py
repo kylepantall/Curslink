@@ -105,7 +105,9 @@ SIZES = {
                   small_px=12.5, h2_px=14, mac_top=0),
 }
 
-MONO = '"Cascadia Mono", "SF Mono", Menlo, "Source Code Pro", "DejaVu Sans Mono", Consolas, monospace'
+# Only fonts each platform has, so Qt doesn't spend time looking up missing ones.
+MONO = {"win32": '"Cascadia Mono", Consolas, monospace', "darwin": 'Menlo, monospace'}.get(
+    sys.platform, '"Source Code Pro", "DejaVu Sans Mono", monospace')
 
 
 def qcolor(value: str) -> QColor:
