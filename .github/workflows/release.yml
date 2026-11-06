@@ -1,0 +1,103 @@
+name: Release
+
+# Tag a commit v1.2.3 (or run this by hand with a tag) and this builds the
+# app for every platform and publishes a GitHub release with the archives
+# and their SHA256SUMS.txt.
+#
+#   git tag v0.2.0 && git push origin v0.2.0
+#   gh workflow run release.yml -f tag=v0.2.0
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to create and release, e.g. v0.1.0
+        required: true
+
+# One release at a time; a second waits rather than cancelling the first.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  # A few seconds, and everything waits for it. No tests here: the PR's CI
+  # ran them on this same code.
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check the tag and version
+        id: check
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+].*)?$ ]] || { echo "::error::Tag must look like v1.2.3, got $TAG"; exit 1; }
+          version=${TAG#v}
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          # curslink --version reports __version__, so a mismatch ships an
+          # app that says it is some other release. Fatal, not a warning.
+          code=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' curslink/__init__.py)
+          project=$(sed -n 's/^version = "\(.*\)"$/\1/p' pyproject.toml)
+          [[ "$code" == "$version" ]] || { echo "::error::curslink/__init__.py says $code, not $version"; exit 1; }
+          [[ "$project" == "$version" ]] || { echo "::error::pyproject.toml says $project, not $version"; exit 1; }
+
+  build:
+    needs: check
+    uses: ./.github/workflows/build.yml
+    with:
+      tag: ${{ inputs.tag || github.ref_name }}
+
+  release:
+    # Publishes whichever platforms built: one failing doesn't hold back
+    # the others.
+    needs: [check, build]
+    if: ${{ !cancelled() && needs.check.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: app-*
+          merge-multiple: true
+      - name: Write SHA256SUMS.txt
+        id: sums
+        run: |
+          mkdir -p dist && cd dist
+          shopt -s nullglob
+          files=(*.zip *.tar.gz)
+          echo "count=${#files[@]}" >> "$GITHUB_OUTPUT"
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::No platform built; nothing to release."
+            exit 1
+          fi
+          sha256sum -- "${files[@]}" > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          for p in windows-x64 macos-arm64 linux-x64; do
+            compgen -G "*-$p.*" > /dev/null || {
+              echo "::warning title=$p::didn't build; the release went out without it."
+              echo "- **$p** didn't build; the release went out without it." >> "$GITHUB_STEP_SUMMARY"
+            }
+          done
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          name: Curslink ${{ env.VERSION }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          prerelease: ${{ contains(env.TAG, '-') }}
+          fail_on_unmatched_files: false
+          files: |
+            dist/*.zip
+            dist/*.tar.gz
+            dist/SHA256SUMS.txt

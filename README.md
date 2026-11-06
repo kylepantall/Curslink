@@ -31,7 +31,13 @@ push the pointer off the edge of a screen into the next device, with a
 
 ## Quick start
 
-Requires Python 3.13+ on every device.
+Download the build for each device from the
+[latest release](https://github.com/kylepantall/Curslink/releases/latest)
+(`windows-x64.zip`, `macos-arm64.tar.gz` or `linux-x64.tar.gz`), unpack it,
+and run `curslink` from the unpacked folder. The builds include camera
+switching and need no Python.
+
+Or install from source with Python 3.13+:
 
 ```bash
 # on every device
@@ -62,7 +68,9 @@ Try the animations with `curslink overlay-test --effect pop`.
 
 * **macOS**: allow Accessibility and Input Monitoring for your terminal (or
   Python) in System Settings → Privacy & Security, plus Camera on the host.
-* **Linux**: X11 sessions only for now. Wayland blocks global input capture
+* **Linux**: X11 sessions only for now. Camera switching needs the EGL and
+  GLES libraries (`libegl1 libgles2` on Debian and Ubuntu), which most
+  desktops already have. Wayland blocks global input capture
   and injection; a uinput backend is planned.
 * **Windows**: input can't be injected into apps running as administrator
   unless the agent runs elevated too.
@@ -80,5 +88,12 @@ random secret, since anyone with it can send keystrokes to your agents.
 pip install -e ".[dev]"
 pytest
 ```
+
+To build the packaged app locally: `pip install ".[gaze]" pyinstaller`, then
+`pyinstaller packaging/curslink.spec` (output in `dist/curslink/`).
+
+Releasing: bump the version in `pyproject.toml` and `curslink/__init__.py`,
+then push a tag such as `v0.2.0`. The Release workflow builds every platform
+and publishes a GitHub release with the archives and `SHA256SUMS.txt`.
 
 Design notes and the roadmap live in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
