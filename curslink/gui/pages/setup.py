@@ -100,6 +100,12 @@ class SetupPage(Page):
             text = new_agent_config(device_id, name)
         path.write_text(text, encoding="utf-8")
         self.app.config_saved(restart=False)
-        self.app.window.show_page("status" if self.app.role == "host" else "devices")
+        from curslink import macperms
+
+        # macOS permissions come first (Status asks for them), then pairing.
+        if macperms.missing(self.app.role):
+            self.app.window.show_page("status")
+        else:
+            self.app.window.show_page("status" if self.app.role == "host" else "devices")
         if self.app.prefs.start_linking or was_linking:
             self.app.start_linking()
