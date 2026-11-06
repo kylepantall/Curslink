@@ -100,6 +100,24 @@ def test_autostart_macos(tmp_path):
     assert not a.is_enabled()
 
 
+def test_autostart_follows_the_executable(tmp_path, monkeypatch):
+    a = autostart.Autostart(platform="darwin", home=tmp_path)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    new = ["/Applications/Curslink.app/Contents/MacOS/curslink", "gui", "--minimized"]
+    monkeypatch.setattr(autostart, "launch_command", lambda minimized=True: new)
+    assert not a.refresh()  # off: stays off
+    assert not a.is_enabled()
+    a.set_enabled(True, ["/usr/local/lib/curslink/curslink", "gui", "--minimized"])
+    assert a.refresh()
+    assert a.command() == new
+    assert not a.refresh()  # already right
+    a.set_enabled(False)
+    old = tmp_path / "Library" / "LaunchAgents" / f"{autostart.OLD_APP_IDS[0]}.plist"
+    old.write_bytes(plistlib.dumps({"Label": autostart.OLD_APP_IDS[0], "ProgramArguments": ["x"]}))
+    assert a.refresh()  # renamed: the old agent goes, the new one runs this copy
+    assert not old.exists() and a.command() == new
+
+
 class FakeRegistry:
     HKEY_CURRENT_USER = "HKCU"
     REG_SZ = 1
@@ -253,3 +271,16 @@ def test_prefs_round_trip(tmp_path):
     assert p.start_minimized is False and p.config_path == tmp_path / "c.toml"
     path.write_text(json.dumps({"start_minimized": "yes", "bogus": 1}))
     assert Prefs.load(path).start_minimized is True  # bad values fall back
+
+
+def test_config_edit_doesnt_recreate_a_deleted_config(tmp_path):
+    path = tmp_path / "curslink.toml"
+    cfg = ConfigFile(path)  # the file was deleted while the app ran
+    cfg.set("host", "effect", "pop")
+    cfg.save()
+    assert not path.exists()
+    path.write_text(new_host_config("pc", "PC", [{"id": "main", "x": 0, "y": 0, "width": 1920, "height": 1080}]))
+    cfg = ConfigFile(path)
+    cfg.set("host", "effect", "blink")
+    cfg.save()
+    assert load_raw(path)["host"]["effect"] == "blink"

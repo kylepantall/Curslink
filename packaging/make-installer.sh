@@ -5,8 +5,7 @@
 #   packaging/make-installer.sh VERSION PLATFORM OUTDIR
 #
 # Windows: curslink-VERSION-windows-x64-setup.exe (Inno Setup, per user)
-# macOS:   curslink-VERSION-macos-arm64.pkg       (/usr/local/lib/curslink, curslink on PATH,
-#                                                  /Applications/Curslink.app opens the app)
+# macOS:   curslink-VERSION-macos-arm64.pkg       (/Applications/Curslink.app, curslink on PATH)
 # Linux:   curslink-VERSION-linux-x64.deb         (/opt/curslink, curslink on PATH,
 #                                                  a menu entry and icons)
 #
@@ -44,25 +43,41 @@ case "$platform" in
     ;;
 
   macos-*)
-    mkdir -p "$stage/root/usr/local/lib" "$stage/root/usr/local/bin" "$stage/scripts"
-    cp -R "$app" "$stage/root/usr/local/lib/curslink"
-    printf 'macos-pkg\n' > "$stage/root/usr/local/lib/curslink/install-kind"
-    ln -s ../lib/curslink/curslink "$stage/root/usr/local/bin/curslink"
-    # Curslink.app: a small launcher for Finder, Launchpad and Spotlight that
-    # opens the app from the same install (so updates replace one copy).
-    bundle="$stage/root/Applications/Curslink.app/Contents"
-    mkdir -p "$bundle/MacOS" "$bundle/Resources"
-    cp "$here/macos/launcher" "$bundle/MacOS/Curslink"
-    chmod +x "$bundle/MacOS/Curslink"
-    cp "$here/icons/curslink.icns" "$bundle/Resources/curslink.icns"
-    sed -e "s/@VERSION@/$numeric/g" "$here/macos/Info.plist" > "$bundle/Info.plist"
+    # Curslink.app holds the executable itself, signed as
+    # io.github.orimovo.curslink.app: that's the identity macOS records
+    # permissions against (see packaging/curslink.spec). `curslink` on PATH
+    # is a link to the same executable, so updates replace one copy.
+    [ -d "$root/dist/Curslink.app" ] || { echo "no app bundle in dist/Curslink.app" >&2; exit 1; }
+    mkdir -p "$stage/root/Applications" "$stage/root/usr/local/bin" "$stage/scripts"
+    bundle="$stage/root/Applications/Curslink.app"
+    cp -R "$root/dist/Curslink.app" "$bundle"
+    # In Resources, not beside the executable: Contents/MacOS is for code.
+    printf 'macos-pkg\n' > "$bundle/Contents/Resources/install-kind"
+    cp "$here/icons/curslink.icns" "$bundle/Contents/Resources/curslink.icns"
+    sed -e "s/@VERSION@/$numeric/g" "$here/macos/Info.plist" > "$bundle/Contents/Info.plist"
+    ln -s /Applications/Curslink.app/Contents/MacOS/curslink "$stage/root/usr/local/bin/curslink"
+    # MACOS_SIGN_IDENTITY (a certificate in the keychain) keeps the signature
+    # the same from one release to the next, so macOS keeps the permissions
+    # you gave through updates. Without one the bundle is signed ad hoc:
+    # permissions then need allowing again after each update.
+    identity=${MACOS_SIGN_IDENTITY:--}
+    if [ "$identity" != - ]; then
+      codesign --force --deep --sign "$identity" "$bundle"
+    fi
+    codesign --force --sign "$identity" --identifier io.github.orimovo.curslink.app "$bundle"
+    codesign --verify --deep --strict "$bundle"
     cp "$here/macos/preinstall" "$stage/scripts/preinstall"
     chmod +x "$stage/scripts/preinstall"
+    # Not relocatable: otherwise Installer puts the update wherever it finds
+    # another copy of the bundle (a build folder, say) instead of /Applications.
+    pkgbuild --analyze --root "$stage/root" "$stage/components.plist"
+    /usr/libexec/PlistBuddy -c "Set :0:BundleIsRelocatable false" "$stage/components.plist"
     pkgbuild \
       --root "$stage/root" \
+      --component-plist "$stage/components.plist" \
       --install-location / \
       --scripts "$stage/scripts" \
-      --identifier io.github.kylepantall.curslink \
+      --identifier io.github.orimovo.curslink \
       --version "$numeric" \
       "$stage/component.pkg"
     # A product archive gets the standard installer window and a title.
@@ -73,8 +88,8 @@ case "$platform" in
   <options customize="never" require-scripts="false" hostArchitectures="arm64"/>
   <domains enable_localSystem="true"/>
   <choices-outline><line choice="default"/></choices-outline>
-  <choice id="default" title="Curslink"><pkg-ref id="io.github.kylepantall.curslink"/></choice>
-  <pkg-ref id="io.github.kylepantall.curslink" version="$numeric">component.pkg</pkg-ref>
+  <choice id="default" title="Curslink"><pkg-ref id="io.github.orimovo.curslink"/></choice>
+  <pkg-ref id="io.github.orimovo.curslink" version="$numeric">component.pkg</pkg-ref>
 </installer-gui-script>
 XML
     productbuild --distribution "$stage/distribution.xml" --package-path "$stage" "$out/$name.pkg"

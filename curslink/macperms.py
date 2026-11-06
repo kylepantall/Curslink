@@ -8,8 +8,11 @@
   API to ask, so Curslink sends one mDNS packet: macOS refuses it with "No
   route to host" while access is off, and shows its prompt the first time.
 
-Both belong to the Curslink executable, which the app and its linking
-service share, so asking from the app covers the service too. The service
+All belong to Curslink.app (the packaged executable lives inside it), which
+the app and its linking service share, so asking from the app covers the
+service too. macOS keeps them only while the app's signature stays the same:
+after an update to a differently signed build, Settings can still show
+Curslink switched on while the check says no. The service
 reads them when it starts, so it restarts once they're granted.
 
 Everything is ctypes against system frameworks, so it needs nothing extra,
@@ -224,6 +227,9 @@ def _local_network_ok() -> bool:
     for addr in addresses:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
+            # Bound to the address, like zeroconf's own sockets: unbound, the
+            # send can succeed while macOS quietly drops the packet.
+            sock.bind((addr, 0))
             sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(addr))
             sock.sendto(_MDNS_PROBE, ("224.0.0.251", 5353))
             return True

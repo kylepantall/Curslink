@@ -74,3 +74,40 @@ async def test_advertise_and_browse():
         pytest.skip("mDNS answers did not arrive (multicast blocked on this machine)")
     assert "pytest-laptop" not in found
     assert found["pytest-desk"].control_port == 24991 and found["pytest-desk"].pairing_port == 24990
+
+
+def test_local_network_probe(monkeypatch):
+    import errno
+    import socket
+
+    from curslink import macperms
+    from curslink.pairing import discovery
+
+    bound, refused = [], set()
+
+    class FakeSocket:
+        def __init__(self, *_):
+            self.addr = None
+
+        def bind(self, addr):
+            self.addr = addr[0]
+            bound.append(addr)
+
+        def setsockopt(self, *_):
+            pass
+
+        def sendto(self, _data, _dest):
+            if self.addr in refused:
+                raise OSError(errno.EHOSTUNREACH, "No route to host")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(socket, "socket", FakeSocket)
+    monkeypatch.setattr(discovery, "local_addresses", lambda: ["192.168.1.5", "10.0.0.2"])
+    assert macperms._local_network_ok()
+    assert bound[0] == ("192.168.1.5", 0)  # bound, like zeroconf's sockets
+    refused.update({"192.168.1.5", "10.0.0.2"})
+    assert not macperms._local_network_ok()
+    refused.discard("10.0.0.2")  # one address getting through is enough
+    assert macperms._local_network_ok()

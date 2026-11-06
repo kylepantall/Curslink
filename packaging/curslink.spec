@@ -74,3 +74,17 @@ if sys.platform == "win32":
 
 coll = COLLECT(*exes, a.binaries, a.datas, name="curslink")
 
+# macOS: also dist/Curslink.app, a real app bundle with the executable inside
+# it, which the .pkg installs. macOS ties Accessibility, Input Monitoring,
+# Camera and Local Network to the app that runs, so the executable has to be
+# the bundle's own: a launcher script in an unsigned bundle that starts a
+# binary elsewhere gets its permissions recorded against the wrong thing.
+# packaging/make-installer.sh replaces the Info.plist and signs the bundle.
+if sys.platform == "darwin":
+    app = BUNDLE(
+        coll,
+        name="Curslink.app",
+        icon=icon,
+        bundle_identifier="io.github.orimovo.curslink.app",
+    )
+
