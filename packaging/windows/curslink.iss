@@ -2,8 +2,11 @@
 ;
 ; Installs per user into %LOCALAPPDATA%\Programs\Curslink, so neither
 ; installing nor updating needs admin rights, and adds that folder to the
-; user's PATH. `curslink update` (or the automatic update when the host or an
-; agent starts) re-runs a newer setup silently over the top.
+; user's PATH. `curslink update` (or the automatic update when the host, an
+; agent or the app starts) re-runs a newer setup silently over the top.
+;
+; The Start menu's "Curslink" opens the app (curslinkw.exe: no console
+; window), which then lives in the notification area.
 ;
 ;   iscc /DAppVersion=0.2.0 /DAppNumVersion=0.2.0 /DSourceDir=...\curslink /DOutputDir=out curslink.iss
 
@@ -34,7 +37,8 @@ ArchitecturesInstallIn64BitMode=x64compatible
 ChangesEnvironment=yes
 CloseApplications=force
 RestartApplications=no
-UninstallDisplayIcon={app}\curslink.exe
+UninstallDisplayIcon={app}\curslinkw.exe
+SetupIconFile=..\icons\curslink.ico
 UninstallDisplayName=Curslink
 Compression=lzma2/max
 SolidCompression=yes
@@ -52,8 +56,22 @@ Type: filesandordirs; Name: "{app}\_internal"
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\_internal"
 
+[Tasks]
+Name: "desktopicon"; Description: "Put a Curslink shortcut on the desktop"; Flags: unchecked
+
 [Icons]
-Name: "{autoprograms}\Curslink"; Filename: "{cmd}"; Parameters: "/k ""cd /d %USERPROFILE% && curslink --help"""; WorkingDir: "{app}"; Comment: "Open a command prompt for Curslink"
+Name: "{autoprograms}\Curslink"; Filename: "{app}\curslinkw.exe"; WorkingDir: "{app}"; Comment: "Look at a device and your mouse and keyboard follow"
+Name: "{autoprograms}\Curslink command prompt"; Filename: "{cmd}"; Parameters: "/k ""cd /d %USERPROFILE% && curslink --help"""; WorkingDir: "{app}"; IconFilename: "{app}\curslink.exe"; Comment: "Open a command prompt for Curslink"
+Name: "{autodesktop}\Curslink"; Filename: "{app}\curslinkw.exe"; WorkingDir: "{app}"; Tasks: desktopicon
+
+[Run]
+; Not after a silent install: an update restarts Curslink by itself.
+Filename: "{app}\curslinkw.exe"; Description: "Open Curslink"; Flags: nowait postinstall skipifsilent
+
+[Registry]
+; Start at sign-in is switched on from the app (curslink/autostart.py);
+; uninstalling switches it off.
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "Curslink"; Flags: uninsdeletevalue dontcreatekey
 
 [Code]
 const

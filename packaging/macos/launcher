@@ -1,0 +1,4 @@
+#!/bin/sh
+# Curslink.app's executable: opens the Curslink app from the installed copy
+# in /usr/local/lib/curslink (see packaging/make-installer.sh).
+exec /usr/local/lib/curslink/curslink gui "$@"

@@ -129,6 +129,8 @@ class AgentClient:
         self.relay = relay
         self.via = ""
         self.connected = asyncio.Event()
+        # ("connected", via) / ("disconnected", reason) / ("waiting", why), for the desktop app.
+        self.on_state: Callable[[str, str], None] = lambda state, detail: None
 
     async def _open(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         """LAN first (fast, direct); fall back to the relay when there is one."""
@@ -174,6 +176,7 @@ class AgentClient:
                 raise ProtocolError("host did not welcome us")
             log.info("connected to host via %s", self.via)
             self.connected.set()
+            self.on_state("connected", self.via)
             while True:
                 msg = await read_message(reader)
                 if msg is None:
@@ -182,6 +185,8 @@ class AgentClient:
                 if reply:
                     writer.write(reply)
         finally:
+            if self.connected.is_set():
+                self.on_state("disconnected", "")
             self.connected.clear()
             self.session.release_all()
             writer.close()
@@ -202,9 +207,11 @@ class AgentClient:
                 if str(exc) != waiting:  # say it once, not every retry
                     waiting = str(exc)
                     log.info("%s", exc)
+                    self.on_state("waiting", waiting)
                 await asyncio.sleep(2.0)
                 continue
             except (OSError, ProtocolError, RelayError, asyncio.TimeoutError) as exc:
                 log.info("host unavailable: %s", exc)
+                self.on_state("waiting", f"host unavailable: {exc}")
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, self.max_backoff_s)

@@ -6,8 +6,12 @@
 #   pip install ".[gaze]" pyinstaller
 #   pyinstaller packaging/curslink.spec
 #
-# Output: dist/curslink/, run as dist/curslink/curslink[.exe].
-from PyInstaller.utils.hooks import collect_all, collect_submodules
+# Output: dist/curslink/, run as dist/curslink/curslink[.exe]. On Windows it
+# also holds curslinkw.exe, the same program without a console window, which
+# the Start menu and start-at-sign-in use to open the app.
+import sys
+
+from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_submodules
 
 datas, binaries, hiddenimports = [], [], []
 
@@ -25,6 +29,11 @@ hiddenimports += collect_submodules("pynput")
 hiddenimports += collect_submodules("curslink")
 # zeroconf (LAN discovery) is partly compiled and imported lazily.
 hiddenimports += collect_submodules("zeroconf") + ["ifaddr"]
+# The app's icons (curslink/assets). PyInstaller's own hooks bring Qt along,
+# with its platform, image format and SVG icon plugins.
+datas += collect_data_files("curslink", includes=["assets/*.svg", "assets/*.png"])
+
+icon = SPECPATH + "/icons/" + ("curslink.icns" if sys.platform == "darwin" else "curslink.ico")
 
 a = Analysis(
     [SPECPATH + "/../curslink/__main__.py"],
@@ -44,9 +53,21 @@ exe = EXE(
     exclude_binaries=True,
     name="curslink",
     console=True,
+    icon=icon,
     # Arm or Intel, whichever the runner is.
     target_arch=None,
 )
+exes = [exe]
+if sys.platform == "win32":
+    exes.append(EXE(
+        pyz,
+        a.scripts,
+        [],
+        exclude_binaries=True,
+        name="curslinkw",
+        console=False,
+        icon=icon,
+    ))
 
-coll = COLLECT(exe, a.binaries, a.datas, name="curslink")
+coll = COLLECT(*exes, a.binaries, a.datas, name="curslink")
 

@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import logging
+import math
+import threading
 import time
 from dataclasses import replace
 
+from curslink import events
 from curslink.config import AgentConfig, HostConfig, PairingConfig
 from curslink.gaze.zones import Calibration, GazeClassifier, Target
 from curslink.net.client import AgentClient, AgentSession, NotReady
@@ -168,7 +172,19 @@ async def run_host(cfg: HostConfig) -> None:
         overlay=overlay,
         settings=cfg.router,
     )
-    server.on_disconnect = router.on_disconnect
+    def agent_connected(conn) -> None:
+        events.emit("agent", device_id=conn.device_id, name=conn.name, platform=conn.platform,
+                    connected=True, screens=conn.screens)
+
+    def agent_disconnected(device_id: str) -> None:
+        router.on_disconnect(device_id)
+        events.emit("agent", device_id=device_id, connected=False)
+
+    server.on_connect = agent_connected
+    server.on_disconnect = agent_disconnected
+    router.listeners.append(lambda e: events.emit(
+        "switch", **{"from": e.from_device, "to": e.to_device, "screen": e.screen.id, "reason": e.reason}))
+    router.on_gaze_paused = lambda paused: events.emit("gaze", paused=paused)
     if cfg.lan:
         await server.start()
     pairing = Pairing(cfg.pairing, DeviceInfo(cfg.device_id, cfg.name, "host"), store,
@@ -191,8 +207,16 @@ async def run_host(cfg: HostConfig) -> None:
         cfg.router.return_hotkey,
         cfg.router.gaze_toggle_hotkey,
     )
+    stop = asyncio.Event()
+    events.emit(
+        "running", role="host", device_id=cfg.device_id, name=cfg.name,
+        active=router.active_device, screen=router.screen.id,
+        gaze=tracker is not None, gaze_paused=router.gaze_paused,
+    )
+    if events.channel.enabled:
+        events.read_commands(loop, lambda command: host_command(router, stop, command))
     try:
-        await asyncio.Event().wait()
+        await stop.wait()
     finally:
         if tracker:
             tracker.stop()
@@ -202,6 +226,23 @@ async def run_host(cfg: HostConfig) -> None:
         if relay:
             await relay.close()
         await server.close()
+
+
+def host_command(router: Router, stop: asyncio.Event, command: str) -> None:
+    """One command from the desktop app (see :mod:`curslink.events`)."""
+    if command == "stop":
+        stop.set()
+    elif command == "home":
+        if not router.is_local:
+            router.go_home("app")
+    elif command == "gaze pause":
+        router.set_gaze_paused(True)
+    elif command == "gaze resume":
+        router.set_gaze_paused(False)
+    elif command == "gaze toggle":
+        router.set_gaze_paused(not router.gaze_paused)
+    else:
+        log.debug("unknown command %r", command)
 
 
 def start_gaze(cfg: HostConfig, router: Router, loop: asyncio.AbstractEventLoop):
@@ -251,11 +292,22 @@ async def run_agent(cfg: AgentConfig) -> None:
         cfg.device_id, cfg.name, cfg.host, cfg.port, None, session,
         resolve=lambda: resolve_host(cfg, store),
     )
+    client.on_state = lambda state, detail: events.emit("host", state=state, detail=detail)
     pairing = Pairing(cfg.pairing, DeviceInfo(cfg.device_id, cfg.name, "agent"), store)
     await pairing.start()
+    stop = asyncio.Event()
+    if events.channel.enabled:
+        events.read_commands(asyncio.get_running_loop(), lambda command: command == "stop" and stop.set())
+    events.emit("running", role="agent", device_id=cfg.device_id, name=cfg.name)
+    runner = asyncio.create_task(client.run_forever())
+    stopper = asyncio.create_task(stop.wait())
     try:
-        await client.run_forever()
+        await asyncio.wait({runner, stopper}, return_when=asyncio.FIRST_COMPLETED)
+        if runner.done():
+            runner.result()  # raise what stopped it
     finally:
+        for task in (runner, stopper):
+            task.cancel()
         await pairing.close()
         if overlay:
             overlay.close()
@@ -298,20 +350,73 @@ async def resolve_host(cfg: AgentConfig, store: PairingStore) -> ConnectTarget:
     raise NotReady(f"looking for {peer.name} on the LAN...")
 
 
+class Calibrator:
+    """Records head angles while the user looks at each screen in turn.
+
+    Used by ``curslink calibrate`` (prompts on the terminal) and the desktop
+    app's calibration page (buttons). Not thread safe: drive it from one thread.
+    """
+
+    def __init__(self, camera: int = 0, tracker_factory=None):
+        if tracker_factory is None:
+            from curslink.gaze.tracker import HeadPoseTracker as tracker_factory
+        self._lock = threading.Lock()
+        self._samples: list[tuple[float, float, float]] = []
+        self.latest: tuple[float, float] | None = None
+        self.calibration = Calibration()
+        self.tracker = tracker_factory(self._on_sample, camera=camera)
+
+    def _on_sample(self, t: float, yaw: float, pitch: float) -> None:
+        with self._lock:
+            self._samples.append((t, yaw, pitch))
+            self.latest = (yaw, pitch)
+
+    def start(self) -> None:
+        self.tracker.start()
+
+    def stop(self) -> None:
+        self.tracker.stop()
+
+    def wait_for_face(self, timeout: float = 15.0) -> bool:
+        deadline = time.monotonic() + timeout
+        while self.latest is None and time.monotonic() < deadline:
+            time.sleep(0.1)
+        return self.latest is not None
+
+    def record(self, target: Target, seconds: float = 1.5, settle: float = 0.2) -> tuple[float, float] | None:
+        """Sample for ``seconds`` while the user looks at ``target``; returns
+        its (yaw, pitch) centre, or None if too few samples came in."""
+        start = time.monotonic()
+        with self._lock:
+            self._samples.clear()
+        time.sleep(seconds)
+        with self._lock:
+            samples = [(y, p) for t, y, p in self._samples if t >= start + settle]
+        if len(samples) < 5:
+            return None
+        for yaw, pitch in samples:
+            self.calibration.add(target, yaw, pitch)
+        return self.calibration.centroids()[target]
+
+
+def close_pairs(cal: Calibration, margin_deg: float) -> list[tuple[Target, Target, float]]:
+    """Screens whose centres are too close for gaze to tell apart reliably."""
+    warn = 2 * margin_deg
+    out = []
+    for (a, pa), (b, pb) in itertools.combinations(cal.centroids().items(), 2):
+        gap = math.hypot(pa[0] - pb[0], pa[1] - pb[1])
+        if gap < warn:
+            out.append((a, b, gap))
+    return out
+
+
 def calibrate(cfg: HostConfig, seconds: float = 1.5) -> Calibration:
     """Interactive: look at each screen, press Enter, hold still."""
-    from curslink.gaze.tracker import HeadPoseTracker
-
-    latest: list[tuple[float, float, float]] = []
-    tracker = HeadPoseTracker(lambda t, y, p: latest.append((t, y, p)), camera=cfg.gaze.camera)
-    tracker.start()
-    cal = Calibration()
+    cal = Calibrator(cfg.gaze.camera)
+    cal.start()
     try:
         print("Warming up the camera...")
-        deadline = time.monotonic() + 15
-        while not latest and time.monotonic() < deadline:
-            time.sleep(0.1)
-        if not latest:
+        if not cal.wait_for_face():
             raise RuntimeError("no face detected; check the camera and lighting")
         for screen in cfg.layout.screens():
             device = cfg.layout.devices[screen.device_id]
@@ -319,17 +424,11 @@ def calibrate(cfg: HostConfig, seconds: float = 1.5) -> Calibration:
                 f"\nLook at the CENTRE of {device.name} / screen '{screen.id}' "
                 "and press Enter (keep looking for a moment)..."
             )
-            start = time.monotonic()
-            latest.clear()
-            time.sleep(seconds)
-            samples = [(y, p) for t, y, p in latest if t >= start + 0.2]
-            if len(samples) < 5:
+            centre = cal.record(Target(screen.device_id, screen.id), seconds)
+            if centre is None:
                 print("  not enough samples (is your face visible?), skipping this screen")
                 continue
-            for yaw, pitch in samples:
-                cal.add(Target(screen.device_id, screen.id), yaw, pitch)
-            cy, cp = cal.centroids()[Target(screen.device_id, screen.id)]
-            print(f"  recorded {len(samples)} samples: yaw {cy:+.1f}, pitch {cp:+.1f}")
+            print(f"  recorded: yaw {centre[0]:+.1f}, pitch {centre[1]:+.1f}")
     finally:
-        tracker.stop()
-    return cal
+        cal.stop()
+    return cal.calibration

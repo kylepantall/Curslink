@@ -78,6 +78,8 @@ class Router:
         self.overlay = overlay or NullOverlay()
         self.settings = settings or RouterSettings()
         self.listeners: list[Callable[[SwitchEvent], None]] = []
+        # Told whenever gaze switching is paused or resumed.
+        self.on_gaze_paused: Callable[[bool], None] = lambda paused: None
 
         first = next(iter(layout.screens(local_device_id)), None)
         if first is None:
@@ -156,8 +158,7 @@ class Router:
             self.go_home("hotkey")
             return
         if self._gaze_hotkey.feed(key, pressed):
-            self.gaze_paused = not self.gaze_paused
-            log.info("gaze switching %s", "paused" if self.gaze_paused else "resumed")
+            self.set_gaze_paused(not self.gaze_paused)
         if self.is_local:
             (self._local_keys.add if pressed else self._local_keys.discard)(key)
             return
@@ -168,6 +169,13 @@ class Router:
         self.transport.send(self.active_device, "key", key=key, pressed=pressed)
 
     # ------------------------------------------------------------------ gaze
+    def set_gaze_paused(self, paused: bool) -> None:
+        if paused == self.gaze_paused:
+            return
+        self.gaze_paused = paused
+        log.info("gaze switching %s", "paused" if paused else "resumed")
+        self.on_gaze_paused(paused)
+
     def on_gaze(self, target: Target) -> None:
         if not self.settings.gaze_switching or self.gaze_paused:
             return
