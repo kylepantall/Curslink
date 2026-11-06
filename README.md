@@ -68,7 +68,9 @@ Try the animations with `curslink overlay-test --effect pop`.
 
 * **macOS**: allow Accessibility and Input Monitoring for your terminal (or
   Python) in System Settings → Privacy & Security, plus Camera on the host.
-* **Linux**: X11 sessions only for now. Wayland blocks global input capture
+* **Linux**: X11 sessions only for now. Camera switching needs the EGL and
+  GLES libraries (`libegl1 libgles2` on Debian and Ubuntu), which most
+  desktops already have. Wayland blocks global input capture
   and injection; a uinput backend is planned.
 * **Windows**: input can't be injected into apps running as administrator
   unless the agent runs elevated too.

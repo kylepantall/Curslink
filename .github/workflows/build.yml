@@ -62,6 +62,11 @@ jobs:
       # The packaged app checks it can load MediaPipe, OpenCV and Tk, which
       # PyInstaller can miss: a module only imported at runtime builds fine
       # and then fails on the user's machine.
+      # MediaPipe loads the system's EGL and GLES libraries, which a Linux
+      # desktop has and GitHub's runner image doesn't.
+      - name: Install MediaPipe's system libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q libegl1 libgles2
       - name: Smoke test the build
         run: |
           exe=dist/curslink/curslink
