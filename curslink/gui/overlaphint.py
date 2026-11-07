@@ -110,11 +110,22 @@ class OverlapHint:
 
     def __init__(self):
         self.windows: dict[str, _HintWindow] = {}
+        self.edges = None  # RemoteEdges, while the host calibrates an edge
 
     def show(self, hint: dict) -> None:
         if hint.get("hide"):
             self.hide()
             return
+        # Entries with an ``edge``: the host is calibrating an edge (see curslink.gui.edgecalib).
+        edges = [e for e in hint.get("screens", []) if isinstance(e, dict) and isinstance(e.get("screen"), str)
+                 and isinstance(e.get("edge"), dict)]
+        if edges or self.edges is not None:
+            if self.edges is None:
+                from curslink.gui.edgecalib import RemoteEdges
+
+                self.edges = RemoteEdges()
+            self.edges.show(edges)
+        hint = {**hint, "screens": [e for e in hint.get("screens", []) if not (isinstance(e, dict) and "edge" in e)]}
         wanted: dict[str, list[tuple[QRectF, str, bool]]] = {}
         screens: dict[str, object] = {}
         for entry in hint.get("screens", []):
@@ -146,8 +157,10 @@ class OverlapHint:
             window.hide()
             window.deleteLater()
         self.windows = {}
+        if self.edges is not None:
+            self.edges.hide()
 
     @property
     def showing(self) -> bool:
-        return bool(self.windows)
+        return bool(self.windows) or bool(self.edges and self.edges.windows)
 

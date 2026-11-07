@@ -14,7 +14,7 @@ from curslink.inputs.base import InputSink
 from curslink.net.framing import STREAM_LIMIT, read_message
 from curslink.net.relay import RelayError, RelayTarget, agent_connect
 from curslink.net.udp import AgentUdp
-from curslink.protocol import (AGENT_FEATURES, FILES_FEATURE, FILES_OUT_FEATURE, DROP_FEATURE, PROTOCOL_VERSION, UDP_FEATURE, Message, ProtocolError,
+from curslink.protocol import (AGENT_FEATURES, FILES_FEATURE, FILES_OUT_FEATURE, DROP_FEATURE, POPUPS_FEATURE, PROTOCOL_VERSION, UDP_FEATURE, Message, ProtocolError,
                                encode)
 from curslink.security import channel_binding, hello_auth
 from curslink.tally import Tally
@@ -57,6 +57,9 @@ class AgentSession:
         # A curslink.files.dragout.AgentDragOut hands file drags leaving
         # this device over to the host (drag_out, fetch, file_result).
         self.drag_out = None
+        # A curslink.popups.AgentPopups opens and closes Isolink's floating
+        # chats the host carries here (popup_in, popup_close).
+        self.popups = None
         self.active = False
         self.keys: set[str] = set()
         self.buttons: set[str] = set()
@@ -123,6 +126,9 @@ class AgentSession:
                 # The host won't send this button's release: the drag is ours to end.
                 self.buttons.discard("left")
                 self.drag_out.start()
+        elif t in ("popup_in", "popup_close"):
+            if self.popups is not None:
+                self.popups.handle(t, dict(msg.data))
         elif t == "fetch":
             if self.drag_out is not None:
                 self.drag_out.fetch(dict(msg.data))
@@ -234,6 +240,7 @@ class AgentClient:
         self.facing_source: Callable[[], bool] | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._host_takes_facing = False
+        self.host_features: frozenset[str] = frozenset()
 
     def report_facing(self, facing: bool) -> None:
         """Tell the host straight away that our camera's view changed."""
@@ -302,6 +309,8 @@ class AgentClient:
             features = list(AGENT_FEATURES) + ([FILES_FEATURE, DROP_FEATURE] if self.session.files is not None else [])
             if self.session.drag_out is not None:
                 features.append(FILES_OUT_FEATURE)
+            if self.session.popups is not None:
+                features.append(POPUPS_FEATURE)
             if self.udp_enabled and self._direct:
                 features.append(UDP_FEATURE)
             hello = dict(
@@ -323,7 +332,9 @@ class AgentClient:
                 raise ProtocolError("host did not welcome us")
             log.info("connected to host via %s", self.via)
             features = welcome.get("features")
-            self._host_takes_facing = isinstance(features, list) and "facing" in features
+            self.host_features = (frozenset(f for f in features if isinstance(f, str))
+                                  if isinstance(features, list) else frozenset())
+            self._host_takes_facing = "facing" in self.host_features
             if self.facing_source is not None and not self._host_takes_facing:
                 log.info("the host is too old to use this device's camera for gaze confirmation")
             offer = welcome.get("udp")

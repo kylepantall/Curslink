@@ -118,7 +118,14 @@ class Router:
         # drag_out(device) asks it to, instead of letting go of its left button.
         self.can_drag_out: Callable[[str], bool] = lambda device_id: False
         self.drag_out: Callable[[str], None] = lambda device_id: None
+        # carries_drag(from, to): a drag held on device ``from`` can go on on
+        # ``to`` (an Isolink floating chat, see curslink.popups), so gaze may
+        # move input mid-drag.
+        self.carries_drag: Callable[[str, str], bool] = lambda from_device, to_device: False
         self._blocked_said = ""
+        # While the Layout page calibrates an edge: left clicks (and Esc,
+        # Backspace) on another computer come here instead of going to it.
+        self.picker: Callable[[dict], None] | None = None
         # After arriving by gaze or a hotkey (home or on another device) the pointer may land right on
         # the edge it left by; it has to leave that edge before an edge push
         # counts again, or the next pointer event bounces input straight back.
@@ -273,11 +280,23 @@ class Router:
         if self.is_local:
             return
         self._moved_at = self.clock()  # clicking counts as using the mouse
+        if self.picker is not None and button == "left" and button not in self._remote_buttons:
+            if pressed:
+                self.picker({"device": self.active_device, "screen": self.screen.id,
+                             "x": round(self.x - self.screen.x, 1), "y": round(self.y - self.screen.y, 1)})
+            return
         if pressed:
             self._remote_buttons.add(button)
         else:
             self._remote_buttons.discard(button)
         self.transport.send(self.active_device, "button", button=button, pressed=pressed)
+
+    def hold_remote_button(self, button: str) -> None:
+        """The device input is on now pressed ``button`` itself (to carry on a
+        drag that came from elsewhere): let go of it there like a button
+        pressed from here, on the release or when input moves on."""
+        if not self.is_local:
+            self._remote_buttons.add(button)
 
     def on_scroll(self, dx: float, dy: float) -> None:
         if not self.is_local:
@@ -293,6 +312,10 @@ class Router:
             self.set_gaze_paused(not self.gaze_paused)
         if self.is_local:
             (self._local_keys.add if pressed else self._local_keys.discard)(key)
+            return
+        if self.picker is not None and key in ("esc", "backspace") and key not in self._remote_keys:
+            if pressed:
+                self.picker({"key": key})
             return
         if pressed:
             self._remote_keys.add(key)
@@ -312,9 +335,10 @@ class Router:
         if not self.settings.gaze_switching or self.gaze_paused:
             return
         if self._remote_buttons and not (
-                self._remote_buttons == {"left"} and target.device_id == self.local_id
-                and self.can_drag_out(self.active_device)):
-            return  # never yank the pointer away mid-drag (unless it carries a file home)
+                self._remote_buttons == {"left"} and (
+                    (target.device_id == self.local_id and self.can_drag_out(self.active_device))
+                    or self.carries_drag(self.active_device, target.device_id))):
+            return  # never yank the pointer away mid-drag (unless it carries a file home, or a chat)
         if self.clock() - self._moved_at < GAZE_HOLD_S:
             return  # the mouse is moving: it decides (gaze is asked again shortly)
         try:

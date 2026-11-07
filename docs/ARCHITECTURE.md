@@ -181,6 +181,30 @@ agent, into the same real-drop machinery on the host. Gaze may carry a
 drag home this way too (otherwise it never moves the pointer mid-drag). Agents list `files` in `hello.features`
 (`[agent.files] enabled = false` turns it off); others never see these frames.
 
+### Carrying Isolink's floating chats
+
+Isolink, the messenger, floats chats in small windows of their own on a
+computer. Drag one over an edge, or look at another device while holding
+it, and the same chat opens there under the pointer, still held. Each
+device's Curslink is an Isolink Connect app (`curslink/isolink.py`): it says
+hello on `127.0.0.1:47231` asking for the `windows` capability, Isolink asks
+the person once and gives it a secret, and from then on Isolink tells it
+which chat is being dragged (`windows.drag`) and opens one on request
+(`windows.open`, held). Chats and the account are per-app handles, the same
+on all of the person's devices, so two devices are linked to one Isolink
+account when their `me` handles match.
+
+The host decides (`curslink/popups.py`). Agents report their Isolink's
+state (`isolink {me, windows, dragging}`, only to a host whose welcome lists
+`popups`). On a switch away from a device dragging a chat to one with the
+same `me`, the new device presses the left button where its pointer is and
+opens the chat held (`popup_in` → `popup_result` on an agent), the old one
+lets go where it is (an injected button-up on the host, the router's usual
+release on an agent), and once the chat is open on the new device it closes
+on the old one (`popup_close`). A chat dragged on an agent isn't asked about
+as a file (`drag_out`), and gaze may move input mid-drag with one held.
+`[isolink] enabled` on the host and `[agent.isolink] enabled` turn it off.
+
 ### Safety
 
 * `Ctrl+Alt+Home` always returns input to the host.
@@ -400,6 +424,7 @@ can't be injected at all.
 | `curslink/security.py` | TLS-PSK contexts, hello authentication |
 | `curslink/pairing/` | Pairing store, code-confirmed handshake, mDNS discovery, pairing listener and window |
 | `curslink/overlay.py` | Pop/blink animation helper |
+| `curslink/isolink.py`, `popups.py` | Isolink Connect client; carrying its floating chats between devices |
 | `curslink/winhelper/` | Windows input helper service: admin apps, UAC prompts, lock screen |
 | `curslink/app.py`, `cli.py` | Wiring and the `curslink` command |
 | `curslink/gui/` | The desktop app: window pages, tray, child process |

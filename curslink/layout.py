@@ -84,6 +84,64 @@ class Device:
     screens: tuple[Screen, ...]
 
 
+SIDES = ("left", "right", "top", "bottom")
+OPPOSITE = {"left": "right", "right": "left", "top": "bottom", "bottom": "top"}
+
+
+@dataclass(frozen=True)
+class EdgeEnd:
+    """One side of an edge link: a stretch of one screen's edge.
+
+    ``start``/``end`` are pixels along that edge from the screen's top
+    (left and right sides) or left (top and bottom sides); ``start`` lines up
+    with the other end's ``start``, so either may be the larger.
+    """
+
+    device_id: str
+    screen_id: str
+    side: str
+    start: float
+    end: float
+
+    def along(self, screen: "Screen", x: float, y: float) -> float:
+        return y - screen.y if self.side in ("left", "right") else x - screen.x
+
+    def covers(self, t: float) -> bool:
+        lo, hi = sorted((self.start, self.end))
+        return lo <= t <= hi
+
+    def fraction(self, t: float) -> float:
+        span = self.end - self.start
+        return 0.0 if span == 0 else (t - self.start) / span
+
+    def point(self, screen: "Screen", f: float, inset: float) -> tuple[float, float]:
+        """The point a fraction ``f`` along this stretch, ``inset`` pixels inside the screen."""
+        t = self.start + f * (self.end - self.start)
+        if self.side == "left":
+            px, py = screen.x + inset, screen.y + t
+        elif self.side == "right":
+            px, py = screen.right - 1 - inset, screen.y + t
+        elif self.side == "top":
+            px, py = screen.x + t, screen.y + inset
+        else:
+            px, py = screen.x + t, screen.bottom - 1 - inset
+        return screen.clamp(px, py)
+
+
+@dataclass(frozen=True)
+class EdgeLink:
+    """Where two screens of different devices join, set by clicking the
+    start and end of the shared stretch on each real monitor. Crossing maps
+    the stretch on one onto the other end to end, both ways, so screens of
+    different sizes and pixel densities line up the way they sit on the desk."""
+
+    a: EdgeEnd
+    b: EdgeEnd
+
+    def ends(self) -> tuple[tuple[EdgeEnd, EdgeEnd], tuple[EdgeEnd, EdgeEnd]]:
+        return ((self.a, self.b), (self.b, self.a))
+
+
 @dataclass(frozen=True)
 class Crossing:
     screen: Screen
@@ -99,10 +157,12 @@ def overlap_message(a: Screen, b: Screen) -> str:
 class Layout:
     devices: dict[str, Device] = field(default_factory=dict)
     allow_overlap: bool = False
+    links: tuple[EdgeLink, ...] = ()
 
     @classmethod
-    def from_devices(cls, devices: Iterable[Device], allow_overlap: bool = False) -> "Layout":
-        layout = cls({d.id: d for d in devices}, allow_overlap)
+    def from_devices(cls, devices: Iterable[Device], allow_overlap: bool = False,
+                     links: Iterable[EdgeLink] = ()) -> "Layout":
+        layout = cls({d.id: d for d in devices}, allow_overlap, tuple(links))
         layout.validate()
         return layout
 
@@ -135,6 +195,16 @@ class Layout:
             if (s.device_id, s.id) in seen:
                 raise ValueError(f"duplicate screen id {s.device_id}/{s.id}")
             seen.add((s.device_id, s.id))
+        for link in self.links:
+            for end in (link.a, link.b):
+                if end.side not in SIDES:
+                    raise ValueError(f"edge link side must be one of {', '.join(SIDES)}, not {end.side!r}")
+                try:
+                    self.screen(end.device_id, end.screen_id)
+                except KeyError:
+                    raise ValueError(f"edge link names an unknown screen {end.device_id}/{end.screen_id}") from None
+            if link.a.device_id == link.b.device_id:
+                raise ValueError("an edge link joins screens of two different devices")
         pairs = self.overlaps()
         if pairs and not self.allow_overlap:
             raise ValueError(overlap_message(*pairs[0]))
@@ -234,17 +304,56 @@ class Layout:
         nx, ny = x + dx, y + dy
         if self.screen_at(nx, ny, from_device) is not None:
             return None
+        linked, skip = self._linked_crossing(from_device, x, y, nx, ny, entry_inset)
+        if linked is not None:
+            return linked
         length = max(abs(dx), abs(dy))
         ux, uy = (dx / length, dy / length) if length else (0.0, 0.0)
         for step in range(gap_tolerance + 1):
             px, py = nx + ux * step, ny + uy * step
             target = self.screen_at(px, py)
-            if target is not None and target.device_id != from_device:
+            if target is not None and target.device_id != from_device and (target.device_id, target.id) not in skip:
                 ex, ey = target.clamp(px + ux * entry_inset, py + uy * entry_inset)
                 return Crossing(target, ex, ey)
             if step and (ux, uy) == (0.0, 0.0):
                 break
         return None
+
+    def _linked_crossing(
+        self, from_device: str, x: float, y: float, nx: float, ny: float, inset: float
+    ) -> tuple[Crossing | None, set[tuple[str, str]]]:
+        """Crossing by an edge link, if the motion leaves a linked side.
+
+        Also returns the screens linked along that side: off the linked
+        stretch, the plain geometry mustn't send the pointer onto them,
+        since the link says where they really join."""
+        skip: set[tuple[str, str]] = set()
+        if not self.links:
+            return None, skip
+        here = self.screen_at(x, y, from_device)
+        if here is None:
+            return None, skip
+        sides = []
+        if nx < here.x:
+            sides.append("left")
+        if nx >= here.right:
+            sides.append("right")
+        if ny < here.y:
+            sides.append("top")
+        if ny >= here.bottom:
+            sides.append("bottom")
+        for link in self.links:
+            for mine, other in link.ends():
+                if (mine.device_id, mine.screen_id) != (here.device_id, here.id) or mine.side not in sides:
+                    continue
+                skip.add((other.device_id, other.screen_id))
+                t = mine.along(here, x, y)
+                if not mine.covers(t):
+                    continue
+                target = self.screen(other.device_id, other.screen_id)
+                ex, ey = other.point(target, mine.fraction(t), inset)
+                return Crossing(target, ex, ey), skip
+        return None, skip
 
     def edge_pushes(self, device_id: str, x: float, y: float, margin: float = 0.0) -> list[tuple[int, int]]:
         """Outward directions for a pointer resting on an outer edge of a device.

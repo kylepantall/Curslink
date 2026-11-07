@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 
 import pytest
@@ -657,3 +658,79 @@ def test_dragged_screen_stays_where_it_is_let_go(desktop, qapp):
     e.setScenePos(QPointF(laptop.scenePos()))
     laptop.mouseReleaseEvent(e)
     assert laptop.layout_rect() == shown  # no jump on release
+
+
+def test_calibrating_an_edge_on_both_computers(desktop, qapp):
+    from PySide6.QtWidgets import QPushButton
+
+    from curslink.gui import service as svc
+    from curslink.gui.edgecalib import _scale
+
+    page, home, laptop = _host_with_laptop(desktop)
+    sent = []
+    desktop.service.send = sent.append
+    # Not linking: it says so instead.
+    page.calibrate_edge(home.key, "right", laptop.key)
+    assert page.calibration is None and "Start linking" in page.edge_note.text()
+    desktop.service.state = svc.RUNNING
+    buttons = [b.text() for b in page.edges_card.findChildren(QPushButton)]
+    assert "Calibrate edge…" in buttons
+    page.calibrate_edge(home.key, "right", laptop.key)
+    cal = page.calibration
+    assert cal is not None and sent[0] == "pick on"
+    # This computer's screen first: a clickable layer; the laptop waits its turn.
+    window = cal.windows[0]
+    assert window.clickable and window.state.side == "right"
+    (entry,) = json.loads(sent[-1][5:])["devices"]["laptop"]["screens"]
+    assert entry["edge"]["side"] == "left" and "first" in entry["edge"]["waiting"]
+    k = _scale(window.screen(), cal.entry(0), "right")
+    window.clicked.emit(600 * k)
+    window.clicked.emit(200 * k)
+    # a click somewhere else on the laptop's screen doesn't count; one on it does
+    cal.on_event({"event": "picked", "device": "elsewhere", "screen": "main", "x": 5, "y": 7})
+    (entry,) = json.loads(sent[-1][5:])["devices"]["laptop"]["screens"]
+    assert "waiting" not in entry["edge"] and entry["edge"]["points"] == []
+    screen_id = laptop.screen["id"]
+    cal.on_event({"event": "picked", "device": "laptop", "screen": screen_id, "x": 3, "y": 900})
+    cal.on_event({"event": "picked", "key": "backspace"})
+    cal.on_event({"event": "picked", "device": "laptop", "screen": screen_id, "x": 3, "y": 800})
+    cal.on_event({"event": "picked", "device": "laptop", "screen": screen_id, "x": 3, "y": 0})
+    assert page.calibration is None and "pick off" in sent
+    (link,) = desktop.config().links()
+    assert link["a"] == home.key and link["a_side"] == "right" and link["a_span"] == [200, 600]
+    assert link["b"] == laptop.key and link["b_side"] == "left" and link["b_span"] == [0, 800]
+    buttons = [b.text() for b in page.edges_card.findChildren(QPushButton)]
+    assert "Calibrate again…" in buttons and "Reset" in buttons
+    from curslink.config import host_config
+
+    assert len(host_config(desktop.config().raw()).layout.links) == 1
+    page.reset_edge(home.key, laptop.key)
+    assert desktop.config().links() == []
+
+
+def test_esc_cancels_edge_calibration(desktop, qapp):
+    from curslink.gui import service as svc
+
+    page, home, laptop = _host_with_laptop(desktop)
+    sent = []
+    desktop.service.send = sent.append
+    desktop.service.state = svc.RUNNING
+    page.calibrate_edge(home.key, "right", laptop.key)
+    page.calibration.windows[0].key.emit("esc")
+    assert page.calibration is None and desktop.config().links() == []
+    assert sent[-1] == 'hint {"devices":{}}'
+
+
+def test_paired_computer_draws_the_edge_layer(qapp):
+    from PySide6.QtGui import QGuiApplication
+
+    from curslink.gui.overlaphint import OverlapHint
+
+    g = QGuiApplication.primaryScreen().geometry()
+    hint = OverlapHint()
+    hint.show({"screens": [{"screen": "main", "size": [g.width() * 2, g.height() * 2],
+                            "edge": {"side": "left", "other": "Kyle's Mac", "points": [100]}}]})
+    (window,) = hint.edges.windows.values()
+    assert not window.clickable and window.state.points == [50] and not hint.windows
+    hint.show({"hide": True})
+    assert not hint.showing
