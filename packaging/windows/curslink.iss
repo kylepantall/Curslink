@@ -123,7 +123,16 @@ begin
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  Code: Integer;
 begin
+  // The input helper (Settings > Control admin apps and UAC prompts) is a
+  // service in Program Files: removing it takes admin, so ask.
+  if (CurUninstallStep = usUninstall) and
+     Exec(ExpandConstant('{sys}\sc.exe'), 'query CurslinkHelper', '', SW_HIDE, ewWaitUntilTerminated, Code) and
+     (Code = 0) then
+    ShellExec('runas', ExpandConstant('{app}\curslink.exe'), 'winhelper uninstall', '', SW_HIDE,
+              ewWaitUntilTerminated, Code);
   if CurUninstallStep = usPostUninstall then
     RemoveFromPath(ExpandConstant('{app}'));
 end;

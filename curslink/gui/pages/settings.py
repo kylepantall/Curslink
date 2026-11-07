@@ -150,6 +150,18 @@ class SettingsPage(Page):
         self.agent_camera_picker.picked.connect(self.set_agent_camera_device)
         self.agent_camera_row = self.agent_card.add_row(
             text_block("Camera", "The one that faces you when you use this screen."), self.agent_camera_picker)
+        # Windows: the input helper service (curslink.winhelper).
+        self.helper = None
+        if sys.platform == "win32":
+            self.helper = Toggle("Control admin apps and UAC prompts")
+            self.helper.clicked.connect(self.set_helper)
+            self.helper_block = text_block(
+                "Control admin apps and UAC prompts",
+                "Windows keeps other programs out of apps running as administrator, UAC prompts and the "
+                "lock screen. This installs a small Windows service that can reach them (it asks for admin "
+                "once); turning it off removes it. Anything running as you could use it to answer a UAC "
+                "prompt too, so leave it off if you don't need it.")
+            self.agent_card.add_row(self.helper_block, self.helper)
         self.add(self.agent_card)
 
         # -- updates --------------------------------------------------------------
@@ -213,6 +225,7 @@ class SettingsPage(Page):
             if not picker.loaded:
                 picker.refresh()
         self.load()
+        self.refresh_helper()
         self.load_diagnostics()
 
     def load_diagnostics(self) -> None:
@@ -384,6 +397,47 @@ class SettingsPage(Page):
         cfg.set("agent.gaze", "camera_name", name)
         cfg.save()
         self.app.config_saved()
+
+    # -- input helper (Windows) ----------------------------------------------------
+    HELPER_STATES = {
+        "running": "On: the pointer and keyboard work in admin apps, UAC prompts and the lock screen.",
+        "stopped": "Installed, but the service isn't running. Turn it off and on again to repair it.",
+    }
+
+    def refresh_helper(self, note: str = "") -> None:
+        if self.helper is None:
+            return
+        from curslink.gui.common import in_background
+        from curslink.winhelper.install import status
+
+        def show(state: str) -> None:
+            self.helper.setChecked(state != "missing")
+            self.helper.setEnabled(True)
+            detail = note or self.HELPER_STATES.get(state, "")
+            self.helper_block.detail_label.setText(detail or self.helper_detail)
+
+        if not hasattr(self, "helper_detail"):
+            self.helper_detail = self.helper_block.detail_label.text()
+        in_background(status, show, lambda exc: show("missing"))
+
+    def set_helper(self, on: bool) -> None:
+        from curslink.gui.common import in_background
+        from curslink.winhelper.install import ERROR_CANCELLED, run_elevated
+
+        self.helper.setEnabled(False)
+        self.helper_block.detail_label.setText("Waiting for the admin prompt…")
+        verb = "on" if on else "off"
+
+        def done(code: int) -> None:
+            if code == 0:
+                self.refresh_helper()
+            elif code == ERROR_CANCELLED:
+                self.refresh_helper("Nothing changed: the admin prompt was declined.")
+            else:
+                self.refresh_helper(f"Couldn't turn it {verb} (error {code}). The logs have the details.")
+
+        in_background(lambda: run_elevated("install" if on else "uninstall"), done,
+                      lambda exc: self.refresh_helper(f"Couldn't turn it {verb}: {exc}"))
 
     def set_login(self, on: bool) -> None:
         try:
