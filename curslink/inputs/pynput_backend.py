@@ -722,14 +722,98 @@ def _win_move(x: int, y: int) -> bool:
     # which read the same numbers as physical pixels: the pointer was boxed
     # into the top-left part of a scaled screen and moved too slowly.
     try:
-        user32 = ctypes.windll.user32
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
         vx, vy = user32.GetSystemMetrics(76), user32.GetSystemMetrics(77)
         vw, vh = user32.GetSystemMetrics(78), user32.GetSystemMetrics(79)
         nx, ny = win_absolute(x, y, vx, vy, vw, vh)
         inp = _INPUT(type=0)
         inp.mi = _MOUSEINPUT(nx, ny, 0, _MOUSEEVENTF_MOVE | _MOUSEEVENTF_ABSOLUTE | _MOUSEEVENTF_VIRTUALDESK, 0, 0)
         if user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT)) == 1:
+            _win_failures.ok()
             return True
+        error = ctypes.get_last_error()
+        # Windows refuses injected input while the app in front runs as
+        # administrator and we don't (UIPI), and on the lock and UAC screens.
+        # SetCursorPos still works in some of those cases.
+        moved = bool(user32.SetCursorPos(int(x), int(y)))
+        _win_failures.failed(error, moved)
+        return True
     except Exception:
         log.debug("SendInput move failed; falling back to SetCursorPos", exc_info=True)
     return False
+
+
+class _WinInjectFailures:
+    """Logs (at most every few seconds) when Windows won't take the moves
+    we inject, with what's in front, since that's nearly always why."""
+
+    EVERY_S = 5.0
+
+    def __init__(self, clock=time.monotonic):
+        self.clock = clock
+        self.count = 0
+        self.logged_at: float | None = None
+
+    def ok(self) -> None:
+        if self.count:
+            log.info("Windows takes injected input again (%d moves were refused)", self.count)
+            self.count = 0
+            self.logged_at = None
+
+    def failed(self, error: int, moved: bool) -> None:
+        self.count += 1
+        now = self.clock()
+        if self.logged_at is not None and now - self.logged_at < self.EVERY_S:
+            return
+        self.logged_at = now
+        log.warning(
+            "Windows refused an injected pointer move (error %d, %d so far; SetCursorPos %s). In front: %s. "
+            "If that app runs as administrator, Windows blocks input from Curslink until it's closed, "
+            "or until Curslink runs as administrator too.",
+            error, self.count, "worked" if moved else "failed too", _win_foreground(),
+        )
+
+
+_win_failures = _WinInjectFailures()
+
+
+def _win_foreground() -> str:
+    """The app in front: its program name, whether it's not responding and
+    whether it runs as administrator (best effort)."""
+    try:
+        from ctypes import wintypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+        user32.GetForegroundWindow.restype = wintypes.HWND
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return "nothing (a lock, UAC or secure screen?)"
+        hung = bool(user32.IsHungAppWindow(hwnd))
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        process = kernel32.OpenProcess(0x1000, False, pid.value)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not process:
+            return f"pid {pid.value}{', not responding' if hung else ''} (can't look inside it)"
+        try:
+            buf = ctypes.create_unicode_buffer(1024)
+            size = wintypes.DWORD(len(buf))
+            name = buf.value.rsplit("\\", 1)[-1] if kernel32.QueryFullProcessImageNameW(
+                process, 0, buf, ctypes.byref(size)) else f"pid {pid.value}"
+            elevated = None
+            token = wintypes.HANDLE()
+            if advapi32.OpenProcessToken(process, 0x0008, ctypes.byref(token)):  # TOKEN_QUERY
+                value, got = wintypes.DWORD(), wintypes.DWORD()
+                if advapi32.GetTokenInformation(token, 20, ctypes.byref(value), 4, ctypes.byref(got)):
+                    elevated = bool(value.value)  # TokenElevation
+                kernel32.CloseHandle(token)
+        finally:
+            kernel32.CloseHandle(process)
+        notes = [n for n, on in (("not responding", hung), ("runs as administrator", elevated)) if on]
+        if elevated is None:
+            notes.append("couldn't tell if it runs as administrator")
+        return name + (f" ({', '.join(notes)})" if notes else "")
+    except Exception:
+        return "unknown"
