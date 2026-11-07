@@ -14,6 +14,7 @@ import sys
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QBrush, QColor, QFont, QFontMetricsF, QGuiApplication, QPainter, QPen
 from PySide6.QtWidgets import (
+    QBoxLayout,
     QGraphicsItem,
     QLabel,
     QGraphicsRectItem,
@@ -289,7 +290,10 @@ class LayoutPage(Page):
         self.add(self.canvas, 1)
 
         bottom = QWidget()
-        grid = QGridLayout(bottom)
+        # Side by side when there's room, stacked in a narrow window: side by
+        # side the two cards need ~650 px, more than a smaller Mac window
+        # leaves, and the page ran off its right edge.
+        grid = self.bottom_row = QBoxLayout(QBoxLayout.Direction.LeftToRight, bottom)
         grid.setContentsMargins(0, 0, 0, 0)
         grid.setSpacing(16)
 
@@ -314,17 +318,26 @@ class LayoutPage(Page):
         self.inspector.body.addWidget(self.reported)
         self.inspector.body.addWidget(label("Drag screens on the canvas; they snap to each other's edges.", "small",
                                             wrap=True))
-        grid.addWidget(self.inspector, 0, 0)
+        grid.addWidget(self.inspector, 3)
 
         self.edges_card = Card("Edges that connect devices")
         self.edges_box = QVBoxLayout()
         self.edges_card.body.addLayout(self.edges_box)
         self.edges_card.body.addStretch(1)
-        grid.addWidget(self.edges_card, 0, 1)
+        grid.addWidget(self.edges_card, 2)
         self.add(bottom)
 
         app.config_changed.connect(self.load_if_clean)
         self.load()
+
+    STACK_BELOW = 760  # page width (px) under which the bottom cards stack
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        narrow = self.viewport().width() < self.STACK_BELOW
+        want = QBoxLayout.Direction.TopToBottom if narrow else QBoxLayout.Direction.LeftToRight
+        if self.bottom_row.direction() != want:
+            self.bottom_row.setDirection(want)
 
     # -- loading and saving -----------------------------------------------------
     def theme_changed(self) -> None:

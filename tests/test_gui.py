@@ -525,25 +525,35 @@ def test_no_widget_opens_as_a_stray_window(desktop, qapp):
 
 
 def test_layout_page_fits_the_window_with_an_overlap(desktop, qapp, monkeypatch):
-    # The page wanted ~800 px (four wide number fields beside the Edges card,
-    # and an "in front of" line that didn't wrap), so on a normal Mac window
-    # it ran off the right edge.
+    # Side by side, the bottom cards (four number fields and the Edges card,
+    # whose "in front of" line didn't wrap) wanted ~800 px, so in a smaller
+    # Mac window the page ran off its right edge. Narrow, they now stack.
     from curslink.gui import theme
 
     monkeypatch.setenv("CURSLINK_LOOK", "mac")
     theme.manager().set_mode("dark")
-    page, home, laptop = _host_with_laptop(desktop)
-    hx, hy, hw, hh = home.layout_rect()
-    page.scene.clearSelection()
-    laptop.setSelected(True)
-    page.spins["x"].setValue(hx + hw - 200)
-    page.spins["y"].setValue(hy + hh - 200)
-    page.overlap_toggle.setChecked(True)
-    page.bring_to_front(laptop)
-    page.overlaps_changed()
-    page.refresh_edges()
-    qapp.processEvents()
-    wanted = page.widget().minimumSizeHint().width()
-    theme.manager().set_mode("system")
-    # Kyle's Mac window leaves about 640 px for the page.
-    assert wanted <= 640
+    try:
+        page, home, laptop = _host_with_laptop(desktop)
+        hx, hy, hw, hh = home.layout_rect()
+        page.scene.clearSelection()
+        laptop.setSelected(True)
+        page.spins["x"].setValue(hx + hw - 200)
+        page.spins["y"].setValue(hy + hh - 200)
+        page.overlap_toggle.setChecked(True)
+        page.bring_to_front(laptop)
+        page.overlaps_changed()
+        page.refresh_edges()
+        w = desktop.window
+        w.show_page("layout")
+        for width in (900, 1400):  # Kyle's window, then a wide one
+            w.resize(width, 760)
+            w.show()
+            qapp.processEvents()
+            qapp.processEvents()
+            assert page.widget().minimumSizeHint().width() <= page.viewport().width(), width
+        assert page.bottom_row.direction() == page.bottom_row.Direction.LeftToRight
+        w.resize(900, 760)
+        qapp.processEvents()
+        assert page.bottom_row.direction() == page.bottom_row.Direction.TopToBottom
+    finally:
+        theme.manager().set_mode("system")
