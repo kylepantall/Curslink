@@ -51,9 +51,11 @@ class Curslink(QObject):
         self.service.output.connect(lambda line: self.status.add_log("output", line))
         self.service.state_changed.connect(self._on_service_state)
         self.service.event.connect(self._on_look)
+        self.service.event.connect(self._on_hint)
         self.calibrating = False  # host: the service gave the camera to calibration
         self.service.event.connect(self._on_calibrating)
         self._look = None
+        self._hint = None
         self.release: update.Release | None = None
         self.quitting = False
         self.window = None
@@ -155,6 +157,18 @@ class Curslink(QObject):
             self._look = RemoteLookHere()
         self._look.apply(event)
 
+    def _on_hint(self, event: dict) -> None:
+        """Agent: the host's Layout page marks where its screens overlap ours."""
+        if event.get("event") != "hint":
+            return
+        if self._hint is None:
+            if event.get("hide"):
+                return
+            from curslink.gui.overlaphint import OverlapHint
+
+            self._hint = OverlapHint()
+        self._hint.show(event)
+
     def _on_calibrating(self, event: dict) -> None:
         if event.get("event") == "calibrating":
             self.calibrating = bool(event.get("on"))
@@ -166,6 +180,8 @@ class Curslink(QObject):
             self.status.stopped()
             if self._look is not None:
                 self._look.hide()
+            if self._hint is not None:
+                self._hint.hide()
         self.service_changed.emit(state)
 
     # -- updates --------------------------------------------------------------

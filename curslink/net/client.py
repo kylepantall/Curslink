@@ -38,6 +38,8 @@ class AgentSession:
         # The host's calibration asks this device to show "Look here" on one
         # of its screens (or to hide it). See curslink.gui.overlay.
         self.on_look: Callable[[dict], None] = lambda data: None
+        # The host's Layout page marking where screens overlap on ours.
+        self.on_hint: Callable[[dict], None] = lambda data: None
         # A file drag from the host: {"card": {...}} shows the placeholder
         # that follows the pointer, {"hide": True} takes it down.
         self.on_drag: Callable[[dict], None] = lambda data: None
@@ -76,6 +78,8 @@ class AgentSession:
             self.release_all()
         elif t == "look":
             self.on_look(dict(msg.data))
+        elif t == "hint":
+            self.on_hint(dict(msg.data))
         elif t == "drag":
             self.on_drag(dict(msg.data))
         elif t.startswith("file_"):

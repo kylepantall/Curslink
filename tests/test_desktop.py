@@ -481,3 +481,42 @@ def test_old_sign_in_entries_still_open_the_app(monkeypatch):
     monkeypatch.setattr(gui_app, "main", lambda argv: seen.setdefault("argv", argv) and 0)
     cli.main(["--minimized"])
     assert "--minimized" in seen["argv"]
+
+
+def test_hint_command_marks_overlaps_on_the_agents_listed():
+    from curslink.app import hint_command
+
+    class Server:
+        def __init__(self):
+            self.connections = {"lap": object(), "old": object(), "tab": object()}
+            self.sent = []
+
+        def supports(self, device_id, feature):
+            return device_id != "old" and feature == "hint"
+
+        def send(self, device_id, t, **data):
+            self.sent.append((device_id, t, data))
+
+    server = Server()
+    screens = [{"screen": "main", "size": [1920, 1080], "regions": [{"rect": [0, 0, 100, 100], "label": "x"}]}]
+    hint_command(server, '{"devices": {"lap": {"screens": %s}}}' % __import__("json").dumps(screens))
+    assert ("lap", "hint", {"screens": screens}) in server.sent
+    assert ("tab", "hint", {"hide": True}) in server.sent
+    assert not [s for s in server.sent if s[0] == "old"]
+    server.sent.clear()
+    hint_command(server, "not json")
+    assert server.sent == []
+
+
+def test_hint_frames_validate():
+    import json
+
+    import pytest
+
+    from curslink.protocol import AGENT_FEATURES, ProtocolError, decode, encode
+
+    assert "hint" in AGENT_FEATURES
+    assert decode(encode("hint", hide=True)).t == "hint"
+    assert decode(encode("hint", screens=[])).t == "hint"
+    with pytest.raises(ProtocolError):
+        decode(json.dumps({"t": "hint", "screens": "main"}).encode() + b"\n")
