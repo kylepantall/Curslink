@@ -281,3 +281,50 @@ def test_gaze_back_to_a_device_left_by_its_edge_doesnt_bounce_straight_home(part
     router.on_motion(40, 0)                     # off the edge...
     router.on_motion(-80, 0)                    # ...and a real push back goes home
     assert router.is_local
+
+
+def test_cursor_into_the_corner_a_laptop_covers_switches_to_it():
+    from curslink.layout import Device, Layout, Screen
+
+    lay = Layout.from_devices(
+        [
+            Device("pc", "PC", (Screen("main", "pc", 0, 0, 1000, 600),)),
+            Device("lap", "Laptop", (Screen("main", "lap", 800, 400, 500, 300, z=1),)),
+        ],
+        allow_overlap=True,
+    )
+    capture, sink, transport = FakeCapture(), FakeSink(), FakeTransport({"lap"})
+    router = Router(lay, "pc", capture, sink, transport, FakeOverlay())
+    router.on_pointer(700, 300)
+    router.on_pointer(850, 450)  # the real cursor slid under the laptop
+    assert router.active_device == "lap" and capture.grabbed
+    (_, _, data), = transport.of_type("enter")
+    assert (data["x"], data["y"]) == (50, 50)
+    # coming home lands where the pointer last was on the visible monitor
+    router.go_home("hotkey")
+    assert router.is_local and (router.x, router.y) == (700, 300)
+
+
+def test_remote_pointer_cant_rest_in_a_blocked_area():
+    from curslink.layout import Device, Layout, Screen
+
+    # This time the laptop is the one behind (its top-left corner hidden by the PC).
+    lay = Layout.from_devices(
+        [
+            Device("pc", "PC", (Screen("main", "pc", 0, 0, 1000, 600, z=1),)),
+            Device("lap", "Laptop", (Screen("main", "lap", 800, 400, 500, 300),)),
+        ],
+        allow_overlap=True,
+    )
+    transport = FakeTransport({"lap"})
+    router = Router(lay, "pc", FakeCapture(), FakeSink(), transport, FakeOverlay())
+    now = [10.0]
+    router.clock = lambda: now[0]
+    router.switch_to(lay.screen("lap", "main"), 1100, 650, "gaze")
+    # Right after arriving, it may not bounce back to the PC, and it can't
+    # rest in the hidden corner either: it stays put.
+    router.on_motion(-250, -200)
+    assert router.active_device == "lap" and (router.x, router.y) == (1100, 650)
+    now[0] += 5
+    router.on_motion(-250, -200)  # into the hidden corner: crosses to the PC in front
+    assert router.is_local

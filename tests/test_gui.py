@@ -387,3 +387,64 @@ def test_menu_bar_item_with_no_height_counts_as_placed(desktop, monkeypatch):
     assert desktop.tray_placed()
     monkeypatch.setattr(tray, "geometry", lambda: QRect())
     assert not desktop.tray_placed()
+
+
+def _host_with_laptop(desktop):
+    desktop.window.pages["setup"].create()
+    cfg = desktop.config()
+    cfg.add_device("laptop", "Work laptop")
+    cfg.save()
+    desktop.config_saved(restart=False)
+    page = desktop.window.pages["layout"]
+    page.load()
+    laptop = next(i for i in page.items if i.device_id == "laptop")
+    home = next(i for i in page.items if i.device_id != "laptop")
+    return page, home, laptop
+
+
+def test_layout_page_wont_save_overlapping_screens(desktop, qapp):
+    page, home, laptop = _host_with_laptop(desktop)
+    hx, hy, hw, hh = home.layout_rect()
+    page.scene.clearSelection()
+    laptop.setSelected(True)
+    page.spins["x"].setValue(hx + hw - 200)
+    page.spins["y"].setValue(hy + hh - 200)
+    assert page.dirty and page.blocking_overlap()
+    assert not page.save_button.isEnabled()
+    assert "overlaps" in page.overlap_note.text() and not page.overlap_row.isHidden()
+    page.save()  # refused even if called directly
+    saved = next(d for d in desktop.config().devices() if d["id"] == "laptop")["screens"][0]
+    assert saved["x"] == hx + hw  # still where add_device put it
+    # dropping it there pushes it back out to touch instead
+    from curslink.gui.pages.layout import push_apart
+
+    others = [home.layout_rect()]
+    x, y = push_apart(laptop.layout_rect(), others)
+    from curslink.gui.pages.layout import overlap_of
+
+    assert overlap_of((x, y, *laptop.layout_rect()[2:]), others[0]) is None
+
+
+def test_layout_page_saves_overlap_when_allowed(desktop, qapp):
+    from curslink.config import host_config
+
+    page, home, laptop = _host_with_laptop(desktop)
+    hx, hy, hw, hh = home.layout_rect()
+    page.scene.clearSelection()
+    laptop.setSelected(True)
+    page.spins["x"].setValue(hx + hw - 200)
+    page.spins["y"].setValue(hy + hh - 200)
+    page.overlap_toggle.setChecked(True)
+    page.bring_to_front(laptop)
+    page.overlaps_changed()
+    assert page.save_button.isEnabled()
+    assert "in front of" in page.overlap_note.text()
+    page.save()
+    raw = desktop.config().raw()
+    assert raw["layout"]["allow_overlap"] is True
+    layout = host_config(raw).layout
+    (behind, front), = layout.overlaps()
+    assert front.device_id == "laptop"
+    # turning it off again with the screens still overlapping can't be saved
+    page.overlap_toggle.setChecked(False)
+    assert not page.save_button.isEnabled()

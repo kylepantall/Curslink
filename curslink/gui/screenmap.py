@@ -36,12 +36,15 @@ def screens_from_config(cfg) -> list[MapScreen]:
     except Exception:
         return []
     out = []
+    order = []
     for d in devices:
         for i, s in enumerate(d.get("screens", [])):
+            order.append(int(s.get("z", 0)) if isinstance(s.get("z", 0), int) else 0)
             out.append(MapScreen(d.get("id"), d.get("name", d.get("id")), str(s.get("id", f"screen{i}")),
                                  float(s.get("x", 0)), float(s.get("y", 0)), float(s.get("width", 1920)),
                                  float(s.get("height", 1080)), d.get("id") == me))
-    return out
+    # Back to front, so a screen standing in front of another is drawn over it.
+    return [m for _, _, m in sorted(zip(order, range(len(out)), out), key=lambda t: (t[0], t[1]))]
 
 
 def _pointer_path(x: float, y: float, s: float = 1.0) -> QPainterPath:

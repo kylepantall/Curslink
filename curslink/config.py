@@ -231,6 +231,7 @@ def parse_layout(raw: dict[str, Any]) -> Layout:
                     height=_int(s, "height"),
                     os_x=_int(s, "os_x", 0),
                     os_y=_int(s, "os_y", 0),
+                    z=_int(s, "z", 0),
                 )
             )
         if not screens:
@@ -238,8 +239,11 @@ def parse_layout(raw: dict[str, Any]) -> Layout:
         devices.append(Device(id=d["id"], name=d.get("name", d["id"]), screens=tuple(screens)))
     if not devices:
         raise ConfigError("no [[devices]] defined")
+    allow_overlap = raw.get("layout", {}).get("allow_overlap", False)
+    if not isinstance(allow_overlap, bool):
+        raise ConfigError("[layout].allow_overlap must be true or false")
     try:
-        return Layout.from_devices(devices)
+        return Layout.from_devices(devices, allow_overlap)
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
 

@@ -149,8 +149,17 @@ class Router:
         screen = self.layout.screen_at_os(self.local_id, ox, oy)
         if screen is None:
             return
+        x, y = screen.from_os(ox, oy)
+        if self.settings.edge_switching:
+            front = self.layout.covered_by(self.local_id, x, y)
+            if front is not None:
+                # The real cursor went into a part of this screen that another
+                # device's screen stands in front of: that's where it is now.
+                if self.available(front.device_id) and self._edge_armed:
+                    self.switch_to(front, *front.clamp(x, y), "edge")
+                return
         self._set_screen(screen)
-        self.x, self.y = screen.from_os(ox, oy)
+        self.x, self.y = x, y
         if not self.settings.edge_switching:
             return
         pushes = self.layout.edge_pushes(self.local_id, self.x, self.y)
@@ -184,6 +193,11 @@ class Router:
                 return
         if here is None:
             here, nx, ny = self.layout.clamp_to_device(self.active_device, nx, ny)
+            if self.layout.screen_at(nx, ny, self.active_device) is None:
+                # Blocked out behind another screen: stay put.
+                if not self._edge_armed:
+                    self._edge_armed = not self.layout.edge_pushes(self.active_device, self.x, self.y, ARM_PX)
+                return
         self._set_screen(here)
         self.x, self.y = nx, ny
         if not self._edge_armed:

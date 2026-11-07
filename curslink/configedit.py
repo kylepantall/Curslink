@@ -65,7 +65,7 @@ def _screens_aot(screens: list[dict[str, Any]]) -> AoT:
     aot = tomlkit.aot()
     for s in screens:
         t = tomlkit.table()
-        for key in ("id", "x", "y", "width", "height", "os_x", "os_y"):
+        for key in ("id", "x", "y", "width", "height", "os_x", "os_y", "z"):
             if key in s:
                 t[key] = s[key]
         aot.append(t)
@@ -214,6 +214,21 @@ class ConfigFile:
         for i, s in enumerate(device.get("screens", [])):
             if str(s.get("id", f"screen{i}")) == screen_id:
                 s["width"], s["height"] = int(width), int(height)
+                return
+        raise KeyError(f"{device_id}/{screen_id}")
+
+    def set_screen_z(self, device_id: str, screen_id: str, z: int | None) -> None:
+        """Stacking order where screens overlap; None drops it (the default, 0)."""
+        device = self._device(device_id)
+        if device is None:
+            raise KeyError(device_id)
+        for i, s in enumerate(device.get("screens", [])):
+            if str(s.get("id", f"screen{i}")) == screen_id:
+                if z is None:
+                    if "z" in s:
+                        del s["z"]
+                else:
+                    s["z"] = int(z)
                 return
         raise KeyError(f"{device_id}/{screen_id}")
 

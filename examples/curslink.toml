@@ -75,6 +75,13 @@ confirm_with_agents = true   # agents running their own camera ([agent.gaze])
 # like your real desk. x/y/width/height are in pixels in that shared space.
 # os_x/os_y are where that monitor sits in its OWN computer's display
 # settings (0, 0 for the primary monitor).
+#
+# Screens may not overlap, unless one really stands in front of another (a
+# laptop covering a monitor's corner). Then set allow_overlap and give the
+# screen in front a higher `z`; the part of the screen behind it is blocked
+# out, and pushing the pointer into it moves it to the screen in front.
+# [layout]
+# allow_overlap = false
 
 [[devices]]
 id = "desktop"
