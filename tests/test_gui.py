@@ -455,11 +455,9 @@ def test_overlap_shows_on_the_real_monitor_while_editing(desktop, qapp):
     from PySide6.QtGui import QGuiApplication
 
     page, home, laptop = _host_with_laptop(desktop)
-    desktop.window.show()
-    desktop.window.show_page("layout")
-    qapp.processEvents()
-    laptop = next(i for i in page.items if i.device_id == "laptop")
-    home = next(i for i in page.items if i.device_id != "laptop")
+    # As if the Layout page were on screen, without showing the main window
+    # (on macOS that reaches for a native window the offscreen platform lacks).
+    page.isVisible = lambda: True
     sent = []
     desktop.service.send = sent.append
     hx, hy, hw, hh = home.layout_rect()
