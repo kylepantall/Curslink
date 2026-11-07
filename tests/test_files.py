@@ -721,7 +721,7 @@ async def test_agent_says_when_its_not_a_file():
     old, dragout.PROBE_WAIT_S = dragout.PROBE_WAIT_S, 0.05
     try:
         out = AgentDragOut(lambda line: None, lambda t, **d: sent.append((t, d)), nothing, "PC",
-                           nudge=lambda release: None, explorer=None)
+                           nudge=lambda release: None, explorer=lambda: [])
         out.start()
         await asyncio.sleep(0.6)
     finally:
