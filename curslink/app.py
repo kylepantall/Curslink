@@ -420,8 +420,19 @@ def start_file_drags(cfg: HostConfig, router: Router, server: HostServer, overla
     # macOS says what's being dragged on its drag pasteboard; elsewhere the
     # overlay helper's drop targets find out.
     drag_source = macdrag.drag_pasteboard if macdrag.available() else None
+    from curslink.files.native import clean_old
+
+    # A real drag of files arriving from an agent needs the real button-up
+    # held back until they're all here, which the Mac's event tap can do.
+    native_press = None
+    if sys.platform == "darwin":
+        from curslink.inputs.pynput_backend import press_left_here as native_press
     handoff = DragHandoff(router, server, overlay.command, capture.inject_drag_end, cfg.name, emit=events.emit,
-                          drag_source=drag_source)
+                          drag_source=drag_source, native_press=native_press,
+                          release_held=getattr(capture, "release_held", lambda: None))
+    if hasattr(capture, "hold_left_up"):
+        capture.hold_left_up = handoff.native.holding
+    clean_old()
     log.info("file drags: %s", "read from the drag pasteboard" if drag_source else "found by drop targets at the edges")
 
     def on_line(line: str) -> None:  # the helper's reader thread
@@ -432,6 +443,8 @@ def start_file_drags(cfg: HostConfig, router: Router, server: HostServer, overla
 
     overlay.on_line = on_line
     server.on_file_result = handoff.on_result
+    server.on_drag_out = handoff.on_drag_out
+    server.on_files = handoff.on_files
     return handoff
 
 
@@ -762,8 +775,7 @@ async def run_agent(cfg: AgentConfig) -> None:
         overlay.show if overlay and cfg.animations else (lambda effect, x, y: None),
         smoother=smoother,
     )
-    if cfg.files.enabled and overlay is not None:
-        receive_files(cfg, session, overlay)
+    native = receive_files(cfg, session, overlay) if cfg.files.enabled and overlay is not None else None
     store = PairingStore(cfg.pairing.store)
     client = AgentClient(
         cfg.device_id, cfg.name, cfg.host, cfg.port, None, session,
@@ -771,6 +783,8 @@ async def run_agent(cfg: AgentConfig) -> None:
         udp=cfg.udp,
     )
     session.on_look = lambda data: events.emit("look", **data)
+    if native is not None:
+        send_files_home(cfg, session, client, overlay, native, asyncio.get_running_loop())
     session.on_hint = lambda data: events.emit("hint", **data)
 
     def on_state(state: str, detail: str) -> None:
@@ -809,48 +823,67 @@ async def run_agent(cfg: AgentConfig) -> None:
             overlay.close()
 
 
-def receive_files(cfg: AgentConfig, session: AgentSession, overlay) -> None:
+def receive_files(cfg: AgentConfig, session: AgentSession, overlay):
     """Files dragged here from the host: the placeholder while they're
     carried, then a popup while they arrive (see curslink.files)."""
     import json
 
+    from curslink.files.popups import ReceivePopups
     from curslink.files.transfer import FileReceiver
 
-    toasts: dict[str, dict] = {}
-    shown = {"at": 0.0}
+    from curslink.files.native import NativeDrop, clean_old
+
+    sink = session.sink
+    popups = ReceivePopups(overlay.command, events.emit)
+    receiver = FileReceiver(cfg.files.folder, popups)
+
+    def cancel_drag() -> None:  # Escape ends a drag without dropping; then let go
+        sink.key("esc", True)
+        sink.key("esc", False)
+        time.sleep(0.05)
+        sink.button("left", False)
+
+    # A real drag needs the injected button-down and moves to drive it, which
+    # Windows' drag and drop follows; elsewhere the files go to Downloads.
+    native = NativeDrop(overlay.command, receiver, popups,
+                        press=(lambda: sink.button("left", True)) if sys.platform == "win32" else None,
+                        release=lambda: sink.button("left", False), cancel=cancel_drag)
+    clean_old()
 
     def on_drag(data: dict) -> None:
-        if data.get("hide") or not isinstance(data.get("card"), dict):
-            overlay.command("card hide")
-        else:
-            overlay.command("card " + json.dumps(data["card"], separators=(",", ":")))
-
-    def on_event(kind: str, info: dict) -> None:
-        tid = info.get("id", "")
-        if kind == "start":
-            overlay.command("card hide")
-            toasts[tid] = {**info, "state": "receiving", "received": 0}
-        elif kind == "progress":
-            toast = toasts.get(tid)
-            if toast is None:
-                return
-            toast["received"] = info.get("received", 0)
-            now = time.monotonic()
-            if now - shown["at"] < 0.1:
-                return  # ten updates a second is plenty
-            shown["at"] = now
-        else:
-            toast = toasts.pop(tid, {})
-            toasts_info = {**toast, **info, "state": kind}
-            overlay.command("toast " + json.dumps(toasts_info, separators=(",", ":")))
-            events.emit("file", state=kind, **{k: v for k, v in info.items() if k != "card"})
-            return
-        overlay.command("toast " + json.dumps(toasts[tid], separators=(",", ":")))
-        if kind == "start":
-            events.emit("file", state="receiving", **{k: v for k, v in info.items() if k != "card"})
+        tid, info = data.get("id"), data.get("card")
+        if data.get("drop") and isinstance(tid, str):
+            native.let_go(tid, inject=True)
+        elif data.get("hide"):
+            native.cancel(tid if isinstance(tid, str) else None)
+            if not isinstance(tid, str):
+                overlay.command("card hide")
+        elif isinstance(info, dict) and isinstance(tid, str):
+            native.begin(tid, info)  # its bytes are on their way already
+        elif isinstance(info, dict):  # an older host: sent when it's dropped
+            overlay.command("card " + json.dumps(info, separators=(",", ":")))
 
     session.on_drag = on_drag
-    session.files = FileReceiver(cfg.files.folder, on_event)
+    session.files = receiver
+    return native
+
+
+def send_files_home(cfg: AgentConfig, session: AgentSession, client: AgentClient, overlay, native,
+                    loop: asyncio.AbstractEventLoop) -> None:
+    """A file dragged from here over the edge to the host (or carried there
+    by a look): see curslink.files.dragout."""
+    from curslink.files.dragout import AgentDragOut
+
+    drag_out = AgentDragOut(overlay.command, client.send, client.send_bulk, cfg.name)
+
+    def on_line(line: str) -> None:  # the helper's reader thread
+        try:
+            loop.call_soon_threadsafe(lambda: native.on_helper(line) or drag_out.on_helper(line))
+        except RuntimeError:  # the loop has closed
+            pass
+
+    overlay.on_line = on_line
+    session.drag_out = drag_out
 
 
 class FacingCamera:

@@ -17,6 +17,7 @@ import logging
 import sys
 import threading
 import time
+from typing import Callable
 
 from curslink.inputs.base import CaptureHandler
 from curslink.inputs.keys import normalize_char
@@ -108,6 +109,11 @@ class PynputCapture:
         # While set, input this process injects reaches the OS although
         # input is grabbed (see let_through).
         self._pass_injected = False
+        # macOS: while this says so, a real left button-up is held back (a file
+        # drop waiting for its files, see curslink.files.native) until
+        # release_held(). Called from the event tap: must be quick.
+        self.hold_left_up: Callable[[], bool] = lambda: False
+        self._held_up = False
 
     def start(self, handler: CaptureHandler) -> None:
         from pynput import mouse
@@ -235,8 +241,18 @@ class PynputCapture:
         x, y = self.park_at
         self.let_through(lambda: drag_nudge(x, y, release=kind == "release"))
 
+    def release_held(self) -> None:
+        """Let go of a button-up held back by ``hold_left_up`` (now)."""
+        if self._held_up:
+            self._held_up = False
+            x, y = mac_cursor()
+            _drag_release(x, y)
+
     def _mac_mouse_tap(self, event_type, event):
         if not self._grabbed:
+            if event_type == _MAC_LEFT_UP and not _mac_injected(event) and self.hold_left_up():
+                self._held_up = True
+                return None  # held back until the dropped files have arrived
             return event
         if self._pass_injected and _mac_injected(event):
             return event
@@ -339,6 +355,7 @@ class PynputCapture:
 # ------------------------------------------------------------------ macOS bits
 # CGEventType values: mouse moved and the three drags; the two tap-disabled notices.
 _MAC_MOVES = frozenset({5, 6, 7, 27})
+_MAC_LEFT_UP = 2
 _MAC_TAP_DISABLED = frozenset({0xFFFFFFFE, 0xFFFFFFFF})
 _MAC_DELTA_X, _MAC_DELTA_Y = 4, 5          # kCGMouseEventDeltaX / DeltaY
 _MAC_SOURCE_PID = 41                       # kCGEventSourceUnixProcessID
@@ -642,6 +659,26 @@ def drag_nudge(x: int, y: int, release: bool = False) -> None:
         _cancel_drag()
         time.sleep(0.05)
         _drag_release(x, y)
+
+
+def mac_cursor() -> tuple[float, float]:
+    import Quartz
+
+    loc = Quartz.CGEventGetLocation(Quartz.CGEventCreate(None))
+    return loc.x, loc.y
+
+
+def press_left_here() -> None:
+    """macOS: post a left button-down where the cursor is (to start a real
+    drag from the overlay helper's window there)."""
+    try:
+        import Quartz
+
+        ev = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventLeftMouseDown, mac_cursor(),
+                                            Quartz.kCGMouseButtonLeft)
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
+    except Exception:  # pragma: no cover - macOS only
+        log.warning("couldn't press the button to start the drag", exc_info=True)
 
 
 def _cancel_drag() -> None:
