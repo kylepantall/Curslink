@@ -337,3 +337,75 @@ async def test_agent_tries_the_last_good_address_first(tmp_path, monkeypatch):
     assert tried[0] == ["192.168.68.52", "192.168.68.72"]
     answer["addr"] = None
     assert (await app.resolve_host(cfg, store)).host == "192.168.68.52"
+
+
+# ---------------------------------------------------------------- QR codes
+async def _scan(qr, url, me=AGENT, about=None, token=None):
+    from curslink.pairing.qr import parse_invite
+
+    invite = parse_invite(url)
+    reader, writer = await asyncio.open_connection("127.0.0.1", invite["pairing_port"])
+    try:
+        return await initiate(reader, writer, me, lambda code, peer: None,
+                              token=invite["token"] if token is None else token, about=about)
+    finally:
+        writer.close()
+
+
+async def test_qr_pairing_needs_no_code_and_carries_screens():
+    from curslink.pairing.qr import QrPairing, parse_invite
+
+    got = []
+    qr = QrPairing(HOST, lambda result, address: got.append((result, address)), host="127.0.0.1")
+    await qr.start()
+    try:
+        url = qr.url(["127.0.0.1"], 24850, "relay.example.com:24852", "k" * 20)
+        invite = parse_invite(url)
+        assert invite["id"] == "desktop" and invite["control_port"] == 24850
+        assert invite["relay"] == "relay.example.com:24852" and invite["relay_key"] == "k" * 20
+        screens = [{"x": 0, "y": 0, "width": 411, "height": 914, "name": "phone"}]
+        result = await _scan(qr, url, about={"screens": screens, "platform": "Android 15"})
+        await asyncio.sleep(0.05)
+    finally:
+        await qr.close()
+    assert result.peer == HOST
+    (theirs, address), = got
+    assert theirs.key == result.key and theirs.peer == AGENT and address == "127.0.0.1"
+    assert theirs.extra == {"screens": screens, "platform": "Android 15"}
+
+
+async def test_qr_pairing_refuses_a_wrong_token_and_works_once():
+    from curslink.pairing.qr import QrPairing
+
+    got = []
+    qr = QrPairing(HOST, lambda result, address: got.append(result), host="127.0.0.1")
+    await qr.start()
+    try:
+        url = qr.url(["127.0.0.1"], 24850)
+        with pytest.raises(PairingError, match="expired"):
+            await _scan(qr, url, token=b"x" * 16)
+        assert not got
+        await _scan(qr, url)
+        await asyncio.sleep(0.05)
+        assert len(got) == 1
+        with pytest.raises(PairingError, match="expired"):
+            await _scan(qr, url)
+    finally:
+        await qr.close()
+
+
+async def test_a_qr_request_to_the_usual_listener_is_refused(tmp_path):
+    store = PairingStore(tmp_path / "s.json")
+
+    async def ask(peer):
+        raise AssertionError("no code should be asked for")
+
+    listener = PairingListener(HOST, store, ask, host="127.0.0.1", port=0)
+    await listener.start()
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", listener.port)
+        with pytest.raises(PairingError, match="QR"):
+            await initiate(reader, writer, AGENT, lambda c, p: None, token=b"t" * 16)
+        writer.close()
+    finally:
+        await listener.close()

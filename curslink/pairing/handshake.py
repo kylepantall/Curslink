@@ -14,6 +14,18 @@ link key (see :mod:`curslink.pairing.store`).
     shows code                                  you type the code
                 <-  pair_done {ok, mac | reason}
 
+Scanning a QR code replaces typing the code: the recipient shows a QR code
+holding a one-time token (see :mod:`curslink.pairing.qr`), and the
+initiator that scanned it sends ``pair_hello.qr = true`` and
+``pair_reveal.proof = HMAC(token, transcript)``. Only a device that saw the
+QR code can make that proof, and a man in the middle would have a different
+transcript on each side, so the recipient takes the proof in place of a
+typed code.
+
+Either side may add ``screens`` (its OS screens, as in ``hello``) and
+``platform`` to its first message, so a host that pairs with a phone can put
+it in the layout at the right size before it ever connects.
+
 The initiator commits to its public value before seeing the recipient's,
 so a man in the middle can't search for keys that give matching codes: one
 guess per attempt, a one in a million chance. The recipient refuses after
@@ -31,7 +43,7 @@ import asyncio
 import hashlib
 import hmac
 import secrets
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
 from curslink.net.framing import read_message
@@ -76,6 +88,9 @@ class DeviceInfo:
 class PairResult:
     peer: DeviceInfo
     key: bytes
+    # What the peer said about itself beyond its id: "screens" (a list, as in
+    # hello) and "platform", when it sent them.
+    extra: dict = field(default_factory=dict, compare=False)
 
 
 # --------------------------------------------------------------- crypto bits
@@ -131,6 +146,21 @@ def _derive(x: int, peer: int, transcript: bytes) -> tuple[str, bytes, bytes]:
     return code, key, mac
 
 
+def qr_proof(token: bytes, transcript: bytes) -> str:
+    return hmac.new(token, b"curslink pair qr\0" + transcript, hashlib.sha256).hexdigest()
+
+
+def _extra(msg: Message) -> dict:
+    out = {}
+    screens = msg.get("screens")
+    if isinstance(screens, list):
+        out["screens"] = [s for s in screens[:16] if isinstance(s, dict)]
+    platform = msg.get("platform")
+    if isinstance(platform, str) and platform:
+        out["platform"] = platform[:64]
+    return out
+
+
 def format_code(code: str) -> str:
     return f"{code[:3]} {code[3:]}"
 
@@ -181,24 +211,36 @@ async def initiate(
     me: DeviceInfo,
     show_code: Callable[[str, DeviceInfo], None],
     code_timeout: float = CODE_TIMEOUT_S,
+    *,
+    token: bytes | None = None,
+    about: dict | None = None,
 ) -> PairResult:
     """Ask the device on the other end of the stream to pair.
 
     ``show_code`` is called with the formatted code once it is known; show
-    it to the user, who types it into the other device.
+    it to the user, who types it into the other device. With the ``token``
+    from the other device's QR code there's no code to type: it's still
+    shown, but the other device checks the token instead. ``about`` adds
+    ``screens`` / ``platform`` to the request.
     """
     x, pub = _keypair()
     commit = _commit(pub)
-    writer.write(encode("pair_hello", v=PAIRING_VERSION, device_id=me.device_id,
+    hello = dict(about or {})
+    if token is not None:
+        hello["qr"] = True
+    writer.write(encode("pair_hello", **hello, v=PAIRING_VERSION, device_id=me.device_id,
                         name=me.name, role=me.role, commit=commit))
     await writer.drain()
     msg = await _read(reader, "pair_key", STEP_TIMEOUT_S)
     peer = _info(msg)
     _check_roles(me, peer)
     y = _peer_value(msg.get("pub"))
-    writer.write(encode("pair_reveal", pub=pub.hex()))
-    await writer.drain()
     transcript = _transcript(me, commit, peer, y.to_bytes(PUB_BYTES, "big"), pub)
+    reveal = {"pub": pub.hex()}
+    if token is not None:
+        reveal["proof"] = qr_proof(token, transcript)
+    writer.write(encode("pair_reveal", **reveal))
+    await writer.drain()
     code, key, mac = _derive(x, y, transcript)
     show_code(format_code(code), peer)
     done = await _read(reader, "pair_done", code_timeout + STEP_TIMEOUT_S)
@@ -206,7 +248,7 @@ async def initiate(
         raise PairingError(str(done.get("reason") or "refused"))
     if not isinstance(done.get("mac"), str) or not hmac.compare_digest(done.get("mac"), mac):
         raise PairingError("the other device's confirmation did not match")
-    return PairResult(peer, key)
+    return PairResult(peer, key, _extra(msg))
 
 
 async def respond(
@@ -215,9 +257,16 @@ async def respond(
     me: DeviceInfo,
     ask_code: Callable[[DeviceInfo], Awaitable[str | None]],
     code_timeout: float = CODE_TIMEOUT_S,
+    *,
+    token: bytes | None = None,
+    about: dict | None = None,
 ) -> PairResult:
     """Answer a pairing request; ``ask_code`` asks the user for the code
-    shown on the initiator, returning ``None`` if they decline."""
+    shown on the initiator, returning ``None`` if they decline.
+
+    ``token`` is the one in the QR code this device is showing: a request
+    that says it scanned it (``qr``) proves it with the token instead of a
+    typed code. ``about`` adds ``screens`` / ``platform`` to our reply."""
 
     def refuse(reason: str) -> None:
         writer.write(encode("pair_done", ok=False, reason=reason))
@@ -236,8 +285,13 @@ async def respond(
     if not isinstance(commit, str) or len(commit) != 64:
         refuse("missing commitment")
         raise PairingError("missing commitment")
+    scanned = hello.get("qr") is True
+    if scanned and token is None:
+        refuse("no QR code is showing here; scan it again")
+        raise PairingError("a request for a QR code that isn't showing")
     x, pub = _keypair()
-    writer.write(encode("pair_key", device_id=me.device_id, name=me.name, role=me.role, pub=pub.hex()))
+    writer.write(encode("pair_key", **dict(about or {}), device_id=me.device_id, name=me.name, role=me.role,
+                        pub=pub.hex()))
     await writer.drain()
     reveal = await _read(reader, "pair_reveal", STEP_TIMEOUT_S)
     y = _peer_value(reveal.get("pub"))
@@ -247,6 +301,15 @@ async def respond(
         raise PairingError("the initiator's key did not match its commitment")
     transcript = _transcript(peer, commit, me, pub, pub_i)
     code, key, mac = _derive(x, y, transcript)
+
+    if scanned:
+        proof = reveal.get("proof")
+        if not isinstance(proof, str) or not hmac.compare_digest(proof, qr_proof(token, transcript)):
+            refuse("that QR code has expired; scan the new one")
+            raise PairingError("wrong QR proof")
+        writer.write(encode("pair_done", ok=True, mac=mac))
+        await writer.drain()
+        return PairResult(peer, key, _extra(hello))
 
     try:
         entered = await asyncio.wait_for(ask_code(peer), code_timeout)
@@ -261,4 +324,4 @@ async def respond(
         raise PairingError("wrong code")
     writer.write(encode("pair_done", ok=True, mac=mac))
     await writer.drain()
-    return PairResult(peer, key)
+    return PairResult(peer, key, _extra(hello))
