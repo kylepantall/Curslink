@@ -246,24 +246,25 @@ class Layout:
                 break
         return None
 
-    def edge_pushes(self, device_id: str, x: float, y: float) -> list[tuple[int, int]]:
+    def edge_pushes(self, device_id: str, x: float, y: float, margin: float = 0.0) -> list[tuple[int, int]]:
         """Outward directions for a pointer resting on an outer edge of a device.
 
         The OS clamps the real cursor at the edge of the desktop, so we never
         see it go further. Instead, a cursor sitting on an outer edge pixel
         (with none of the same device's screens beyond it) counts as pushing
-        outward in that direction.
+        outward in that direction. ``margin``: also count a pointer within
+        that many pixels of such an edge.
         """
         screen = self.screen_at(x, y, device_id)
         if screen is None:
             return []
         pushes = []
-        for (ex, ey), on_edge in (
-            ((-1, 0), x <= screen.x),
-            ((1, 0), x >= screen.right - 1),
-            ((0, -1), y <= screen.y),
-            ((0, 1), y >= screen.bottom - 1),
+        for (ex, ey), on_edge, beyond in (
+            ((-1, 0), x <= screen.x + margin, (screen.x - 1, y)),
+            ((1, 0), x >= screen.right - 1 - margin, (screen.right, y)),
+            ((0, -1), y <= screen.y + margin, (x, screen.y - 1)),
+            ((0, 1), y >= screen.bottom - 1 - margin, (x, screen.bottom)),
         ):
-            if on_edge and self.screen_at(x + ex, y + ey, device_id) is None:
+            if on_edge and self.screen_at(*beyond, device_id) is None:
                 pushes.append((ex, ey))
         return pushes

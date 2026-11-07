@@ -74,10 +74,20 @@ class HostConfig:
     router: RouterSettings = field(default_factory=RouterSettings)
     gaze: GazeConfig = field(default_factory=GazeConfig)
     pairing: PairingConfig = field(default_factory=PairingConfig)
+    # Drag files over an edge (or look at a device while dragging) to send them.
+    files: bool = True
 
     @property
     def name(self) -> str:
         return self.layout.devices[self.device_id].name
+
+
+@dataclass
+class AgentFilesConfig:
+    """``[agent.files]``: files dragged here from the host."""
+
+    enabled: bool = True
+    folder: Path | None = None       # None = Downloads
 
 
 @dataclass
@@ -95,6 +105,17 @@ class AgentConfig:
     relay: RelayTarget | None = None
     pairing: PairingConfig = field(default_factory=PairingConfig)
     gaze: AgentGazeConfig = field(default_factory=AgentGazeConfig)
+    files: AgentFilesConfig = field(default_factory=AgentFilesConfig)
+
+
+def agent_files_config(raw: Any) -> AgentFilesConfig:
+    if not isinstance(raw, dict):
+        raise ConfigError("[agent.files] must be a table")
+    folder = str(raw.get("folder", "") or "").strip()
+    return AgentFilesConfig(
+        enabled=bool(raw.get("enabled", True)),
+        folder=Path(folder).expanduser() if folder else None,
+    )
 
 
 def _secret(raw: dict[str, Any]) -> str | None:
@@ -227,6 +248,22 @@ def parse_layout(raw: dict[str, Any]) -> Layout:
         raise ConfigError(str(exc)) from exc
 
 
+def jump_screens(g: dict[str, Any], layout: Layout) -> frozenset[tuple[str, str]]:
+    """``[gaze].jump_screens``: the monitors (``"device/screen"``) where
+    looking puts the pointer on that very monitor. Monitors no longer in the
+    layout are skipped, so removing a device doesn't break the config."""
+    value = g.get("jump_screens", [])
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise ConfigError('[gaze].jump_screens must be a list of "device/screen" strings')
+    known = {(s.device_id, s.id) for s in layout.screens()}
+    out = set()
+    for v in value:
+        device_id, _, screen_id = v.partition("/")
+        if (device_id, screen_id) in known:
+            out.add((device_id, screen_id))
+    return frozenset(out)
+
+
 def load_raw(path: str | Path) -> dict[str, Any]:
     try:
         with open(path, "rb") as fh:
@@ -248,7 +285,8 @@ def host_config(raw: dict[str, Any], base_dir: Path = Path(".")) -> HostConfig:
         edge_switching=host.get("edge_switching", True),
         gaze_switching=raw.get("gaze", {}).get("enabled", False),
         gap_tolerance_px=_int(host, "gap_tolerance_px", 64),
-        gaze_within_device=raw.get("gaze", {}).get("within_device", False),
+        gaze_within_device=bool(raw.get("gaze", {}).get("within_device", False)),
+        gaze_jump_screens=jump_screens(raw.get("gaze", {}), layout),
         return_hotkey=host.get("return_hotkey", "ctrl+alt+home"),
         gaze_toggle_hotkey=host.get("gaze_toggle_hotkey", "ctrl+alt+g"),
     )
@@ -287,6 +325,7 @@ def host_config(raw: dict[str, Any], base_dir: Path = Path(".")) -> HostConfig:
         router=router,
         gaze=gaze,
         pairing=pairing_config(raw, base_dir),
+        files=bool(raw.get("files", {}).get("enabled", True)) if isinstance(raw.get("files", {}), dict) else True,
     )
 
 
@@ -309,6 +348,7 @@ def agent_config(raw: dict[str, Any], base_dir: Path = Path(".")) -> AgentConfig
         smooth_pointer=bool(agent.get("smooth_pointer", True)),
         pairing=pairing_config(raw, base_dir),
         gaze=agent_gaze_config(agent.get("gaze", {})),
+        files=agent_files_config(agent.get("files", {})),
     )
     if not cfg.host and not cfg.relay and not cfg.pairing.enabled:
         raise ConfigError("set [agent].host (LAN), a [relay] (internet), or leave [pairing] enabled")

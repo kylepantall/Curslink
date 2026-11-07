@@ -16,12 +16,17 @@ Host -> agent
     scroll       {dx, dy}
     key          {key, pressed}        see :mod:`curslink.inputs.keys`
     ping         {n, ts}               ts (optional): host monotonic ms
+    drag         {card} | {hide: true} a file drag is being carried onto this
+                                       device: show (or take down) the
+                                       placeholder that follows the pointer
+    file_*                             a dropped file, see curslink.files.transfer
 
 Agent -> host
     hello        {v, device_id, name, platform, screens, auth, camera}
     pong         {n, ts}               ts: the ping's, echoed (times the round trip)
     facing       {facing}              the agent's own camera sees the user
                                        facing it (true) or not (false)
+    file_result  {id, ok, ...}         dropped files saved (or why not)
 
 ``hello.camera`` is true when the agent runs its own camera to confirm
 gaze switches (see :mod:`curslink.gaze.confirm`). An agent only sends
@@ -63,6 +68,13 @@ MESSAGE_TYPES = frozenset(
         "facing",
         "look",
         "bye",
+        "drag",
+        "file_begin",
+        "file_item",
+        "file_data",
+        "file_end",
+        "file_cancel",
+        "file_result",
         "pair_hello",
         "pair_key",
         "pair_reveal",
@@ -78,6 +90,10 @@ HOST_FEATURES = ("facing",)
 # An agent without "look" would reject a look frame as unknown and drop the
 # connection, so the host only sends one to agents that list it.
 AGENT_FEATURES = ("look",)
+# Added to hello.features by an agent that takes dragged files (drag and
+# file_* frames); it's optional ([agent.files] enabled = false leaves it out).
+FILES_FEATURE = "files"
+FILE_FRAMES = frozenset({"file_begin", "file_item", "file_data", "file_end", "file_cancel", "file_result"})
 
 
 class ProtocolError(ValueError):
@@ -152,6 +168,14 @@ def _validate(msg: Message) -> None:
     elif t == "look":
         if msg.data.get("hide") is not True and not isinstance(msg.data.get("screen"), str):
             raise ProtocolError("look needs a screen, or hide")
+    elif t == "drag":
+        if msg.data.get("hide") is not True and not isinstance(msg.data.get("card"), dict):
+            raise ProtocolError("drag needs a card, or hide")
+    elif t in FILE_FRAMES:
+        if not isinstance(msg.data.get("id"), str):
+            raise ProtocolError(f"{t}.id must be a string")
+        if t == "file_data" and not isinstance(msg.data.get("data"), str):
+            raise ProtocolError("file_data.data must be a string")
     elif t == "hello":
         if msg.data.get("v") != PROTOCOL_VERSION:
             raise ProtocolError(

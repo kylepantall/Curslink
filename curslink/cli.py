@@ -259,7 +259,7 @@ def cmd_calibrate(args) -> int:
     for a, b, gap in close_pairs(cal, cfg.gaze.settings.switch_margin_deg):
         print(
             f"Warning: {a.key} and {b.key} are only {gap:.1f} deg apart; "
-            "gaze may struggle to tell them apart (consider gaze.within_device = false)."
+            "gaze may struggle to tell them apart (leave them out of gaze.jump_screens)."
         )
     return 0
 
@@ -547,6 +547,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if wants_gui(argv):
         argv = ["gui"]
+    elif argv[:1] == ["--minimized"]:
+        # Start-at-sign-in entries written by 0.4.13 and earlier.
+        argv = ["gui", *argv]
     args = build_parser().parse_args(argv)
     args.argv = argv
     from curslink import diagnostics

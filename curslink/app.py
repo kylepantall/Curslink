@@ -58,9 +58,12 @@ class LoopBridge:
     pointer was when you clicked.
     """
 
-    def __init__(self, loop: asyncio.AbstractEventLoop, router: Router):
+    def __init__(self, loop: asyncio.AbstractEventLoop, router: Router, drag=None):
         self._loop = loop
         self._router = router
+        # A curslink.files.handoff.DragHandoff watches the left button and
+        # the pointer for file drags, and takes a drop on another device.
+        self._drag = drag
         self._lock = threading.Lock()
         self._dx = 0.0
         self._dy = 0.0
@@ -70,7 +73,17 @@ class LoopBridge:
         self.stats = CaptureStats()
 
     def on_pointer(self, x, y):
-        self._loop.call_soon_threadsafe(self._router.on_pointer, x, y)
+        self._loop.call_soon_threadsafe(self._pointer, x, y)
+
+    def _pointer(self, x, y):
+        if self._drag is not None:
+            self._drag.on_pointer(x, y)
+        self._router.on_pointer(x, y)
+
+    def _button(self, button, pressed):
+        if self._drag is not None and self._drag.on_button(button, pressed):
+            return  # a file drop on another device: it's handled
+        self._router.on_button(button, pressed)
 
     def on_motion(self, dx, dy):
         now = time.monotonic()
@@ -117,7 +130,7 @@ class LoopBridge:
         self._loop.call_soon_threadsafe(run)
 
     def on_button(self, button, pressed):
-        self._after_motion(self._router.on_button, button, pressed)
+        self._after_motion(self._button, button, pressed)
 
     def on_scroll(self, dx, dy):
         self._after_motion(self._router.on_scroll, dx, dy)
@@ -273,7 +286,8 @@ async def run_host(cfg: HostConfig) -> None:
         relay = HostRelays(cfg.relay, cfg.device_id, cfg.secret is not None, store, tls, server.handle_streams)
         relay.start()
         log.info("waiting for agents via relay %s", cfg.relay.address)
-    bridge = LoopBridge(loop, router)
+    handoff = start_file_drags(cfg, router, server, overlay, capture, loop) if cfg.files else None
+    bridge = LoopBridge(loop, router, handoff)
     capture.start(bridge)
     reporter = loop.create_task(report_capture(bridge, capture, server, router))
     router.blocked = input_blocked_reason()
@@ -332,6 +346,24 @@ async def run_host(cfg: HostConfig) -> None:
         if relay:
             await relay.close()
         await server.close()
+
+
+def start_file_drags(cfg: HostConfig, router: Router, server: HostServer, overlay, capture,
+                     loop: asyncio.AbstractEventLoop):
+    """Dragging files to another device (see curslink.files.handoff)."""
+    from curslink.files.handoff import DragHandoff
+
+    handoff = DragHandoff(router, server, overlay.command, capture.inject_drag_end, cfg.name, emit=events.emit)
+
+    def on_line(line: str) -> None:  # the helper's reader thread
+        try:
+            loop.call_soon_threadsafe(handoff.on_helper, line)
+        except RuntimeError:  # the loop has closed
+            pass
+
+    overlay.on_line = on_line
+    server.on_file_result = handoff.on_result
+    return handoff
 
 
 def _ms(values: list[float], q: float) -> float:
@@ -576,7 +608,9 @@ async def run_agent(cfg: AgentConfig) -> None:
     from curslink.inputs.pynput_backend import PynputSink
     from curslink.overlay import OverlayProcess
 
-    overlay = OverlayProcess() if cfg.animations else None
+    # The helper draws the switch animation and, for dropped files, the
+    # placeholder that follows the pointer and the "Receiving..." popup.
+    overlay = OverlayProcess() if cfg.animations or cfg.files.enabled else None
     if overlay:
         overlay.start()
     from curslink.smoothing import PointerSmoother
@@ -585,9 +619,11 @@ async def run_agent(cfg: AgentConfig) -> None:
     smoother = PointerSmoother(sink.move_to) if cfg.smooth_pointer else None
     session = AgentSession(
         sink,
-        overlay.show if overlay else (lambda effect, x, y: None),
+        overlay.show if overlay and cfg.animations else (lambda effect, x, y: None),
         smoother=smoother,
     )
+    if cfg.files.enabled and overlay is not None:
+        receive_files(cfg, session, overlay)
     store = PairingStore(cfg.pairing.store)
     client = AgentClient(
         cfg.device_id, cfg.name, cfg.host, cfg.port, None, session,
@@ -624,6 +660,50 @@ async def run_agent(cfg: AgentConfig) -> None:
         await pairing.close()
         if overlay:
             overlay.close()
+
+
+def receive_files(cfg: AgentConfig, session: AgentSession, overlay) -> None:
+    """Files dragged here from the host: the placeholder while they're
+    carried, then a popup while they arrive (see curslink.files)."""
+    import json
+
+    from curslink.files.transfer import FileReceiver
+
+    toasts: dict[str, dict] = {}
+    shown = {"at": 0.0}
+
+    def on_drag(data: dict) -> None:
+        if data.get("hide") or not isinstance(data.get("card"), dict):
+            overlay.command("card hide")
+        else:
+            overlay.command("card " + json.dumps(data["card"], separators=(",", ":")))
+
+    def on_event(kind: str, info: dict) -> None:
+        tid = info.get("id", "")
+        if kind == "start":
+            overlay.command("card hide")
+            toasts[tid] = {**info, "state": "receiving", "received": 0}
+        elif kind == "progress":
+            toast = toasts.get(tid)
+            if toast is None:
+                return
+            toast["received"] = info.get("received", 0)
+            now = time.monotonic()
+            if now - shown["at"] < 0.1:
+                return  # ten updates a second is plenty
+            shown["at"] = now
+        else:
+            toast = toasts.pop(tid, {})
+            toasts_info = {**toast, **info, "state": kind}
+            overlay.command("toast " + json.dumps(toasts_info, separators=(",", ":")))
+            events.emit("file", state=kind, **{k: v for k, v in info.items() if k != "card"})
+            return
+        overlay.command("toast " + json.dumps(toasts[tid], separators=(",", ":")))
+        if kind == "start":
+            events.emit("file", state="receiving", **{k: v for k, v in info.items() if k != "card"})
+
+    session.on_drag = on_drag
+    session.files = FileReceiver(cfg.files.folder, on_event)
 
 
 class FacingCamera:
@@ -747,6 +827,10 @@ async def resolve_host(cfg: AgentConfig, store: PairingStore) -> ConnectTarget:
     raise NotReady(f"looking for {peer.name} on the LAN...")
 
 
+MIN_SAMPLES = 5    # fewer than this and a screen's centre isn't trusted
+GOOD_SAMPLES = 15  # stop waiting once this many are in
+
+
 class Calibrator:
     """Records head angles while the user looks at each screen in turn.
 
@@ -789,17 +873,29 @@ class Calibrator:
             log.warning("calibration: no face within %.0fs", timeout)
         return self.latest is not None
 
-    def record(self, target: Target, seconds: float = 1.5, settle: float = 0.2) -> tuple[float, float] | None:
+    def record(self, target: Target, seconds: float = 1.5, settle: float = 0.2,
+               patience: float = 3.0) -> tuple[float, float] | None:
         """Sample for ``seconds`` while the user looks at ``target``; returns
-        its (yaw, pitch) centre, or None if too few samples came in."""
+        its (yaw, pitch) centre, or None if too few samples came in.
+
+        A screen well off to the side (another computer beside this one) has
+        the head turned far enough that the camera only sees the face now and
+        then, so if too few samples are in after ``seconds`` it keeps going
+        for up to ``patience`` more before giving up."""
         start = time.monotonic()
         with self._lock:
             self._samples.clear()
         time.sleep(seconds)
-        with self._lock:
-            samples = [(y, p) for t, y, p in self._samples if t >= start + settle]
-        if len(samples) < 5:
-            log.warning("calibration: only %d samples for %s, skipped", len(samples), target)
+        deadline = start + seconds + patience
+        while True:
+            with self._lock:
+                samples = [(y, p) for t, y, p in self._samples if t >= start + settle]
+            if len(samples) >= GOOD_SAMPLES or time.monotonic() >= deadline:
+                break
+            time.sleep(0.1)
+        if len(samples) < MIN_SAMPLES:
+            log.warning("calibration: only %d samples for %s in %.1fs, not recorded", len(samples), target,
+                        time.monotonic() - start)
             return None
         for yaw, pitch in samples:
             self.calibration.add(target, yaw, pitch)

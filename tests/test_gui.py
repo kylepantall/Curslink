@@ -333,6 +333,62 @@ def test_switch_animation_never_takes_focus_or_clicks(qapp):
     w.close()
 
 
+def test_settings_turn_monitor_jumps_on_and_off(desktop, qapp):
+    from curslink.config import host_config
+
+    desktop.window.pages["setup"].create()
+    cfg = desktop.config()
+    cfg.add_device("laptop", "Work laptop")
+    cfg.save()
+    desktop.config_saved(restart=False)
+    page = desktop.window.pages["settings"]
+    page.load()
+    assert "laptop/main" in page.jump_toggles and not any(t.isChecked() for t in page.jump_toggles.values())
+    page.jump_toggles["laptop/main"].click()
+    assert desktop.config().get("gaze", "jump_screens") == ["laptop/main"]
+    assert page.jump_toggles["laptop/main"].isChecked()
+    page.jump_all_on.click()
+    everything = list(page.jump_toggles)
+    assert desktop.config().get("gaze", "jump_screens") == everything
+    assert len(host_config(desktop.config().raw()).router.gaze_jump_screens) == len(everything)
+    page.jump_all_off.click()
+    assert desktop.config().get("gaze", "jump_screens") == []
+
+
+def test_a_screen_the_camera_couldnt_see_is_tried_again_not_skipped(desktop, qapp):
+    desktop.window.pages["setup"].create()
+    cfg = desktop.config()
+    cfg.add_device("laptop", "Work laptop")
+    cfg.save()
+    desktop.config_saved(restart=False)
+    page = desktop.window.pages["calibrate"]
+    page.load_targets()
+    page.state, page.step = "recording", 0
+    name = page.targets[0][1]
+    page.recorded(name, None)
+    assert page.state == "ready" and page.step == 0 and name not in page.results
+    assert "couldn't see your face" in page.prompt_detail.text()
+    page.state = "recording"
+    page.recorded(name, (1.0, 2.0))
+    assert page.step == 1 and page.results[name] == (1.0, 2.0)
+    assert "couldn't see" not in page.prompt_detail.text()
+def test_menu_bar_item_with_no_height_counts_as_placed(desktop, monkeypatch):
+    # macOS 26 reports the placed menu bar item as 38 x 0; closing the
+    # window must still hide Curslink to the menu bar.
+    import sys
+
+    from PySide6.QtCore import QRect
+
+    tray = desktop.tray
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(tray, "available", lambda: True)
+    monkeypatch.setattr(tray, "isVisible", lambda: True)
+    monkeypatch.setattr(tray, "geometry", lambda: QRect(0, 982, 38, 0))
+    assert desktop.tray_placed()
+    monkeypatch.setattr(tray, "geometry", lambda: QRect())
+    assert not desktop.tray_placed()
+
+
 def _host_with_laptop(desktop):
     desktop.window.pages["setup"].create()
     cfg = desktop.config()

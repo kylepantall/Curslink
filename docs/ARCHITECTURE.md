@@ -106,8 +106,12 @@ calibration" and "calibrated host plus agent cameras" all work.
 
 Gaze picks a *device*, not a monitor: looking at another computer brings
 the pointer back to wherever you left it there, and looking between the
-monitors of the device you're on does nothing (unless `[gaze]
-within_device = true`).
+monitors of the device you're on does nothing. Monitors listed in `[gaze]
+jump_screens` (Settings > "Jump to the monitor you look at") are the
+exception: looking at one puts the pointer on that monitor, where it last
+was there, even on the device you're already using. Only a calibrated look
+counts; a device's own camera only knows the device, so it still picks the
+device. (The older `within_device = true` turns every monitor on.)
 
 While the desktop app calibrates, the host keeps linking but hands its
 camera to the app (`calibrate on` on the service's stdin). For a screen of
@@ -121,6 +125,33 @@ Head pose, not eye tracking, was chosen for the MVP because it is robust
 on ordinary webcams at desk distance. Separate monitors are usually 20 to
 40 degrees apart, which head pose resolves well. Adding eye gaze for finer
 targets is a possible later upgrade.
+
+### Dragging files to another device
+
+`curslink/files/`. No OS tells a program that isn't under the pointer that
+a file is being dragged, so the host's overlay helper puts invisible drop
+targets where the drag will be:
+
+* while the left button is held and the pointer moves, thin strips along
+  the screen sides that lead to another device; a file dragged to the edge
+  passes over one, and the OS tells the helper its paths;
+* when input leaves with the button held some other way (a look, a
+  hotkey), a target over every host screen (the "shield"), and the host
+  nudges the parked pointer a pixel so the OS reports the drag to it.
+
+With input on another device and a file drag held, the host sends `drag
+{card}` and that agent's helper shows a placeholder (name, kind, size)
+following its pointer. Letting go there isn't forwarded as a click: the
+host sends the files as `file_*` frames on the same TLS-PSK connection
+(32 KiB per frame, written only as fast as the link drains, so input queued
+behind them is barely delayed), and ends the drag on the host by letting
+an injected button-up through the grab, over the shield, which refuses the
+drop so the source app does nothing. The agent writes into a hidden staging
+folder, moves the files into Downloads only once all of them have arrived,
+never overwrites (`name (1).ext`), cleans paths (no `..`, nothing absolute)
+and shows a progress popup. Coming back to the host with the button held
+just carries on the drag there. Agents list `files` in `hello.features`
+(`[agent.files] enabled = false` turns it off); others never see these frames.
 
 ### Safety
 

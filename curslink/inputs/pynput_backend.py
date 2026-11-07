@@ -105,6 +105,9 @@ class PynputCapture:
         self.tap_times: list[float] = []
         self._grabbed_at = 0.0
         self._park_lock = threading.Lock()
+        # While set, input this process injects reaches the OS although
+        # input is grabbed (see let_through).
+        self._pass_injected = False
 
     def start(self, handler: CaptureHandler) -> None:
         from pynput import mouse
@@ -182,8 +185,58 @@ class PynputCapture:
             self._key_listener.start()
 
     # -- macOS event taps (run after pynput has called the callbacks) --------
+    def let_through(self, inject) -> None:
+        """Run ``inject()``, which injects mouse input this computer's OS must
+        act on even though input is grabbed for another device (ending a
+        file drag that went to another computer: see curslink.files.handoff).
+        Blocking: call it off the event loop."""
+        if not self._grabbed:
+            inject()
+            return
+        if self._mac:
+            self._pass_injected = True  # the event tap passes injected events now
+            try:
+                inject()
+                time.sleep(0.05)
+            finally:
+                self._pass_injected = False
+            return
+        listener = self._mouse_listener
+        if sys.platform == "win32" and listener is not None and hasattr(listener, "_suppress"):
+            # The hook suppresses whatever it sees while this is set; for a
+            # moment, it lets everything through.
+            listener._suppress = False
+            try:
+                inject()
+                time.sleep(0.05)
+            finally:
+                listener._suppress = True
+                if self._controller is not None:
+                    self._controller.position = self.park_at
+            return
+        # X11: the grab belongs to the listeners, so drop it for a moment.
+        with self._lock:
+            mouse = self._mouse_listener
+        if mouse is not None:
+            mouse.stop()
+        try:
+            inject()
+            time.sleep(0.05)
+        finally:
+            self._restart()
+            if self._controller is not None:
+                self._controller.position = self.park_at
+
+    def inject_drag_end(self, kind: str) -> None:
+        """At the parked pointer, nudge a held left-button drag a pixel and
+        back ("nudge"), and then let go of it ("release")."""
+        x, y = self.park_at
+        self.let_through(lambda: drag_nudge(x, y, release=kind == "release"))
+
     def _mac_mouse_tap(self, event_type, event):
         if not self._grabbed:
+            return event
+        if self._pass_injected and _mac_injected(event):
             return event
         if event_type in _MAC_MOVES and self._handler is not None and not _mac_injected(event):
             started = time.perf_counter()
@@ -453,6 +506,51 @@ class PynputSink:
         (self._keyboard.press if pressed else self._keyboard.release)(target)
 
 
+def drag_nudge(x: int, y: int, release: bool = False) -> None:
+    """Move a held left-button drag at (x, y) a pixel and back, so the OS's
+    drag-and-drop notices what's under it now; then let go if ``release``."""
+    if sys.platform == "darwin":
+        try:
+            import Quartz
+
+            for px in (x + 1, x):
+                ev = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventLeftMouseDragged, (px, y),
+                                                    Quartz.kCGMouseButtonLeft)
+                Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
+                time.sleep(0.03)
+            if release:
+                ev = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventLeftMouseUp, (x, y),
+                                                    Quartz.kCGMouseButtonLeft)
+                Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
+        except Exception:  # pragma: no cover - macOS only
+            log.warning("couldn't end the drag on this Mac", exc_info=True)
+        return
+    if sys.platform == "win32":
+        try:
+            user32 = ctypes.windll.user32
+            for dx in (1, -1):
+                inp = _INPUT(type=0)
+                inp.mi = _MOUSEINPUT(dx, 0, 0, _MOUSEEVENTF_MOVE, 0, 0)
+                user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT))
+                time.sleep(0.03)
+            if release:
+                inp = _INPUT(type=0)
+                inp.mi = _MOUSEINPUT(0, 0, 0, _MOUSEEVENTF_LEFTUP, 0, 0)
+                user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT))
+        except Exception:  # pragma: no cover - Windows only
+            log.warning("couldn't end the drag on this PC", exc_info=True)
+        return
+    from pynput import mouse
+
+    m = mouse.Controller()
+    m.position = (x + 1, y)
+    time.sleep(0.03)
+    m.position = (x, y)
+    if release:
+        time.sleep(0.03)
+        m.release(mouse.Button.left)
+
+
 # ---------------------------------------------------------------- Windows bits
 # pynput moves the pointer with SetCursorPos, which jumps it: apps under it
 # get no mouse input, so nothing hovers, and some only catch up later. A real
@@ -474,6 +572,7 @@ class _INPUT(ctypes.Structure):
 
 
 _MOUSEEVENTF_MOVE, _MOUSEEVENTF_ABSOLUTE, _MOUSEEVENTF_VIRTUALDESK = 0x0001, 0x8000, 0x4000
+_MOUSEEVENTF_LEFTUP = 0x0004
 def win_absolute(x: float, y: float, vx: int, vy: int, vw: int, vh: int) -> tuple[int, int]:
     """A virtual-desktop pixel -> SendInput's 0..65535 absolute coordinates."""
     nx = round((x - vx) * 65535 / max(1, vw - 1))

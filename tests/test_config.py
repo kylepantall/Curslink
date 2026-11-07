@@ -12,7 +12,7 @@ def test_example_config_loads():
     cfg = host_config(raw)
     assert cfg.device_id == "desktop"
     assert set(cfg.layout.devices) == {"desktop", "laptop"}
-    assert cfg.gaze.settings.dwell_s == pytest.approx(0.35)
+    assert cfg.gaze.settings.dwell_s == pytest.approx(0.25)
     agent = agent_config(raw)
     assert agent.device_id == "laptop" and agent.port == 24850
 
@@ -56,5 +56,17 @@ def test_pairing_store_is_relative_to_config(tmp_path):
 def test_bad_screen_size():
     raw = load_raw(EXAMPLE)
     raw["devices"][1]["screens"][0]["width"] = 0
+    with pytest.raises(ConfigError):
+        host_config(raw)
+
+
+def test_jump_screens_are_parsed_and_unknown_ones_skipped():
+    raw = load_raw(EXAMPLE)
+    raw["gaze"]["jump_screens"] = [f"{raw['host']['device_id']}/{raw['devices'][0]['screens'][0]['id']}",
+                                   "gone/main"]
+    cfg = host_config(raw)
+    first = raw["devices"][0]
+    assert cfg.router.gaze_jump_screens == {(first["id"], first["screens"][0]["id"])}
+    raw["gaze"]["jump_screens"] = "everything"
     with pytest.raises(ConfigError):
         host_config(raw)

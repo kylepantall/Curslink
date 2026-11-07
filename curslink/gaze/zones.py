@@ -13,6 +13,10 @@ from pathlib import Path
 class Target:
     device_id: str
     screen_id: str
+    # True when only the device is known, not which of its monitors you
+    # look at (a device's own camera, or a device that wasn't calibrated).
+    # Not part of equality: it's the same target either way.
+    guess: bool = field(default=False, compare=False)
 
     @property
     def key(self) -> str:
@@ -73,7 +77,7 @@ class GazeSettings:
     # A new screen must be at least this much closer than the current one.
     switch_margin_deg: float = 3.0
     # ...and stay the best match this long before we switch.
-    dwell_s: float = 0.35
+    dwell_s: float = 0.25
     # Pitch is noisier than yaw on most webcams; weight it down a little.
     pitch_weight: float = 0.8
 

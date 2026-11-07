@@ -25,12 +25,13 @@ import subprocess
 import sys
 import threading
 import time
+from typing import Callable
 
 log = logging.getLogger(__name__)
 
 SIZE = 180
 ACCENT = "#3fa9ff"
-DURATION_S = 0.38
+DURATION_S = 0.3
 
 
 def helper_command() -> list[str]:
@@ -48,6 +49,9 @@ class OverlayProcess:
         self._proc: subprocess.Popen | None = None
         self._disabled = False
         self._lock = threading.Lock()
+        # Each line the helper prints (e.g. ``drag {...}`` when a file drag
+        # passes over one of its drop targets), called on a reader thread.
+        self.on_line: Callable[[str], None] = lambda line: None
 
     def _ensure(self) -> subprocess.Popen | None:
         if self._disabled:
@@ -57,8 +61,11 @@ class OverlayProcess:
                 self._proc = subprocess.Popen(
                     helper_command(),
                     stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
                     text=True,
                 )
+                threading.Thread(target=self._read, args=(self._proc,), name="curslink-overlay-out",
+                                 daemon=True).start()
             except OSError:
                 log.warning("switch animation unavailable", exc_info=True)
                 self._disabled = True
@@ -69,15 +76,31 @@ class OverlayProcess:
         with self._lock:
             self._ensure()
 
+    def _read(self, proc: subprocess.Popen) -> None:
+        try:
+            for line in proc.stdout:
+                line = line.strip()
+                if line:
+                    try:
+                        self.on_line(line)
+                    except Exception:  # pragma: no cover - a bug in the handler
+                        log.exception("overlay helper line %r", line)
+        except (OSError, ValueError):
+            pass
+
     def show(self, effect: str, x: int, y: int) -> None:
         if effect not in ("pop", "blink"):
             return
+        self.command(f"{effect} {int(x)} {int(y)}")
+
+    def command(self, line: str) -> None:
+        """One command line for the helper (see :mod:`curslink.files.overlay`)."""
         with self._lock:
             proc = self._ensure()
             if proc is None or proc.stdin is None:
                 return
             try:
-                proc.stdin.write(f"{effect} {int(x)} {int(y)}\n")
+                proc.stdin.write(line.replace("\n", " ") + "\n")
                 proc.stdin.flush()
             except (BrokenPipeError, OSError):
                 self._proc = None
@@ -149,13 +172,11 @@ def _spawn(root, effect: str, x: int, y: int) -> None:
             dot = 7 * (1 - p)
             canvas.create_oval(c - dot, c - dot, c + dot, c + dot, fill=ACCENT, outline="")
             alpha = 1 - p * 0.6
-        else:  # blink: two quick flashes
-            on = int(p * 4) % 2 == 0
+        else:  # blink: one quick flash that fades
             r = 34
-            if on:
-                canvas.create_oval(c - r, c - r, c + r, c + r, outline=ACCENT, width=6)
-                canvas.create_oval(c - 9, c - 9, c + 9, c + 9, fill=ACCENT, outline="")
-            alpha = 1.0
+            canvas.create_oval(c - r, c - r, c + r, c + r, outline=ACCENT, width=6)
+            canvas.create_oval(c - 9, c - 9, c + 9, c + 9, fill=ACCENT, outline="")
+            alpha = 1.0 if p < 0.5 else max(0.0, 2 - 2 * p)
         if sys.platform not in ("win32", "darwin"):
             win.attributes("-alpha", max(0.05, alpha * 0.9))
         win.after(12, frame)
@@ -190,6 +211,25 @@ def native_to_logical(screens, x: float, y: float, scale_positions: bool) -> tup
     return float(x), float(y)
 
 
+def effect_box(screens, x: float, y: float, size: int = SIZE) -> tuple[int, int, int, int, float, float]:
+    """Where to put an effect's window around logical point (x, y): a
+    ``size`` square centred on it, cut to the screen the point is on.
+
+    A window whose corner hangs off every screen (the point is near the outer
+    edge of the leftmost or topmost display, which is just where input comes
+    home from a computer beside it) gets moved to the main display by the OS,
+    so the animation showed in the wrong place or not at all. Returns
+    ``(left, top, width, height, cx, cy)``, the centre relative to the window."""
+    left, top = round(x - size / 2), round(y - size / 2)
+    right, bottom = left + size, top + size
+    for gx, gy, gw, gh, _dpr in screens:
+        if gx <= x < gx + gw and gy <= y < gy + gh:
+            left, top = max(left, gx), max(top, gy)
+            right, bottom = min(right, gx + gw), min(bottom, gy + gh)
+            break
+    return left, top, right - left, bottom - top, x - left, y - top
+
+
 def _mac_accessory() -> None:
     """Never become the active app (or show in the Dock) for an animation."""
     if sys.platform != "darwin":
@@ -205,7 +245,7 @@ def _mac_accessory() -> None:
 def make_effect_widget(effect: str, x: int, y: int):
     """One pop or blink at OS position (x, y), already showing; it closes
     itself when done."""
-    from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
+    from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, QTimer
     from PySide6.QtGui import QColor, QGuiApplication, QPainter, QPen
     from PySide6.QtWidgets import QWidget
 
@@ -214,6 +254,8 @@ def make_effect_widget(effect: str, x: int, y: int):
         g = sc.geometry()
         screens.append((g.x(), g.y(), g.width(), g.height(), sc.devicePixelRatio() or 1.0))
     lx, ly = native_to_logical(screens, x, y, sys.platform == "win32")
+    left, top, width, height, cx, cy = effect_box(screens, lx, ly)
+    screen = QGuiApplication.screenAt(QPoint(round(lx), round(ly)))
 
     class Effect(QWidget):
         def __init__(self):
@@ -231,7 +273,9 @@ def make_effect_widget(effect: str, x: int, y: int):
                          Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow):
                 self.setAttribute(attr, True)
             self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            self.setGeometry(round(lx - SIZE / 2), round(ly - SIZE / 2), SIZE, SIZE)
+            if screen is not None:
+                self.setScreen(screen)
+            self.setGeometry(left, top, width, height)
             self.effect = effect
             self.start = time.monotonic()
             self.timer = QTimer(self)
@@ -253,7 +297,7 @@ def make_effect_widget(effect: str, x: int, y: int):
             accent = QColor(ACCENT)
             painter = QPainter(self)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            c = QPointF(SIZE / 2, SIZE / 2)
+            c = QPointF(cx, cy)
             if self.effect == "pop":
                 accent.setAlphaF(max(0.0, 1 - p * 0.6))
                 r = 10 + _ease_out(p) * (SIZE / 2 - 14)
@@ -264,7 +308,8 @@ def make_effect_widget(effect: str, x: int, y: int):
                 painter.setPen(Qt.PenStyle.NoPen)
                 painter.setBrush(accent)
                 painter.drawEllipse(QRectF(c.x() - dot, c.y() - dot, 2 * dot, 2 * dot))
-            elif int(p * 4) % 2 == 0:  # blink: two quick flashes
+            else:  # blink: one quick flash that fades
+                accent.setAlphaF(1.0 if p < 0.5 else max(0.0, 2 - 2 * p))
                 painter.setPen(QPen(accent, 6))
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawEllipse(c, 34, 34)
@@ -280,6 +325,7 @@ def make_effect_widget(effect: str, x: int, y: int):
 
 def _run_qt_helper() -> None:
     from PySide6.QtCore import QTimer
+    from PySide6.QtGui import QGuiApplication
     from PySide6.QtWidgets import QApplication
 
     app = QApplication.instance() or QApplication(["curslink-overlay"])
@@ -294,6 +340,16 @@ def _run_qt_helper() -> None:
 
     threading.Thread(target=read_stdin, daemon=True).start()
     alive: list = []
+    from curslink.files.overlay import FilesOverlay
+
+    def to_logical(x: float, y: float) -> tuple[float, float]:
+        screens = []
+        for sc in QGuiApplication.screens():
+            g = sc.geometry()
+            screens.append((g.x(), g.y(), g.width(), g.height(), sc.devicePixelRatio() or 1.0))
+        return native_to_logical(screens, x, y, sys.platform == "win32")
+
+    files = FilesOverlay(to_logical)
 
     def poll() -> None:
         while True:
@@ -313,6 +369,11 @@ def _run_qt_helper() -> None:
                     continue
                 alive.append(w)
                 w.destroyed.connect(lambda *_a, w=w: alive.remove(w) if w in alive else None)
+            elif parts:
+                try:
+                    files.handle(line)
+                except Exception:  # pragma: no cover - never take the helper down
+                    log.exception("overlay command %r", line)
 
     timer = QTimer()
     timer.timeout.connect(poll)

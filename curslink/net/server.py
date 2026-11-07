@@ -20,6 +20,9 @@ PING_INTERVAL_S = 0.5   # often enough to measure the round trip as it changes
 DEAD_AFTER_S = 7.0
 # If an agent stops reading, don't buffer more than this before dropping it.
 MAX_BUFFER_BYTES = 256 * 1024
+# Bulk frames (dropped files) wait for the connection to drain past this, so
+# input frames queued behind them stay milliseconds away.
+BULK_BUFFER_BYTES = 64 * 1024
 
 
 @dataclass
@@ -55,6 +58,8 @@ class HostServer:
         self.on_disconnect = on_disconnect
         # (device_id, facing): an agent's own camera sees the user facing it or not.
         self.on_facing: Callable[[str, bool], None] = lambda device_id, facing: None
+        # (device_id, file_result frame data): an agent saved dropped files, or couldn't.
+        self.on_file_result: Callable[[str, dict], None] = lambda device_id, data: None
         self.host = host
         self.port = port
         # (device_id, hello.auth, TLS channel binding) -> allowed? See security.HelloVerifier.
@@ -97,6 +102,31 @@ class HostServer:
             transport.abort()
             return
         conn.writer.write(encode(t, **data))
+
+    async def send_bulk(self, device_id: str, t: str, **data) -> None:
+        """Send a frame of a big transfer, waiting while the connection is
+        busy. Raises ConnectionError if the agent is gone (or reconnected:
+        a transfer never continues on a new connection)."""
+        conn = self.connections.get(device_id)
+        if conn is None or conn.writer.transport.is_closing():
+            raise ConnectionError(f"{device_id} is not connected")
+        conn.writer.write(encode(t, **data))
+        while conn.writer.transport.get_write_buffer_size() > BULK_BUFFER_BYTES:
+            if self.connections.get(device_id) is not conn or conn.writer.transport.is_closing():
+                raise ConnectionError(f"{device_id} disconnected")
+            await asyncio.sleep(0.002)
+
+    def bulk_sender(self, device_id: str):
+        """``send(t, **data)`` for :func:`curslink.files.transfer.send_files`,
+        bound to the agent's current connection."""
+        conn = self.connections.get(device_id)
+
+        async def send(t: str, **data) -> None:
+            if self.connections.get(device_id) is not conn:
+                raise ConnectionError(f"{device_id} disconnected")
+            await self.send_bulk(device_id, t, **data)
+
+        return send
 
     # ------------------------------------------------------------ internals
     async def handle_streams(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -168,6 +198,8 @@ class HostServer:
         elif msg.t == "facing":
             conn.facing = msg.data["facing"]
             self.on_facing(conn.device_id, conn.facing)
+        elif msg.t == "file_result":
+            self.on_file_result(conn.device_id, dict(msg.data))
 
     async def _ping(self, conn: AgentConnection) -> None:
         loop = asyncio.get_running_loop()
