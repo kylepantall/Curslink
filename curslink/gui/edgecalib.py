@@ -13,10 +13,11 @@ in a ``hint`` frame, so the window there is click-through).
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 
-from PySide6.QtCore import QLineF, QPointF, QRectF, Qt
-from PySide6.QtGui import QBrush, QColor, QFont, QFontMetricsF, QLinearGradient, QPainter, QPen
+from PySide6.QtCore import QLineF, QObject, QPointF, QRectF, Qt, QTimer, Signal
+from PySide6.QtGui import QBrush, QColor, QCursor, QFont, QFontMetricsF, QLinearGradient, QPainter, QPen
 from PySide6.QtWidgets import QWidget
 
 EDGE = QColor("#2F6FED")
@@ -165,7 +166,12 @@ def paint_edge(p: QPainter, rect: QRectF, st: EdgeState) -> None:
 
 
 class EdgeWindow(QWidget):
-    """The calibration layer on one monitor."""
+    """The calibration layer on one monitor. ``clickable``: it takes the
+    clicks itself (this computer's own screen); otherwise it's click-through
+    and the host catches the clicks. Either way the guide follows the pointer."""
+
+    clicked = Signal(float)   # along the edge, in the window's pixels
+    key = Signal(str)         # "esc" or "backspace"
 
     def __init__(self, qscreen, state: EdgeState, clickable: bool = True):
         flags = Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool
@@ -173,16 +179,235 @@ class EdgeWindow(QWidget):
             flags |= Qt.WindowType.WindowDoesNotAcceptFocus | Qt.WindowType.WindowTransparentForInput
         super().__init__(None, flags)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        if not clickable:
+            self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+            self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.setMouseTracking(True)
+        self.clickable = clickable
         if qscreen is not None:
             self.setGeometry(qscreen.geometry())
         self.state = state
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._follow)
+        self._timer.start(30)
 
     def set_state(self, state: EdgeState) -> None:
+        state.pointer = self.state.pointer
         self.state = state
         self.update()
+
+    def _follow(self) -> None:
+        pos = QPointF(self.mapFromGlobal(QCursor.pos()))
+        inside = QRectF(self.rect()).contains(pos)
+        pointer = pos if inside else None
+        if pointer != self.state.pointer:
+            self.state.pointer = pointer
+            self.update()
+
+    def along(self, pos: QPointF) -> float:
+        return pos.y() if self.state.side in ("left", "right") else pos.x()
+
+    def mousePressEvent(self, e) -> None:  # noqa: N802
+        if self.clickable and e.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit(self.along(e.position()))
+
+    def keyPressEvent(self, e) -> None:  # noqa: N802
+        if e.key() == Qt.Key.Key_Escape:
+            self.key.emit("esc")
+        elif e.key() == Qt.Key.Key_Backspace:
+            self.key.emit("backspace")
 
     def paintEvent(self, _e) -> None:  # noqa: N802
         p = QPainter(self)
         paint_edge(p, QRectF(self.rect()), self.state)
         p.end()
+
+
+def _scale(qscreen, entry: dict, side: str) -> float:
+    """Window pixels per layout pixel, along the edge."""
+    g = qscreen.geometry()
+    size = entry.get("size") or [g.width(), g.height()]
+    try:
+        n = float(size[1] if side in ("left", "right") else size[0])
+    except (TypeError, ValueError, IndexError):
+        return 1.0
+    return (g.height() if side in ("left", "right") else g.width()) / n if n > 0 else 1.0
+
+
+def state_from(qscreen, entry: dict) -> EdgeState | None:
+    """The :class:`EdgeState` a hint entry's ``edge`` asks for, scaled from
+    layout pixels to the window's."""
+    edge = entry.get("edge")
+    if not isinstance(edge, dict) or edge.get("side") not in ("left", "right", "top", "bottom"):
+        return None
+    k = _scale(qscreen, entry, edge["side"])
+    points = [float(v) * k for v in edge.get("points", []) if isinstance(v, (int, float))][:2]
+    return EdgeState(edge["side"], str(edge.get("other", "the other screen")), points,
+                     waiting=str(edge.get("waiting", "")))
+
+
+class EdgeCalibration(QObject):
+    """Calibrating the edge between two screens of different devices.
+
+    ``ends``: the two sides, each ``{"device", "name", "screen": {id, os_x,
+    os_y, width, height}, "side"}``, the one to click first first.
+    ``send``: a command for the running service (``pick on``, ``hint ...``).
+    ``finished`` gives ``(a_span, b_span)`` (layout pixels along each edge),
+    or ``None`` if cancelled."""
+
+    finished = Signal(object)
+
+    def __init__(self, ends: list[dict], local_device: str, send):
+        super().__init__()
+        self.ends = ends
+        self.local = local_device
+        self.send = send
+        self.points: list[list[float]] = [[], []]
+        self.active = 0
+        self.windows: dict[int, EdgeWindow] = {}
+        self._remote = False
+
+    # -- what each screen shows ------------------------------------------------
+    def entry(self, i: int) -> dict:
+        end, other = self.ends[i], self.ends[1 - i]
+        s = end["screen"]
+        waiting = ""
+        if i > self.active:
+            waiting = f"Finish on {other['name']} first, then come across"
+        edge = {"side": end["side"], "other": other["name"], "points": list(self.points[i])}
+        if waiting:
+            edge["waiting"] = waiting
+        return {"screen": s["id"], "os": [s.get("os_x", 0), s.get("os_y", 0), s["width"], s["height"]],
+                "size": [s["width"], s["height"]], "edge": edge}
+
+    def start(self) -> bool:
+        if any(e["device"] != self.local for e in self.ends):
+            self._remote = True
+            self.send("pick on")
+        if not self.render():
+            self.stop()
+            return False
+        return True
+
+    def render(self) -> bool:
+        from curslink.gui.overlay import find_qscreen
+
+        remote: dict[str, dict] = {}
+        for i, end in enumerate(self.ends):
+            entry = self.entry(i)
+            if end["device"] != self.local:
+                remote.setdefault(end["device"], {"screens": []})["screens"].append(entry)
+                continue
+            window = self.windows.get(i)
+            if window is None:
+                qscreen = find_qscreen(entry["screen"], entry["os"])
+                if qscreen is None:
+                    return False
+                window = EdgeWindow(qscreen, state_from(qscreen, entry), clickable=True)
+                window.clicked.connect(lambda t, i=i: self.local_click(i, t))
+                window.key.connect(self.on_key)
+                self.windows[i] = window
+                window.show()
+                window.raise_()
+                window.activateWindow()
+            else:
+                window.set_state(state_from(window.screen(), entry))
+        if remote:
+            self.send("hint " + json.dumps({"devices": remote}, separators=(",", ":")))
+        return True
+
+    # -- clicks ------------------------------------------------------------------
+    def local_click(self, i: int, t: float) -> None:
+        window = self.windows.get(i)
+        if i != self.active or window is None:
+            return
+        self.add(t / _scale(window.screen(), self.entry(i), self.ends[i]["side"]))
+
+    def on_event(self, event: dict) -> None:
+        """A ``picked`` event from the service: a click (or Esc, Backspace)
+        on another computer."""
+        if event.get("event") != "picked":
+            return
+        if event.get("key"):
+            self.on_key(event["key"])
+            return
+        end = self.ends[self.active]
+        if event.get("device") != end["device"] or event.get("screen") != end["screen"]["id"]:
+            return
+        try:
+            t = float(event["y"] if end["side"] in ("left", "right") else event["x"])
+        except (KeyError, TypeError, ValueError):
+            return
+        self.add(t)
+
+    def add(self, t: float) -> None:
+        end = self.ends[self.active]
+        n = end["screen"]["height"] if end["side"] in ("left", "right") else end["screen"]["width"]
+        self.points[self.active].append(max(0.0, min(float(n), t)))
+        if len(self.points[self.active]) == 2:
+            if self.active == 1:
+                spans = tuple(tuple(sorted(p)) for p in self.points)
+                self.stop()
+                self.finished.emit(spans)
+                return
+            self.active = 1
+        self.render()
+
+    def on_key(self, key: str) -> None:
+        if key == "esc":
+            self.stop()
+            self.finished.emit(None)
+        elif key == "backspace":
+            if not self.points[self.active] and self.active == 1:
+                self.active = 0
+            if self.points[self.active]:
+                self.points[self.active].pop()
+            self.render()
+
+    def stop(self) -> None:
+        for window in self.windows.values():
+            window.hide()
+            window.deleteLater()
+        self.windows = {}
+        if self._remote:
+            self.send("pick off")
+            self.send('hint {"devices":{}}')
+            self._remote = False
+
+
+class RemoteEdges:
+    """On a paired computer: the edge layers the host's calibration asks for
+    (through ``hint`` entries with an ``edge``). Click-through: the host
+    catches the clicks."""
+
+    def __init__(self):
+        self.windows: dict[str, EdgeWindow] = {}
+
+    def show(self, entries: list[dict]) -> None:
+        from curslink.gui.overlay import find_qscreen
+
+        wanted = {}
+        for entry in entries:
+            qscreen = find_qscreen(entry["screen"], entry.get("os"))
+            state = state_from(qscreen, entry) if qscreen is not None else None
+            if state is None:
+                continue
+            key = qscreen.name() or entry["screen"]
+            wanted[key] = state
+            window = self.windows.get(key)
+            if window is None:
+                window = EdgeWindow(qscreen, state, clickable=False)
+                self.windows[key] = window
+                window.show()
+                window.raise_()
+            else:
+                window.set_state(state)
+        for key in list(self.windows):
+            if key not in wanted:
+                self.windows.pop(key).deleteLater()
+
+    def hide(self) -> None:
+        for window in self.windows.values():
+            window.hide()
+            window.deleteLater()
+        self.windows = {}

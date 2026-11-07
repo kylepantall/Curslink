@@ -341,6 +341,11 @@ async def run_host(cfg: HostConfig) -> None:
             look_command(server, line[5:])
         elif line.startswith("hint "):
             hint_command(server, line[5:])
+        elif line == "pick on":
+            # The Layout page is calibrating an edge: clicks on other computers are for it.
+            router.picker = lambda data: events.emit("picked", **data)
+        elif line == "pick off":
+            router.picker = None
         else:
             host_command(router, stop, line)
 

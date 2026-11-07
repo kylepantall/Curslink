@@ -84,6 +84,20 @@ confirm_with_agents = true   # agents running their own camera ([agent.gaze])
 # out, and pushing the pointer into it moves it to the screen in front.
 # [layout]
 # allow_overlap = false
+#
+# Calibrated edges (Layout > Calibrate edge… writes these): where two screens
+# of different devices really join, clicked on the monitors themselves. The
+# pointer leaves along a_span and comes out the same fraction along b_span,
+# so it lines up across sizes and pixel densities; off the span, that edge
+# doesn't cross. Spans are pixels along the edge, from its top (left/right
+# edges) or its left (top/bottom edges).
+# [[layout.links]]
+# a = "desktop/right"
+# a_side = "right"
+# a_span = [200, 1000]
+# b = "laptop/main"
+# b_side = "left"
+# b_span = [0, 800]
 
 [[devices]]
 id = "desktop"

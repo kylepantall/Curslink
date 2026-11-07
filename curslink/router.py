@@ -109,6 +109,9 @@ class Router:
         # so "switching" would only move the label, not the mouse.
         self.blocked: Callable[[], str] = lambda: ""
         self._blocked_said = ""
+        # While the Layout page calibrates an edge: left clicks (and Esc,
+        # Backspace) on another computer come here instead of going to it.
+        self.picker: Callable[[dict], None] | None = None
         # After arriving by gaze or a hotkey (home or on another device) the pointer may land right on
         # the edge it left by; it has to leave that edge before an edge push
         # counts again, or the next pointer event bounces input straight back.
@@ -263,6 +266,11 @@ class Router:
         if self.is_local:
             return
         self._moved_at = self.clock()  # clicking counts as using the mouse
+        if self.picker is not None and button == "left" and button not in self._remote_buttons:
+            if pressed:
+                self.picker({"device": self.active_device, "screen": self.screen.id,
+                             "x": round(self.x - self.screen.x, 1), "y": round(self.y - self.screen.y, 1)})
+            return
         if pressed:
             self._remote_buttons.add(button)
         else:
@@ -283,6 +291,10 @@ class Router:
             self.set_gaze_paused(not self.gaze_paused)
         if self.is_local:
             (self._local_keys.add if pressed else self._local_keys.discard)(key)
+            return
+        if self.picker is not None and key in ("esc", "backspace") and key not in self._remote_keys:
+            if pressed:
+                self.picker({"key": key})
             return
         if pressed:
             self._remote_keys.add(key)

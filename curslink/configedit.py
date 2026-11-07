@@ -184,6 +184,39 @@ class ConfigFile:
         if t is not None and key in t:
             del t[key]
 
+    # -- calibrated edges -----------------------------------------------------
+    def links(self) -> list[dict[str, Any]]:
+        return list(self.raw().get("layout", {}).get("links", []))
+
+    def set_link(self, a: str, a_side: str, a_span, b: str, b_side: str, b_span) -> None:
+        """Calibrate the edge between screens ``a`` and ``b`` ("device/screen");
+        replaces an earlier calibration of the same pair."""
+        self.remove_link(a, b)
+        layout = self._table("layout", create=True)
+        if "links" not in layout:
+            layout["links"] = tomlkit.aot()
+        t = tomlkit.table()
+        t["a"], t["a_side"], t["a_span"] = a, a_side, [round(v) for v in a_span]
+        t["b"], t["b_side"], t["b_span"] = b, b_side, [round(v) for v in b_span]
+        layout["links"].append(t)
+
+    def remove_link(self, a: str, b: str) -> bool:
+        layout = self._table("layout", create=False)
+        if layout is None or "links" not in layout:
+            return False
+        aot = layout["links"]
+        keep = [t for t in aot if {t.get("a"), t.get("b")} != {a, b}]
+        if len(keep) == len(aot):
+            return False
+        if keep:
+            new = tomlkit.aot()
+            for t in keep:
+                new.append(t)
+            layout["links"] = new
+        else:
+            del layout["links"]
+        return True
+
     # -- the layout -----------------------------------------------------------
     def devices(self) -> list[dict[str, Any]]:
         return list(self.raw().get("devices", []))
