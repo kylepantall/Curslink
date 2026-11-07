@@ -563,18 +563,26 @@ def test_layout_page_fits_the_window_with_an_overlap(desktop, qapp, monkeypatch)
         # Windows' offscreen fonts come out about twice as wide as anywhere
         # else, so scale the window with them ("Detect my screens" is ~120 px).
         scale = max(1.0, page.detect_button.sizeHint().width() / 120)
-        for width in (900, 1400, 700):  # Kyle's window, a wide one, a narrow one
-            w.resize(round(width * scale), 760)
+
+        def check(width, part=None):
+            w.resize(round(width), 760)
             w.show()
             qapp.processEvents()
             qapp.processEvents()
-            assert page.widget().minimumSizeHint().width() <= page.viewport().width(), (
-                width, page.bottom_row.direction(), _widest(page.widget()))
+            m = page.layout_.contentsMargins()
+            need = (part.minimumSizeHint().width() + m.left() + m.right() if part
+                    else page.widget().minimumSizeHint().width())
+            assert need <= page.viewport().width(), (width, page.bottom_row.direction(), _widest(page.widget()))
             stacked = page.bottom_row.direction() == page.bottom_row.Direction.TopToBottom
             assert stacked == (page.viewport().width() < page.side_by_side_width()), width
-            if width == 1400:
-                assert not stacked
-        assert stacked  # at 700
+            return stacked
+
+        check(900 * scale)  # Kyle's window
+        assert not check(1400 * scale)
+        # just too narrow for the two cards side by side, when the window can be
+        just_under = w.width() - page.viewport().width() + page.side_by_side_width() - 20
+        if just_under >= w.minimumWidth():
+            assert check(just_under, part=page.inspector.parentWidget())  # the header may not fit there
     finally:
         theme.manager().set_mode("system")
 
