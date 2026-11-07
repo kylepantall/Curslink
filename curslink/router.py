@@ -399,8 +399,9 @@ class Router:
                     log.warning("not switching to %s: %s", new, why)
                     self._blocked_said = why
                 return
-        self._last_pos[old] = (self.x, self.y)
-        self._screen_pos[(self.screen.device_id, self.screen.id)] = (self.x, self.y)
+        left_at = (self.x, self.y)
+        self._last_pos[old] = left_at
+        self._screen_pos[(self.screen.device_id, self.screen.id)] = left_at
         effect = self.settings.effect
         # Where the pointer leaves from: the animation plays there too, so you
         # see it cut across the edge rather than only where it lands.
@@ -449,7 +450,8 @@ class Router:
             else:
                 self.transport.send(new, "move", x=ox, y=oy)
 
-        log.info("input -> %s/%s (%s)", new, screen.id, reason)
+        log.info("input -> %s/%s (%s): left %s at (%.0f, %.0f), lands at (%.0f, %.0f)",
+                 new, screen.id, reason, old, left_at[0], left_at[1], ox, oy)
         event = SwitchEvent(old, new, screen, reason)
         for listener in self.listeners:
             listener(event)
