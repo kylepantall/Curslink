@@ -390,16 +390,19 @@ def install_style(app) -> str:
         wanted = NATIVE_STYLES.get(platform_key(), "fusion")
         if wanted not in keys:  # e.g. Windows 10, or a build without the plugin
             wanted = "fusion"
+    global _style
     if hasattr(app, "setStyle"):
         app.setStyle(keys.get(wanted, "Fusion"))
+        _style = wanted
     log.info("Qt style: %s", wanted)
     return wanted
 
 
+_style = ""  # what install_style() set; app.style() is a style-sheet wrapper once a sheet is set
+
+
 def native_style_active() -> bool:
-    app = QGuiApplication.instance()
-    style = app.style() if app is not None and hasattr(app, "style") else None
-    return style is not None and style.name().lower() in NATIVE_STYLES.values()
+    return _style in NATIVE_STYLES.values()
 
 
 # ---------------------------------------------------------------- manager
