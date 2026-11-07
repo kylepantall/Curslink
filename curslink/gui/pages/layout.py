@@ -376,6 +376,9 @@ class LayoutPage(Page):
         self.edges_card.body.addStretch(1)
         grid.addWidget(self.edges_card, 2)
         self.add(bottom)
+        # On an agent the canvas is hidden; this takes its space so the note
+        # stays under the title instead of the page spreading out.
+        self.agent_spacer = self.add(QWidget(), 1)
 
         app.config_changed.connect(self.load_if_clean)
         self.load()
@@ -427,6 +430,7 @@ class LayoutPage(Page):
         self.overlap_box.setVisible(is_host)
         self.overlap_row.hide()
         self.agent_note.setVisible(not is_host)
+        self.agent_spacer.setVisible(not is_host)
         if not is_host:
             self.agent_note.setText("The layout lives on the host. Open Curslink on the computer your keyboard "
                                     "and mouse are plugged into to arrange the screens.")

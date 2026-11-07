@@ -144,6 +144,8 @@ class Theme:
     def tokens(self) -> dict[str, str]:
         t = dict(TOKENS[self.platform][self.mode])
         t.update(_COMMON_STATUS[self.platform][self.mode])
+        if self.native:
+            t.update(system_accent(self.dark))
         return t
 
     @property
@@ -183,6 +185,24 @@ class Theme:
     def content_bg(self) -> str:
         t = self.tokens
         return t.get("content_glass", t["content"]) if self.glass else t["content"]
+
+
+def system_accent(dark: bool) -> dict[str, str]:
+    """The user's accent colour, from the system palette a native style uses,
+    so our own painting (primary buttons, toggles, selection) matches Qt's."""
+    app = QGuiApplication.instance()
+    if app is None or not hasattr(QPalette.ColorRole, "Accent"):
+        return {}
+    c = QGuiApplication.palette().color(QPalette.ColorRole.Accent)
+    if not c.isValid() or c.alpha() == 0:
+        return {}
+    r, g, b = c.red(), c.green(), c.blue()
+    luma = 0.2126 * r + 0.7152 * g + 0.0722 * b
+    return {
+        "accent": c.name(),
+        "accent_ink": "#000000" if luma > 150 else "#FFFFFF",
+        "accent_soft": f"rgba({r},{g},{b},{'.22' if dark else '.14'})",
+    }
 
 
 _current = Theme()
@@ -228,10 +248,9 @@ def stylesheet(th: Theme) -> str:
     # scroll bars and sliders themselves. Any style-sheet rule with a box
     # property on those widgets makes Qt fall back to drawing them from the
     # sheet, so in native mode they get no rules at all.
-    if th.native:
-        generic_buttons = fields = chrome = ""
-    else:
-        generic_buttons = f"""QPushButton {{
+    # Except text fields on macOS, where Qt's style draws a flat box with no
+    # bezel (black in dark mode); ours match AppKit's more closely.
+    generic_buttons = f"""QPushButton {{
     min-height: {s['btn_h'] - 2}px; padding: 0 14px; border-radius: {s['r_ctl']}px; border: {btn_border};
     background: {t['ctl']}; color: {t['ink']}; font-weight: {700 if plat == 'linux' else 400};
 }}
@@ -240,7 +259,7 @@ QPushButton:pressed {{ background: {t['card2']}; }}
 QPushButton:disabled {{ color: {t['ink3']}; }}
 QPushButton:focus {{ outline: none; }}
 """
-        fields = f"""QLineEdit, QComboBox, QSpinBox {{
+    fields = f"""QLineEdit, QComboBox, QSpinBox {{
     min-height: {s['field_h'] - 2}px; padding: 0 10px; border: {field_border}; {field_bottom}
     border-radius: {s['r_ctl']}px; background: {t['ctl']}; color: {t['ink']};
     selection-background-color: {t['accent']}; selection-color: {t['accent_ink']};
@@ -253,7 +272,7 @@ QComboBox QAbstractItemView {{
     selection-background-color: {t['accent_soft']}; selection-color: {t['ink']};
 }}
 """
-        chrome = f"""QToolTip {{ background: {t['card']}; color: {t['ink']}; border: 1px solid {t['stroke']}; padding: 4px 8px; }}
+    chrome = f"""QToolTip {{ background: {t['card']}; color: {t['ink']}; border: 1px solid {t['stroke']}; padding: 4px 8px; }}
 QMenu {{ background: {t['card']}; color: {t['ink']}; border: 1px solid {t['stroke']}; padding: 4px; }}
 QMenu::item {{ padding: 6px 18px; border-radius: {s['r_ctl']}px; }}
 QMenu::item:selected {{ background: {t['accent_soft']}; }}
@@ -272,6 +291,10 @@ QSlider::sub-page:horizontal {{ background: {t['accent']}; border-radius: 2px; }
 QSlider::handle:horizontal {{ width: 18px; height: 18px; margin: -7px 0; border-radius: 9px;
     background: {'#FFFFFF' if plat == 'mac' else t['accent']}; border: {('1px solid ' + t['ctl_stroke']) if plat == 'mac' else '0'}; }}
 """
+    if th.native:
+        generic_buttons = chrome = ""
+        if plat == "win":
+            fields = ""
     return f"""
 * {{ font-size: {s['font_px']}px; }}
 QMainWindow, QWidget#root {{ background: {th.window_bg}; color: {t['ink']}; }}

@@ -8,12 +8,11 @@ Used by CI to show what Qt's native styles look like on each platform::
 from __future__ import annotations
 
 import os
-import shutil
 import sys
 import tempfile
 from pathlib import Path
 
-PAGES = ("status", "devices", "layout", "settings")
+PAGES = ("status", "devices", "layout", "calibrate", "settings")
 
 
 def main(argv: list[str]) -> int:
@@ -22,7 +21,13 @@ def main(argv: list[str]) -> int:
     home = Path(tempfile.mkdtemp(prefix="curslink-shots-"))
     os.environ["CURSLINK_HOME"] = str(home)
     config = home / "curslink.toml"
-    shutil.copy(Path(__file__).resolve().parent.parent / "examples" / "curslink.toml", config)
+    import tomlkit
+
+    # The example has [host] and [agent] side by side; keep the host, so the
+    # pictures show the host's pages (the layout editor, its devices).
+    doc = tomlkit.parse((Path(__file__).resolve().parent.parent / "examples" / "curslink.toml").read_text("utf-8"))
+    doc.pop("agent", None)
+    config.write_text(tomlkit.dumps(doc), "utf-8")
 
     from PySide6.QtWidgets import QApplication
 

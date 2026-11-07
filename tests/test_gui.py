@@ -107,8 +107,10 @@ def test_native_style_leaves_standard_controls_to_qt(qapp):
     for look in ("win", "mac"):
         native = theme.stylesheet(theme.Theme(look, False, False, True))
         custom = theme.stylesheet(theme.Theme(look, False, False, False))
-        for rule in ("QPushButton {", "QLineEdit, QComboBox", "QScrollBar:vertical", "QMenu {", "QSlider::"):
+        for rule in ("QPushButton {", "QScrollBar:vertical", "QMenu {", "QSlider::"):
             assert rule in custom and rule not in native
+        # Qt's macOS text field is a flat box, so macOS keeps ours.
+        assert ("QLineEdit, QComboBox" in native) == (look == "mac")
         assert "QPushButton#primary" in native and "QFrame#card" in native
 
 
