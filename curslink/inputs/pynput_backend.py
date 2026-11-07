@@ -456,30 +456,77 @@ def _mac_warp(x: float, y: float) -> None:
         log.debug("couldn't warp the cursor", exc_info=True)
 
 
+def _mac_sets_cursor_in_background(cg, cf) -> None:
+    cg._CGSDefaultConnection.restype = ctypes.c_int
+    cid = cg._CGSDefaultConnection()
+    cf.CFStringCreateWithCString.restype = ctypes.c_void_p
+    cf.CFStringCreateWithCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32]
+    key = cf.CFStringCreateWithCString(None, b"SetsCursorInBackground", 0x08000100)
+    true = ctypes.c_void_p.in_dll(cf, "kCFBooleanTrue")
+    cg.CGSSetConnectionProperty.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p]
+    cg.CGSSetConnectionProperty(cid, cid, key, true)
+
+
 def _mac_cursor_visible(visible: bool) -> None:
     """Hide or show the Mac's cursor. A background process may only do that
     after setting "SetsCursorInBackground" on its window server connection
     (what Synergy and Barrier do)."""
-    global _mac_hidden
+    global _mac_hidden, _mac_show_gen
     if visible != _mac_hidden:
         return  # already that way (hiding counts, so never hide twice)
     try:
         cg, cf = _mac_lib(_CG_PATH), _mac_lib(_CF_PATH)
+        _mac_sets_cursor_in_background(cg, cf)
+        _mac_show_gen += 1
         if not visible:
-            cg._CGSDefaultConnection.restype = ctypes.c_int
-            cid = cg._CGSDefaultConnection()
-            cf.CFStringCreateWithCString.restype = ctypes.c_void_p
-            cf.CFStringCreateWithCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32]
-            key = cf.CFStringCreateWithCString(None, b"SetsCursorInBackground", 0x08000100)
-            true = ctypes.c_void_p.in_dll(cf, "kCFBooleanTrue")
-            cg.CGSSetConnectionProperty.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p]
-            cg.CGSSetConnectionProperty(cid, cid, key, true)
             cg.CGDisplayHideCursor(0)
         else:
             cg.CGDisplayShowCursor(0)
+            _mac_check_shown(_mac_show_gen, 0)
         _mac_hidden = not visible
     except Exception:  # pragma: no cover - macOS only
         log.debug("couldn't %s the cursor", "show" if visible else "hide", exc_info=True)
+
+
+_mac_show_gen = 0
+# When the frontmost app isn't responding, the window server can leave the
+# cursor hidden after we show it again (it waits on that app). So look again
+# a few times after showing it, and show it again if it's still hidden.
+_MAC_SHOW_CHECKS_S = (0.05, 0.25, 1.0, 3.0)
+
+
+def _mac_check_shown(gen: int, attempt: int) -> None:
+    if gen != _mac_show_gen or _mac_hidden:
+        return  # hidden again on purpose since, or shown for good
+    try:
+        cg, cf = _mac_lib(_CG_PATH), _mac_lib(_CF_PATH)
+        if attempt > 0:
+            cg.CGCursorIsVisible.restype = ctypes.c_bool
+            if not cg.CGCursorIsVisible():
+                log.warning("the cursor was still hidden after input came home (is the app in front "
+                            "not responding?); showing it again")
+                _mac_sets_cursor_in_background(cg, cf)
+                cg.CGDisplayShowCursor(0)
+                _mac_nudge_cursor()
+    except Exception:  # pragma: no cover - macOS only
+        log.debug("couldn't check the cursor is showing", exc_info=True)
+    if attempt < len(_MAC_SHOW_CHECKS_S):
+        timer = threading.Timer(_MAC_SHOW_CHECKS_S[attempt], _mac_check_shown, (gen, attempt + 1))
+        timer.daemon = True
+        timer.start()
+
+
+def _mac_nudge_cursor() -> None:
+    """Post a mouse-moved event where the cursor already is: the window
+    server redraws the cursor for it even when the app in front is hung."""
+    try:
+        import Quartz
+
+        at = Quartz.CGEventGetLocation(Quartz.CGEventCreate(None))
+        event = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventMouseMoved, at, Quartz.kCGMouseButtonLeft)
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
+    except Exception:  # pragma: no cover - macOS only
+        log.debug("couldn't nudge the cursor", exc_info=True)
 
 
 def _mac_no_event_suppression() -> None:
