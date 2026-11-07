@@ -59,7 +59,7 @@ class FacingSettings:
     # Pitch is noisier than yaw on most webcams; weight it down a little.
     pitch_weight: float = 0.8
     # How long the new state must hold before it is reported.
-    dwell_s: float = 0.15
+    dwell_s: float = 0.1
     # No face for this long = not facing.
     lost_after_s: float = 0.4
 

@@ -242,7 +242,7 @@ class SettingsPage(Page):
             self.camera.set_current(int(gaze.get("camera", 0) or 0), str(gaze.get("camera_name", "") or ""))
             self.theme_choice.set_value(self.app.prefs.theme)
             self.glass.setChecked(self.app.prefs.glass)
-            self.dwell.setValue(int(gaze.get("dwell_ms", 350)))
+            self.dwell.setValue(int(gaze.get("dwell_ms", 250)))
             self.dwell_label.setText(f"Look for {self.dwell.value()} ms before switching")
             self.hotkeys.setText(f"Bring input home: {host.get('return_hotkey', 'ctrl+alt+home')}\n"
                                  f"Pause gaze: {host.get('gaze_toggle_hotkey', 'ctrl+alt+g')}")

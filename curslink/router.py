@@ -30,6 +30,11 @@ log = logging.getLogger(__name__)
 # doesn't, and used to bounce input home within 15 ms of arriving.
 RETURN_GUARD_S = 0.15
 
+# Arriving on another computer by gaze or a hotkey, the pointer comes back
+# where it was left, usually just inside the edge it left by. Edge switching
+# waits until it has been at least this far from that edge.
+ARM_PX = 24
+
 
 class Transport(Protocol):
     def is_connected(self, device_id: str) -> bool: ...
@@ -92,7 +97,7 @@ class Router:
         # so "switching" would only move the label, not the mouse.
         self.blocked: Callable[[], str] = lambda: ""
         self._blocked_said = ""
-        # After coming home by gaze or a hotkey the pointer may land right on
+        # After arriving by gaze or a hotkey (home or on another device) the pointer may land right on
         # the edge it left by; it has to leave that edge before an edge push
         # counts again, or the next pointer event bounces input straight back.
         self._edge_armed = True
@@ -156,7 +161,7 @@ class Router:
             crossing = self.layout.find_crossing(
                 self.active_device, self.x, self.y, dx, dy, self.settings.gap_tolerance_px
             )
-            if crossing and self._just_came_from(crossing.screen.device_id):
+            if crossing and (self._just_came_from(crossing.screen.device_id) or not self._edge_armed):
                 crossing = None
             if crossing and self.available(crossing.screen.device_id):
                 self.switch_to(crossing.screen, crossing.x, crossing.y, "edge")
@@ -164,6 +169,8 @@ class Router:
         if here is None:
             here, nx, ny = self.layout.clamp_to_device(self.active_device, nx, ny)
         self.screen, self.x, self.y = here, nx, ny
+        if not self._edge_armed:
+            self._edge_armed = not self.layout.edge_pushes(self.active_device, nx, ny, ARM_PX)
         ox, oy = here.to_os(nx, ny)
         if ts is None:
             self.transport.send(self.active_device, "move", x=ox, y=oy)
@@ -298,6 +305,10 @@ class Router:
             if old == self.local_id:
                 self.capture.set_grab(True)
             if old != new:
+                # Same as coming home: by gaze the pointer comes back where it
+                # was left, often on the very edge it left by, and the next
+                # nudge used to send input straight back (and blink twice).
+                self._edge_armed = reason == "edge"
                 self.transport.send(new, "enter", x=ox, y=oy, effect=effect)
             else:
                 self.transport.send(new, "move", x=ox, y=oy)

@@ -331,3 +331,22 @@ def test_switch_animation_never_takes_focus_or_clicks(qapp):
     assert w.testAttribute(Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow)  # else hidden on the Mac
     assert not w.isActiveWindow()
     w.close()
+
+
+def test_a_screen_the_camera_couldnt_see_is_tried_again_not_skipped(desktop, qapp):
+    desktop.window.pages["setup"].create()
+    cfg = desktop.config()
+    cfg.add_device("laptop", "Work laptop")
+    cfg.save()
+    desktop.config_saved(restart=False)
+    page = desktop.window.pages["calibrate"]
+    page.load_targets()
+    page.state, page.step = "recording", 0
+    name = page.targets[0][1]
+    page.recorded(name, None)
+    assert page.state == "ready" and page.step == 0 and name not in page.results
+    assert "couldn't see your face" in page.prompt_detail.text()
+    page.state = "recording"
+    page.recorded(name, (1.0, 2.0))
+    assert page.step == 1 and page.results[name] == (1.0, 2.0)
+    assert "couldn't see" not in page.prompt_detail.text()

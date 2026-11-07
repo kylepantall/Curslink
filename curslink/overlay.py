@@ -30,7 +30,7 @@ log = logging.getLogger(__name__)
 
 SIZE = 180
 ACCENT = "#3fa9ff"
-DURATION_S = 0.38
+DURATION_S = 0.3
 
 
 def helper_command() -> list[str]:
@@ -149,13 +149,11 @@ def _spawn(root, effect: str, x: int, y: int) -> None:
             dot = 7 * (1 - p)
             canvas.create_oval(c - dot, c - dot, c + dot, c + dot, fill=ACCENT, outline="")
             alpha = 1 - p * 0.6
-        else:  # blink: two quick flashes
-            on = int(p * 4) % 2 == 0
+        else:  # blink: one quick flash that fades
             r = 34
-            if on:
-                canvas.create_oval(c - r, c - r, c + r, c + r, outline=ACCENT, width=6)
-                canvas.create_oval(c - 9, c - 9, c + 9, c + 9, fill=ACCENT, outline="")
-            alpha = 1.0
+            canvas.create_oval(c - r, c - r, c + r, c + r, outline=ACCENT, width=6)
+            canvas.create_oval(c - 9, c - 9, c + 9, c + 9, fill=ACCENT, outline="")
+            alpha = 1.0 if p < 0.5 else max(0.0, 2 - 2 * p)
         if sys.platform not in ("win32", "darwin"):
             win.attributes("-alpha", max(0.05, alpha * 0.9))
         win.after(12, frame)
@@ -190,6 +188,25 @@ def native_to_logical(screens, x: float, y: float, scale_positions: bool) -> tup
     return float(x), float(y)
 
 
+def effect_box(screens, x: float, y: float, size: int = SIZE) -> tuple[int, int, int, int, float, float]:
+    """Where to put an effect's window around logical point (x, y): a
+    ``size`` square centred on it, cut to the screen the point is on.
+
+    A window whose corner hangs off every screen (the point is near the outer
+    edge of the leftmost or topmost display, which is just where input comes
+    home from a computer beside it) gets moved to the main display by the OS,
+    so the animation showed in the wrong place or not at all. Returns
+    ``(left, top, width, height, cx, cy)``, the centre relative to the window."""
+    left, top = round(x - size / 2), round(y - size / 2)
+    right, bottom = left + size, top + size
+    for gx, gy, gw, gh, _dpr in screens:
+        if gx <= x < gx + gw and gy <= y < gy + gh:
+            left, top = max(left, gx), max(top, gy)
+            right, bottom = min(right, gx + gw), min(bottom, gy + gh)
+            break
+    return left, top, right - left, bottom - top, x - left, y - top
+
+
 def _mac_accessory() -> None:
     """Never become the active app (or show in the Dock) for an animation."""
     if sys.platform != "darwin":
@@ -205,7 +222,7 @@ def _mac_accessory() -> None:
 def make_effect_widget(effect: str, x: int, y: int):
     """One pop or blink at OS position (x, y), already showing; it closes
     itself when done."""
-    from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
+    from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, QTimer
     from PySide6.QtGui import QColor, QGuiApplication, QPainter, QPen
     from PySide6.QtWidgets import QWidget
 
@@ -214,6 +231,8 @@ def make_effect_widget(effect: str, x: int, y: int):
         g = sc.geometry()
         screens.append((g.x(), g.y(), g.width(), g.height(), sc.devicePixelRatio() or 1.0))
     lx, ly = native_to_logical(screens, x, y, sys.platform == "win32")
+    left, top, width, height, cx, cy = effect_box(screens, lx, ly)
+    screen = QGuiApplication.screenAt(QPoint(round(lx), round(ly)))
 
     class Effect(QWidget):
         def __init__(self):
@@ -231,7 +250,9 @@ def make_effect_widget(effect: str, x: int, y: int):
                          Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow):
                 self.setAttribute(attr, True)
             self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            self.setGeometry(round(lx - SIZE / 2), round(ly - SIZE / 2), SIZE, SIZE)
+            if screen is not None:
+                self.setScreen(screen)
+            self.setGeometry(left, top, width, height)
             self.effect = effect
             self.start = time.monotonic()
             self.timer = QTimer(self)
@@ -253,7 +274,7 @@ def make_effect_widget(effect: str, x: int, y: int):
             accent = QColor(ACCENT)
             painter = QPainter(self)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            c = QPointF(SIZE / 2, SIZE / 2)
+            c = QPointF(cx, cy)
             if self.effect == "pop":
                 accent.setAlphaF(max(0.0, 1 - p * 0.6))
                 r = 10 + _ease_out(p) * (SIZE / 2 - 14)
@@ -264,7 +285,8 @@ def make_effect_widget(effect: str, x: int, y: int):
                 painter.setPen(Qt.PenStyle.NoPen)
                 painter.setBrush(accent)
                 painter.drawEllipse(QRectF(c.x() - dot, c.y() - dot, 2 * dot, 2 * dot))
-            elif int(p * 4) % 2 == 0:  # blink: two quick flashes
+            else:  # blink: one quick flash that fades
+                accent.setAlphaF(1.0 if p < 0.5 else max(0.0, 2 - 2 * p))
                 painter.setPen(QPen(accent, 6))
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawEllipse(c, 34, 34)

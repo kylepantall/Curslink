@@ -89,3 +89,42 @@ def test_hysteresis_near_the_boundary():
 def test_empty_calibration_rejected():
     with pytest.raises(ValueError):
         GazeClassifier(Calibration())
+
+
+class _FakeTracker:
+    def __init__(self, on_sample, camera=0):
+        self.on_sample = on_sample
+
+    def start(self):
+        pass
+
+    def stop(self):
+        pass
+
+
+def test_calibrating_a_screen_off_to_the_side_waits_for_the_face(monkeypatch):
+    import threading
+    import time
+
+    from curslink.app import Calibrator
+    from curslink.gaze.zones import Target
+
+    cal = Calibrator(tracker_factory=_FakeTracker)
+
+    def late_face():  # the face only shows up after the usual 1.5 s
+        time.sleep(0.35)
+        for _ in range(20):
+            cal.tracker.on_sample(time.monotonic(), 50.0, -15.0)
+            time.sleep(0.01)
+
+    threading.Thread(target=late_face, daemon=True).start()
+    centre = cal.record(Target("pc", "main"), seconds=0.2, settle=0.0, patience=2.0)
+    assert centre is not None and abs(centre[0] - 50.0) < 1e-6
+
+
+def test_calibrating_with_no_face_gives_up(monkeypatch):
+    from curslink.app import Calibrator
+    from curslink.gaze.zones import Target
+
+    cal = Calibrator(tracker_factory=_FakeTracker)
+    assert cal.record(Target("pc", "main"), seconds=0.05, settle=0.0, patience=0.1) is None

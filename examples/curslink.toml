@@ -48,7 +48,7 @@ lan = true                   # accept agents on the LAN; false = relay only
 enabled = true               # camera-based switching
 camera = 0
 calibration = "calibration.json"   # written by `curslink calibrate`
-dwell_ms = 350               # how long you must look before it switches
+dwell_ms = 250               # how long you must look before it switches
 max_distance_deg = 12        # further than this from every screen = looking elsewhere
 switch_margin_deg = 3        # hysteresis between neighbouring screens
 within_device = false        # also jump between the host's own monitors
@@ -59,7 +59,7 @@ confirm_with_agents = true   # agents running their own camera ([agent.gaze])
 # computer, which works alongside agents' cameras. Agents' cameras work
 # even with enabled = false here.
 # facing_deg = 18
-# facing_dwell_ms = 150
+# facing_dwell_ms = 100
 
 # --- The layout ----------------------------------------------------------
 # Place every screen of every device in ONE shared coordinate space, arranged
@@ -126,4 +126,4 @@ animations = true
 # facing_deg = 18            # head within this of "straight on" = facing this device
 # center_pitch_deg = 0       # e.g. -10 if the camera sits well above the screen
 # center_yaw_deg = 0         # e.g. 15 if the camera is off to one side
-# dwell_ms = 150
+# dwell_ms = 100
