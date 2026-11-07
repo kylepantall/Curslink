@@ -14,6 +14,7 @@ import sys
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QBrush, QColor, QFont, QFontMetricsF, QGuiApplication, QPainter, QPen
 from PySide6.QtWidgets import (
+    QApplication,
     QGraphicsItem,
     QLabel,
     QGraphicsRectItem,
@@ -166,8 +167,31 @@ class ScreenItem(QGraphicsRectItem):
             self.page.overlaps_changed(dragging=self)
         return super().itemChange(change, value)
 
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        self._press = (self.pos(), self.page.dirty, self.zValue())
+        super().mousePressEvent(event)
+
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
         super().mouseReleaseEvent(event)
+        press = getattr(self, "_press", None)
+        self._press = None
+        travel = (event.screenPos() - event.buttonDownScreenPos(Qt.MouseButton.LeftButton)).manhattanLength()
+        if press is not None and travel < QApplication.startDragDistance():
+            # A click, not a drag: put it back exactly where it was (a hand
+            # shakes a pixel or two, which is many layout pixels), and don't
+            # snap it anywhere. A click on an overlapping screen brings it
+            # to the front.
+            pos, was_dirty, z = press
+            self.setPos(pos)
+            others = [i.layout_rect() for i in self.page.items if i is not self]
+            if self.page.allow_overlap and any(overlap_of(self.layout_rect(), o) for o in others):
+                self.page.bring_to_front(self)
+            if self.zValue() != z:
+                self.page.moved(self)
+            else:
+                self.page.set_dirty(was_dirty)
+                self.page.overlaps_changed()
+            return
         others = [i.layout_rect() for i in self.page.items if i is not self]
         x, y = snap(self.layout_rect(), others)
         if not self.page.allow_overlap:
