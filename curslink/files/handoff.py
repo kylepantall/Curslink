@@ -1,7 +1,10 @@
 """Carrying a file drag from the host to another device, and dropping it there.
 
-How a drag is noticed (none of the OSes says "a file is being dragged"
-to a program that isn't under the pointer):
+How a drag is noticed. On macOS, from the system's drag pasteboard
+(:mod:`curslink.files.macdrag`): when input leaves with the button held,
+the host checks whether something put files on it since the button went
+down. Elsewhere no OS says "a file is being dragged" to a program that
+isn't under the pointer, so:
 
 * Edge: while the left button is held and the pointer moves, the overlay
   helper puts thin, invisible drop targets ("strips") along the host's
@@ -71,18 +74,24 @@ class DragHandoff:
         inject: Callable[[str], None],
         local_name: str,
         emit: Callable[..., None] = lambda kind, **data: None,
+        drag_source: Callable[[], tuple[int, list[str]] | None] | None = None,
     ):
         """``helper(line)`` sends a command to the overlay helper;
         ``inject("nudge" | "release")`` (blocking, run off the loop) moves the
         host's parked pointer a pixel and back, and for "release" lets go of
-        the left button too, so the host's OS sees it although input is grabbed."""
+        the left button too, so the host's OS sees it although input is grabbed.
+        ``drag_source()`` (macOS) gives the drag pasteboard's (change count,
+        file paths); with it, no drop-target windows are used to find drags."""
         self.router = router
         self.server = server
         self.helper = helper
         self.inject = inject
         self.local_name = local_name
         self.emit = emit
-        self.strips = edge_strips(router.layout, router.local_id, router.settings.gap_tolerance_px)
+        self.drag_source = drag_source
+        self.strips = [] if drag_source else edge_strips(router.layout, router.local_id,
+                                                         router.settings.gap_tolerance_px)
+        self._pb_count: int | None = None     # drag pasteboard's count when the button went down
         self.left_down = False
         self.down_at: tuple[float, float] | None = None
         self.strips_up = False
@@ -104,6 +113,9 @@ class DragHandoff:
                 self._reset()
                 self.left_down = True
                 self.down_at = None
+                if self.drag_source is not None:
+                    pb = self.drag_source()
+                    self._pb_count = pb[0] if pb else None
             return False
         was_down, self.left_down = self.left_down, False
         if self.carrying and not self.router.is_local and was_down:
@@ -121,12 +133,16 @@ class DragHandoff:
         if not self.strips_up and self.strips and (
                 abs(ox - self.down_at[0]) + abs(oy - self.down_at[1]) >= DRAG_START_PX):
             self.strips_up = True
+            log.info("drag: watching %d screen edge(s) for a file", len(self.strips))
             self.helper("strips " + json.dumps(self.strips, separators=(",", ":")))
 
     # ------------------------------------------------------ helper reports
     def on_helper(self, line: str) -> None:
         """A line from the overlay helper: ``drag {"paths": [...]}`` when a
-        drag passes over one of its drop targets."""
+        drag passes over one of its drop targets, ``log ...`` for the log."""
+        if line.startswith("log "):
+            log.info("overlay helper: %s", line[4:])
+            return
         if not line.startswith("drag "):
             return
         try:
@@ -134,6 +150,7 @@ class DragHandoff:
         except ValueError:
             return
         paths = [p for p in data.get("paths", []) if isinstance(p, str)] if isinstance(data, dict) else []
+        log.info("drag: a %s drag reached a drop target", "file" if paths else "non-file")
         if not self.left_down:
             return
         if not paths:
@@ -147,7 +164,10 @@ class DragHandoff:
 
     async def _describe(self, gen: int, paths: list[str]) -> None:
         items = await asyncio.to_thread(describe, paths)
-        if gen != self._gen or not items:
+        if gen != self._gen:
+            return
+        if not items:
+            log.info("drag: none of the dragged paths could be read")
             return
         self.items = items
         log.info("dragging %s", ", ".join(i.name for i in items[:3]) + ("..." if len(items) > 3 else ""))
@@ -172,8 +192,30 @@ class DragHandoff:
             self.carrying = None  # the old device took its card down on "leave"
         if self.items:
             self.carry(event.to_device)
+        elif self.drag_source is not None:
+            asyncio.get_running_loop().create_task(self._check_pasteboard(self._gen))
         elif self.paths is None and event.reason != "edge":
             self.probe()
+
+    async def _check_pasteboard(self, gen: int) -> None:
+        """macOS: did a drag that started after the button went down put files
+        on the drag pasteboard? Asked twice, in case the app is slow to write."""
+        for attempt in range(2):
+            pb = await asyncio.to_thread(self.drag_source)
+            if gen != self._gen or not self.left_down:
+                return
+            if pb is None:
+                log.info("drag: the drag pasteboard can't be read")
+                return
+            count, paths = pb
+            if count != self._pb_count and paths:
+                log.info("drag: %d file(s) on the drag pasteboard", len(paths))
+                self.paths = paths
+                await self._describe(gen, paths)
+                return
+            if attempt == 0:
+                await asyncio.sleep(0.15)
+        log.info("drag: input left with the button held, but no file is being dragged")
 
     def probe(self) -> None:
         """Input left with the button held, but not over an edge strip: is
@@ -193,10 +235,11 @@ class DragHandoff:
 
     def carry(self, device_id: str) -> None:
         if not self.server.supports(device_id, FILES_FEATURE):
-            log.info("%s can't take dropped files (update Curslink there, or turn on [agent.files])",
+            log.warning("%s can't take dropped files (update Curslink there, or turn on [agent.files])",
                      device_id)
             return
         self.carrying = device_id
+        log.info("drag: carrying %s to %s", ", ".join(i.name for i in self.items[:3]), device_id)
         self.set_shield(True)  # the host's own drag rests on it until the drop
         self.server.send(device_id, "drag", card=card(self.items))
 
@@ -204,6 +247,7 @@ class DragHandoff:
     def drop(self) -> None:
         device_id, items = self.carrying, self.items
         self.carrying = None
+        log.info("drag: dropped on %s; sending", device_id)
         self.server.send(device_id, "drag", hide=True)
         out = Outgoing(new_id(), device_id, items)
         self.outgoing[out.id] = out

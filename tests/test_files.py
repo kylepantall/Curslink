@@ -335,7 +335,7 @@ def test_helper_windows(capsys, tmp_path):
                             Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
     strip.dragEnterEvent(enter)
     assert enter.isAccepted() and enter.dropAction() == Qt.DropAction.CopyAction
-    line = capsys.readouterr().out.strip()
+    line = capsys.readouterr().out.strip().splitlines()[-1]
     assert line.startswith("drag ") and json.loads(line[5:]) == {"paths": [path]}
     drop = QDropEvent(QPoint(1, 1), Qt.DropAction.CopyAction | Qt.DropAction.MoveAction, mime,
                       Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier)
@@ -380,3 +380,64 @@ def test_config_switches():
         {"id": "s", "x": 0, "y": 0, "width": 10, "height": 10}]}]}
     assert host_config(raw).files is True
     assert host_config({**raw, "files": {"enabled": False}}).files is False
+
+
+# ------------------------------------------------- macOS: the drag pasteboard
+
+
+class Pasteboard:
+    def __init__(self):
+        self.count, self.paths = 5, ["/old/stale.txt"]
+
+    def __call__(self):
+        return self.count, list(self.paths)
+
+
+@pytest.fixture
+def mac_drag(layout):
+    capture, transport = FakeCapture(), FilesTransport({"laptop"})
+    router = Router(layout, "desktop", capture, FakeSink(), transport, FakeOverlay(),
+                    RouterSettings(gaze_switching=True))
+    helper, injected, pb = [], [], Pasteboard()
+    handoff = DragHandoff(router, transport, helper.append, injected.append, "Mac", drag_source=pb)
+    return handoff, router, transport, helper, injected, pb
+
+
+async def test_mac_reads_the_drag_from_the_pasteboard(mac_drag, tmp_path):
+    handoff, router, transport, helper, injected, pb = mac_drag
+    f = tmp_path / "report.pdf"
+    f.write_bytes(b"x" * 10)
+    handoff.on_button("left", True)
+    handoff.on_pointer(3000, 500)
+    handoff.on_pointer(3830, 500)
+    assert not any(h.startswith("strips") for h in helper)  # no drop-target windows on a Mac
+    pb.count, pb.paths = 6, [str(f)]                        # Finder started a drag
+    router.on_pointer(3839, 500)
+    await settle()
+    (dev, _, data), = transport.of_type("drag")
+    assert dev == "laptop" and data["card"]["name"] == "report.pdf"
+    assert handoff.on_button("left", False) is True
+    await settle()
+    assert injected == ["release"] and transport.bulk[0][1] == "file_begin"
+
+
+async def test_mac_ignores_a_stale_pasteboard(mac_drag):
+    handoff, router, transport, helper, injected, pb = mac_drag
+    handoff.on_button("left", True)                         # e.g. dragging a window
+    router.on_pointer(3839, 500)
+    await asyncio.sleep(0.3)
+    assert not transport.of_type("drag") and not injected
+    router.go_home("hotkey")
+    assert handoff.on_button("left", False) is False
+
+
+async def test_mac_gaze_needs_no_nudge(mac_drag, tmp_path):
+    handoff, router, transport, helper, injected, pb = mac_drag
+    f = tmp_path / "a.txt"
+    f.write_text("hi")
+    handoff.on_button("left", True)
+    pb.count, pb.paths = 9, [str(f)]
+    router.switch_to(router.layout.screen("laptop", "main"), 4000, 500, "gaze")
+    await settle()
+    assert injected == []
+    assert transport.of_type("drag")[0][2]["card"]["name"] == "a.txt"

@@ -186,7 +186,7 @@ class PynputCapture:
 
     # -- macOS event taps (run after pynput has called the callbacks) --------
     def let_through(self, inject) -> None:
-        """Run ``inject()``, which injects mouse input this computer's OS must
+        """Run ``inject()``, which injects input this computer's OS must
         act on even though input is grabbed for another device (ending a
         file drag that went to another computer: see curslink.files.handoff).
         Blocking: call it off the event loop."""
@@ -201,24 +201,25 @@ class PynputCapture:
             finally:
                 self._pass_injected = False
             return
-        listener = self._mouse_listener
-        if sys.platform == "win32" and listener is not None and hasattr(listener, "_suppress"):
-            # The hook suppresses whatever it sees while this is set; for a
-            # moment, it lets everything through.
-            listener._suppress = False
+        with self._lock:
+            listeners = [x for x in (self._mouse_listener, self._key_listener) if x is not None]
+        if sys.platform == "win32" and all(hasattr(x, "_suppress") for x in listeners):
+            # The hooks suppress whatever they see while this is set; for a
+            # moment, they let everything through.
+            for x in listeners:
+                x._suppress = False
             try:
                 inject()
                 time.sleep(0.05)
             finally:
-                listener._suppress = True
+                for x in listeners:
+                    x._suppress = True
                 if self._controller is not None:
                     self._controller.position = self.park_at
             return
         # X11: the grab belongs to the listeners, so drop it for a moment.
-        with self._lock:
-            mouse = self._mouse_listener
-        if mouse is not None:
-            mouse.stop()
+        for x in listeners:
+            x.stop()
         try:
             inject()
             time.sleep(0.05)
@@ -229,7 +230,8 @@ class PynputCapture:
 
     def inject_drag_end(self, kind: str) -> None:
         """At the parked pointer, nudge a held left-button drag a pixel and
-        back ("nudge"), and then let go of it ("release")."""
+        back ("nudge"); or cancel it with Escape and let go of the button
+        ("release"), so the app it came from drops nothing here."""
         x, y = self.park_at
         self.let_through(lambda: drag_nudge(x, y, release=kind == "release"))
 
@@ -285,7 +287,9 @@ class PynputCapture:
         return dx, dy
 
     def _mac_key_tap(self, event_type, event):
-        return event if not self._grabbed else None
+        if not self._grabbed or (self._pass_injected and _mac_injected(event)):
+            return event
+        return None
 
     # -- callbacks -------------------------------------------------------------
     def _on_move(self, x, y, injected=False):
@@ -545,7 +549,26 @@ class PynputSink:
 
 def drag_nudge(x: int, y: int, release: bool = False) -> None:
     """Move a held left-button drag at (x, y) a pixel and back, so the OS's
-    drag-and-drop notices what's under it now; then let go if ``release``."""
+    drag-and-drop notices what's under it now. With ``release``, then cancel
+    the drag with Escape (macOS and Windows both end a drag on Escape, with
+    nothing dropped wherever the parked pointer happens to be) and let go."""
+    _drag_move(x, y)
+    if release:
+        _cancel_drag()
+        time.sleep(0.05)
+        _drag_release(x, y)
+
+
+def _cancel_drag() -> None:
+    try:
+        from pynput import keyboard
+
+        keyboard.Controller().tap(keyboard.Key.esc)
+    except Exception:  # pragma: no cover - platform specific
+        log.warning("couldn't cancel the drag with Escape", exc_info=True)
+
+
+def _drag_move(x: int, y: int) -> None:
     if sys.platform == "darwin":
         try:
             import Quartz
@@ -555,12 +578,8 @@ def drag_nudge(x: int, y: int, release: bool = False) -> None:
                                                     Quartz.kCGMouseButtonLeft)
                 Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
                 time.sleep(0.03)
-            if release:
-                ev = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventLeftMouseUp, (x, y),
-                                                    Quartz.kCGMouseButtonLeft)
-                Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
         except Exception:  # pragma: no cover - macOS only
-            log.warning("couldn't end the drag on this Mac", exc_info=True)
+            log.warning("couldn't nudge the drag on this Mac", exc_info=True)
         return
     if sys.platform == "win32":
         try:
@@ -570,12 +589,8 @@ def drag_nudge(x: int, y: int, release: bool = False) -> None:
                 inp.mi = _MOUSEINPUT(dx, 0, 0, _MOUSEEVENTF_MOVE, 0, 0)
                 user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT))
                 time.sleep(0.03)
-            if release:
-                inp = _INPUT(type=0)
-                inp.mi = _MOUSEINPUT(0, 0, 0, _MOUSEEVENTF_LEFTUP, 0, 0)
-                user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT))
         except Exception:  # pragma: no cover - Windows only
-            log.warning("couldn't end the drag on this PC", exc_info=True)
+            log.warning("couldn't nudge the drag on this PC", exc_info=True)
         return
     from pynput import mouse
 
@@ -583,9 +598,30 @@ def drag_nudge(x: int, y: int, release: bool = False) -> None:
     m.position = (x + 1, y)
     time.sleep(0.03)
     m.position = (x, y)
-    if release:
-        time.sleep(0.03)
-        m.release(mouse.Button.left)
+
+
+def _drag_release(x: int, y: int) -> None:
+    if sys.platform == "darwin":
+        try:
+            import Quartz
+
+            ev = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventLeftMouseUp, (x, y),
+                                                Quartz.kCGMouseButtonLeft)
+            Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
+        except Exception:  # pragma: no cover - macOS only
+            log.warning("couldn't let go of the drag on this Mac", exc_info=True)
+        return
+    if sys.platform == "win32":
+        try:
+            inp = _INPUT(type=0)
+            inp.mi = _MOUSEINPUT(0, 0, 0, _MOUSEEVENTF_LEFTUP, 0, 0)
+            ctypes.windll.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT))
+        except Exception:  # pragma: no cover - Windows only
+            log.warning("couldn't let go of the drag on this PC", exc_info=True)
+        return
+    from pynput import mouse
+
+    mouse.Controller().release(mouse.Button.left)
 
 
 # ---------------------------------------------------------------- Windows bits

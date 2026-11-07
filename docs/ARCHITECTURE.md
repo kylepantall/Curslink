@@ -128,9 +128,12 @@ targets is a possible later upgrade.
 
 ### Dragging files to another device
 
-`curslink/files/`. No OS tells a program that isn't under the pointer that
-a file is being dragged, so the host's overlay helper puts invisible drop
-targets where the drag will be:
+`curslink/files/`. On a Mac host, the drag pasteboard says what's being
+dragged: when input leaves with the button held, the host checks whether
+its change count moved since the button went down and it holds file URLs
+(`curslink/files/macdrag.py`). Windows and Linux don't tell a program that
+isn't under the pointer that a file is being dragged, so there the host's
+overlay helper puts invisible drop targets where the drag will be:
 
 * while the left button is held and the pointer moves, thin strips along
   the screen sides that lead to another device; a file dragged to the edge
@@ -145,8 +148,9 @@ following its pointer. Letting go there isn't forwarded as a click: the
 host sends the files as `file_*` frames on the same TLS-PSK connection
 (32 KiB per frame, written only as fast as the link drains, so input queued
 behind them is barely delayed), and ends the drag on the host by letting
-an injected button-up through the grab, over the shield, which refuses the
-drop so the source app does nothing. The agent writes into a hidden staging
+an injected Escape (which cancels a drag on macOS and Windows) and then a
+button-up through the grab, over the shield, which refuses any drop, so the
+source app does nothing. The agent writes into a hidden staging
 folder, moves the files into Downloads only once all of them have arrived,
 never overwrites (`name (1).ext`), cleans paths (no `..`, nothing absolute)
 and shows a progress popup. Coming back to the host with the button held
