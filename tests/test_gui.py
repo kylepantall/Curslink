@@ -491,6 +491,102 @@ def test_overlap_shows_on_the_real_monitor_while_editing(desktop, qapp):
     assert not hint.showing
 
 
+def test_no_widget_opens_as_a_stray_window(desktop, qapp):
+    # A widget shown before it has a parent opens as a window of its own:
+    # on Windows that flashed up and vanished, on macOS it left rows piled up.
+    from PySide6.QtCore import QEvent, QObject
+    from PySide6.QtWidgets import QWidget
+
+    shown = []
+
+    class Watch(QObject):
+        def eventFilter(self, obj, event):  # noqa: N802
+            if event.type() == QEvent.Type.Show and isinstance(obj, QWidget) and obj.isWindow():
+                shown.append(type(obj).__name__)
+            return False
+
+    watch = Watch()
+    qapp.installEventFilter(watch)
+    try:
+        from curslink.gui.widgets import Card, label, text_block
+
+        card = Card("Rows", rows=True)
+        card.add_row(text_block("Title", "Detail"), label("x"))
+        plain = Card("Plain")
+        plain.body.addWidget(text_block("Title", "Detail"))
+        w = desktop.window
+        w.pages["setup"].create()
+        for page in ("status", "devices", "layout", "calibrate", "settings"):
+            w.show_page(page)
+            qapp.processEvents()
+        assert shown == []
+    finally:
+        qapp.removeEventFilter(watch)
+
+
+def _widest(widget, depth=0):
+    # what's asking for the width, for the failure message
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QWidget
+
+    out = []
+    for child in widget.findChildren(QWidget, options=Qt.FindChildOption.FindDirectChildrenOnly):
+        want = child.minimumSizeHint().width()
+        if child.isVisibleTo(widget) and want > 250 and depth < 8:
+            text = child.text()[:40] if hasattr(child, "text") else ""
+            out.append(f"{'  ' * depth}{type(child).__name__} {want} {text!r}")
+            out.extend(_widest(child, depth + 1))
+    return "\n".join(out) if depth == 0 else out
+
+
+def test_layout_page_fits_the_window_with_an_overlap(desktop, qapp, monkeypatch):
+    # Side by side, the bottom cards (four number fields and the Edges card,
+    # whose "in front of" line didn't wrap) wanted ~800 px, so in a smaller
+    # Mac window the page ran off its right edge. Narrow, they now stack.
+    from curslink.gui import theme
+
+    monkeypatch.setenv("CURSLINK_LOOK", "mac")
+    theme.manager().set_mode("dark")
+    try:
+        page, home, laptop = _host_with_laptop(desktop)
+        hx, hy, hw, hh = home.layout_rect()
+        page.scene.clearSelection()
+        laptop.setSelected(True)
+        page.spins["x"].setValue(hx + hw - 200)
+        page.spins["y"].setValue(hy + hh - 200)
+        page.overlap_toggle.setChecked(True)
+        page.bring_to_front(laptop)
+        page.overlaps_changed()
+        page.refresh_edges()
+        w = desktop.window
+        w.show_page("layout")
+        # Windows' offscreen fonts come out about twice as wide as anywhere
+        # else, so scale the window with them ("Detect my screens" is ~120 px).
+        scale = max(1.0, page.detect_button.sizeHint().width() / 120)
+
+        def check(width, part=None):
+            w.resize(round(width), 760)
+            w.show()
+            qapp.processEvents()
+            qapp.processEvents()
+            m = page.layout_.contentsMargins()
+            need = (part.minimumSizeHint().width() + m.left() + m.right() if part
+                    else page.widget().minimumSizeHint().width())
+            assert need <= page.viewport().width(), (width, page.bottom_row.direction(), _widest(page.widget()))
+            stacked = page.bottom_row.direction() == page.bottom_row.Direction.TopToBottom
+            assert stacked == (page.viewport().width() < page.side_by_side_width()), width
+            return stacked
+
+        check(900 * scale)  # Kyle's window
+        assert not check(1400 * scale)
+        # just too narrow for the two cards side by side, when the window can be
+        just_under = w.width() - page.viewport().width() + page.side_by_side_width() - 20
+        if just_under >= w.minimumWidth():
+            assert check(just_under, part=page.inspector.parentWidget())  # the header may not fit there
+    finally:
+        theme.manager().set_mode("system")
+
+
 def test_clicking_a_screen_doesnt_move_it(desktop, qapp):
     from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
     from PySide6.QtWidgets import QGraphicsSceneMouseEvent

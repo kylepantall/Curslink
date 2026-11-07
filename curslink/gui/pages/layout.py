@@ -15,6 +15,7 @@ from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QBrush, QColor, QFont, QFontMetricsF, QGuiApplication, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication,
+    QBoxLayout,
     QGraphicsItem,
     QLabel,
     QGraphicsRectItem,
@@ -313,7 +314,10 @@ class LayoutPage(Page):
         self.add(self.canvas, 1)
 
         bottom = QWidget()
-        grid = QGridLayout(bottom)
+        # Side by side when there's room, stacked in a narrow window: side by
+        # side the two cards need ~650 px, more than a smaller Mac window
+        # leaves, and the page ran off its right edge.
+        grid = self.bottom_row = QBoxLayout(QBoxLayout.Direction.LeftToRight, bottom)
         grid.setContentsMargins(0, 0, 0, 0)
         grid.setSpacing(16)
 
@@ -326,6 +330,9 @@ class LayoutPage(Page):
             spin = QSpinBox()
             spin.setRange(-100000 if key in "xy" else 100, 100000)
             spin.setAccessibleName(text)
+            # Sized for its range (-100000) it wanted 110 px each, which with
+            # the Edges card beside it made the page wider than the window.
+            spin.setMinimumWidth(64)
             spin.valueChanged.connect(lambda v, k=key: self.spin_changed(k, v))
             self.spins[key] = spin
             fields.addWidget(label(text, "small"), 0, i)
@@ -335,17 +342,35 @@ class LayoutPage(Page):
         self.inspector.body.addWidget(self.reported)
         self.inspector.body.addWidget(label("Drag screens on the canvas; they snap to each other's edges.", "small",
                                             wrap=True))
-        grid.addWidget(self.inspector, 0, 0)
+        grid.addWidget(self.inspector, 3)
 
         self.edges_card = Card("Edges that connect devices")
         self.edges_box = QVBoxLayout()
         self.edges_card.body.addLayout(self.edges_box)
         self.edges_card.body.addStretch(1)
-        grid.addWidget(self.edges_card, 0, 1)
+        grid.addWidget(self.edges_card, 2)
         self.add(bottom)
 
         app.config_changed.connect(self.load_if_clean)
         self.load()
+
+    def side_by_side_width(self) -> int:
+        """Page width the bottom cards need next to each other."""
+        m = self.layout_.contentsMargins()
+        return (self.inspector.minimumSizeHint().width() + self.edges_card.minimumSizeHint().width()
+                + self.bottom_row.spacing() + m.left() + m.right())
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self.fit_bottom_row()
+
+    def fit_bottom_row(self) -> None:
+        # Measured rather than a fixed width, since the fonts (and so the
+        # cards) differ between platforms and as the edges listed change.
+        narrow = self.viewport().width() < self.side_by_side_width()
+        want = QBoxLayout.Direction.TopToBottom if narrow else QBoxLayout.Direction.LeftToRight
+        if self.bottom_row.direction() != want:
+            self.bottom_row.setDirection(want)
 
     # -- loading and saving -----------------------------------------------------
     def theme_changed(self) -> None:
@@ -693,14 +718,15 @@ class LayoutPage(Page):
             ad, ascreen = a.split("/", 1)
             bd, bscreen = b.split("/", 1)
             self.edges_box.addWidget(label(f"{names.get(ad, ad)} / {ascreen}  {edge} edge  →  "
-                                           f"{names.get(bd, bd)} / {bscreen}"))
+                                           f"{names.get(bd, bd)} / {bscreen}", wrap=True))
         if self.allow_overlap:
             for behind, front, _shared in self.overlap_pairs():
                 if behind.device_id != front.device_id:
                     seen.add((front.key, behind.key))
                     self.edges_box.addWidget(label(f"{front.device_name} / {front.screen['id']}  in front of  "
-                                                   f"{behind.device_name} / {behind.screen['id']}"))
+                                                   f"{behind.device_name} / {behind.screen['id']}", wrap=True))
         if not seen:
             w = label("No screens of different devices touch, so the pointer can't cross by the edges. "
                       "Move a screen next to another device's.", "warn", wrap=True)
             self.edges_box.addWidget(w)
+        self.fit_bottom_row()

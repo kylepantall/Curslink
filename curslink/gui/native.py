@@ -22,6 +22,10 @@ def effects_allowed() -> bool:
 def can_glass() -> bool:
     if not effects_allowed():
         return False
+    from PySide6.QtGui import QGuiApplication
+
+    if QGuiApplication.platformName() in ("offscreen", "minimal"):
+        return False  # no native window to put a backdrop behind (it crashed on macOS)
     if sys.platform == "win32":
         return sys.getwindowsversion().build >= 22000  # Windows 11
     if sys.platform == "darwin":
