@@ -864,8 +864,16 @@ async def resolve_host(cfg: AgentConfig, store: PairingStore) -> ConnectTarget:
 
             # The host advertises all its addresses, some unreachable from
             # here (VM bridges, VPNs): use one that answers.
-            address = await reachable(found.addresses, found.control_port) or found.address
-            log.info("host found on the LAN at %s (it advertises %s)", address, ", ".join(found.addresses))
+            # Last time's address first: it worked then.
+            order = sorted(found.addresses, key=lambda a: a != peer.address)
+            address = await reachable(order, found.control_port)
+            if address is None:
+                address = peer.address if peer.address in found.addresses else found.address
+                log.warning("host found on the LAN, but none of its addresses (%s) answer on port %d: "
+                            "is Curslink running on it, and is it awake? Trying %s anyway",
+                            ", ".join(found.addresses), found.control_port, address)
+            else:
+                log.info("host found on the LAN at %s (it advertises %s)", address, ", ".join(found.addresses))
             store.set_address(peer.device_id, address)
             return ConnectTarget(address, found.control_port, ctx, auth_key, relay)
         if peer.address:

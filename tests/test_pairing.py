@@ -308,3 +308,32 @@ async def test_agent_falls_back_to_the_paired_address(tmp_path, monkeypatch):
     cfg = agent_config({"agent": {"device_id": "pc", "name": "PC"}})
     target = await app.resolve_host(cfg, store)
     assert (target.host, target.port) == ("192.168.1.5", cfg.port)
+
+
+async def test_agent_tries_the_last_good_address_first(tmp_path, monkeypatch):
+    """The Mac grew a second address (.72) that doesn't answer; the one that
+    worked last time (.52) is tried first, and if nothing answers it's the
+    one used, not whichever the host listed first."""
+    from curslink import app
+    from curslink.config import agent_config
+    from curslink.pairing import discovery
+
+    async def found(device_id, timeout=3.0):
+        return discovery.Found("mac", "Mac", "host", ("192.168.68.72", "192.168.68.52"), 24851, 24850)
+
+    tried = []
+
+    async def reachable(addresses, port, timeout=1.0):
+        tried.append(list(addresses))
+        return answer["addr"]
+
+    answer = {"addr": "192.168.68.52"}
+    monkeypatch.setattr(discovery, "find", found)
+    monkeypatch.setattr(discovery, "reachable", reachable)
+    store = PairingStore(tmp_path / "pairings.json")
+    store.add("mac", "Mac", "host", b"k" * 32, "192.168.68.52")
+    cfg = agent_config({"agent": {"device_id": "pc", "name": "PC"}})
+    assert (await app.resolve_host(cfg, store)).host == "192.168.68.52"
+    assert tried[0] == ["192.168.68.52", "192.168.68.72"]
+    answer["addr"] = None
+    assert (await app.resolve_host(cfg, store)).host == "192.168.68.52"
