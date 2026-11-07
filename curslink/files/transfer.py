@@ -13,9 +13,15 @@ authenticated the same way and need no extra port or pairing::
     file_end    {id}                             all sent
     file_cancel {id, reason}                     the sender gave up
     file_result {id, ok, saved?, error?}         agent -> host: saved, or why not
+    file_ack    {id, n}                          receiver -> sender: ``n`` bytes
+                                                 have arrived (only when
+                                                 file_begin had ``ack: true``)
 
 Data frames are written only as fast as the connection drains, so moves
-and clicks queued behind them wait milliseconds, not seconds.
+and clicks queued behind them wait milliseconds, not seconds. With acks
+the sender also keeps no more than ``Outgoing.window`` bytes in flight, so
+the OS's socket buffers and the Wi-Fi queue never fill with file data that
+the pointer's moves and the drop itself would wait behind.
 
 The receiver writes into a hidden staging folder next to where the files
 end up and only moves them into place once every byte has arrived, so a
@@ -48,6 +54,7 @@ CHUNK = 32 * 1024          # base64 of this fits comfortably in one frame
 MAX_FILES = 10000          # per drop
 MAX_ACTIVE = 4             # transfers being received at once
 SPARE_BYTES = 64 * 1024 * 1024  # leave at least this much disk free
+ACK_TIMEOUT_S = 30.0       # no file_ack for this long: the receiver is gone
 
 Send = Callable[..., Awaitable[None]]
 
@@ -96,6 +103,41 @@ class Outgoing:
     total: int = 0
     refused: str = ""        # the receiver said no (file_result ok=false)
     task: asyncio.Task | None = None
+    # Bytes allowed in flight (sent but not acknowledged), or None: no acks.
+    window: int | None = None
+    acked: int = 0
+    _moved: asyncio.Event | None = None
+
+    def ack(self, n: object) -> None:
+        """file_ack from the receiver."""
+        if isinstance(n, int) and not isinstance(n, bool) and n > self.acked:
+            self.acked = n
+            self._wake()
+
+    def set_window(self, window: int | None) -> None:
+        if self.window is not None:  # (acks are asked for at the start, or not at all)
+            self.window = window
+            self._wake()
+
+    def _wake(self) -> None:
+        if self._moved is not None:
+            self._moved.set()
+
+    async def room(self, n: int) -> None:
+        """Wait until ``n`` more bytes fit in the window."""
+        waited = 0.0
+        while self.window is not None and self.sent - self.acked + n > self.window and self.sent > self.acked:
+            if self.refused:
+                raise TransferError(self.refused)
+            if waited >= ACK_TIMEOUT_S:
+                raise TransferError("the other computer stopped taking the files")
+            self._moved = self._moved or asyncio.Event()
+            self._moved.clear()
+            try:
+                await asyncio.wait_for(self._moved.wait(), 0.5)
+                waited = 0.0
+            except asyncio.TimeoutError:
+                waited += 0.5
 
 
 async def send_files(send: Send, out: Outgoing, from_name: str) -> None:
@@ -105,8 +147,9 @@ async def send_files(send: Send, out: Outgoing, from_name: str) -> None:
     if not entries:
         raise TransferError("nothing to send (empty folders only?)")
     out.total = sum(size for _src, _rel, size in entries)
+    extra = {"ack": True} if out.window is not None else {}
     await send("file_begin", id=out.id, count=len(entries), total=out.total, card=card(out.items),
-               **{"from": from_name})
+               **{"from": from_name}, **extra)
     try:
         for i, (src, rel, size) in enumerate(entries):
             if out.refused:
@@ -118,6 +161,7 @@ async def send_files(send: Send, out: Outgoing, from_name: str) -> None:
                     chunk = await asyncio.to_thread(fh.read, min(CHUNK, left))
                     if not chunk:
                         raise TransferError(f"{rel} got shorter while it was being sent")
+                    await out.room(len(chunk))
                     await send("file_data", id=out.id, i=i, data=base64.b64encode(chunk).decode("ascii"))
                     left -= len(chunk)
                     out.sent += len(chunk)
@@ -201,6 +245,7 @@ class Incoming:
     fh: object = None
     tops: list[str] = field(default_factory=list)  # top-level names, in order
     keep: bool = False     # staging is a native drop's folder: the files stay there
+    ack: bool = False      # the sender wants file_ack as bytes arrive
 
 
 class FileReceiver:
@@ -230,7 +275,10 @@ class FileReceiver:
             elif msg.t == "file_item":
                 self._item(self.active[tid], msg)
             elif msg.t == "file_data":
-                self._data(self.active[tid], msg)
+                inc = self.active[tid]
+                self._data(inc, msg)
+                if inc.ack:
+                    return encode("file_ack", id=tid, n=inc.received)
             elif msg.t == "file_end":
                 return self._end(self.active[tid])
         except (TransferError, OSError, ValueError) as exc:
@@ -261,7 +309,7 @@ class FileReceiver:
             staging.mkdir()
             _hide(staging)
         sender = str(msg.get("from") or "the other computer")[:80]
-        self.active[tid] = Incoming(tid, sender, count, total, staging, keep=keep)
+        self.active[tid] = Incoming(tid, sender, count, total, staging, keep=keep, ack=msg.get("ack") is True)
         info = {"id": tid, "from": sender, "count": count, "total": total}
         if isinstance(msg.get("card"), dict):
             info["card"] = msg.get("card")

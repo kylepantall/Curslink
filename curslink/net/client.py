@@ -14,7 +14,7 @@ from curslink.inputs.base import InputSink
 from curslink.net.framing import STREAM_LIMIT, read_message
 from curslink.net.relay import RelayError, RelayTarget, agent_connect
 from curslink.net.udp import AgentUdp
-from curslink.protocol import (AGENT_FEATURES, FILES_FEATURE, FILES_OUT_FEATURE, DROP_FEATURE, POPUPS_FEATURE, PROTOCOL_VERSION, UDP_FEATURE, Message, ProtocolError,
+from curslink.protocol import (AGENT_FEATURES, FILES_FEATURE, FILES_OUT_FEATURE, DROP_FEATURE, FILE_ACK_FEATURE, POPUPS_FEATURE, PROTOCOL_VERSION, UDP_FEATURE, Message, ProtocolError,
                                encode)
 from curslink.security import channel_binding, hello_auth
 from curslink.tally import Tally
@@ -143,6 +143,8 @@ class AgentSession:
                 return None
             (self.buttons.add if pressed else self.buttons.discard)(name)
             self.sink.button(name, pressed)
+            if self.drag_out is not None:
+                self.drag_out.on_button(name, pressed)
         elif t == "scroll":
             self.scrolls.add(msg.data["dx"], msg.data["dy"])
             try:
@@ -163,6 +165,8 @@ class AgentSession:
         if self.smoother is not None:
             self.smoother.pause()
         self.on_drag({"hide": True})
+        if self.drag_out is not None:
+            self.drag_out.on_button("left", False)
         for key in sorted(self.keys):
             with contextlib.suppress(Exception):
                 self.sink.key(key, False)
@@ -306,7 +310,7 @@ class AgentClient:
         reader, writer = await self._open()
         self.session.new_connection()
         try:
-            features = list(AGENT_FEATURES) + ([FILES_FEATURE, DROP_FEATURE] if self.session.files is not None else [])
+            features = list(AGENT_FEATURES) + ([FILES_FEATURE, DROP_FEATURE, FILE_ACK_FEATURE] if self.session.files is not None else [])
             if self.session.drag_out is not None:
                 features.append(FILES_OUT_FEATURE)
             if self.session.popups is not None:

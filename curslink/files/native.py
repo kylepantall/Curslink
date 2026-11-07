@@ -142,6 +142,9 @@ class NativeDrop:
         if native:
             paths = [str(staging / t) for t in tops]
             log.info("drop: starting a real drag of %s", ", ".join(tops[:3]))
+            # The card follows the pointer at once; the real drag's image
+            # takes over from it when that starts.
+            self.helper("card " + json.dumps(card, separators=(",", ":")))
             self.helper("nativedrag " + json.dumps({"id": tid, "paths": paths, "card": card}, separators=(",", ":")))
             asyncio.get_running_loop().call_later(START_TIMEOUT_S, self._check_started, tid)
         else:
@@ -165,12 +168,14 @@ class NativeDrop:
         drop = self.drops.get(tid)
         if word == "nativedrag-ready":
             if drop is not None and drop.phase == "starting" and self.press is not None:
+                log.info("drop: pressing the button to start the real drag")
                 self._bg(self.press)
             return True
         if word == "nativedrag-started":
             if drop is not None and drop.phase == "starting":
                 drop.phase = "dragging"
-                log.info("drop: real drag started")
+                self.helper("card hide")
+                log.info("drop: real drag started in %d ms", (time.monotonic() - drop.started_at) * 1000)
             return True
         if word == "nativedrag-ended":
             action = rest.split(" ", 1)[1] if " " in rest else "?"

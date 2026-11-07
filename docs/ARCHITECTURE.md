@@ -158,11 +158,17 @@ just carries on the drag there.
 
 Files start moving as soon as the drag crosses (agents that list `drop`
 get `drag {id, card}` and the bytes straight away; `drag {drop, id}` or
-`drag {hide, id}` follows). The receiving side then makes it a real drop
-(`curslink/files/native.py`): empty placeholders with the real names go in
-a temp folder, the overlay helper puts a small window under the pointer,
-the device presses the button on it and the helper starts a real OS drag of
-those paths with the file card as its image. Let go on the desktop or in a
+`drag {hide, id}` follows). Agents that list `file_ack` acknowledge bytes
+as they arrive (`file_ack {id, n}`, asked for by `file_begin {ack: true}`)
+and the host keeps only 128 KB in flight while the drag is carried (512 KB
+once dropped), so the pointer's moves and the drop never queue behind file
+data in the socket buffers or on the Wi-Fi. The receiving side then makes it a real drop
+(`curslink/files/native.py`): the card follows the pointer at once, empty
+placeholders with the real names go in a temp folder, the overlay helper
+puts a small window under the pointer and starts a real OS drag of those
+paths with the file card as its image (on a Mac straight away through
+AppKit, as the button is held already; elsewhere once the device presses
+the button on it). Let go on the desktop or in a
 folder and the file manager copies them there; on an app, it gets the temp
 paths. If you let go before every byte has arrived, the button-up waits
 (the agent simply doesn't send it yet; a Mac host's event tap holds the
@@ -172,10 +178,13 @@ doesn't start within 1.5 s) the card follows the pointer and the files go
 to Downloads.
 
 The other way, agent to host: coming home with an agent's left button held,
-the router doesn't send that button-up but `drag_out`. The agent covers its
-screens with the shield, nudges the pointer so the OS reports the drag (on
-Windows, falling back to the selection in the Explorer window in front),
-ends its own drag with Escape, and answers `drag_out {id, card}`; the host
+the router doesn't send that button-up but `drag_out`. The agent usually
+knows already: while the host holds its left button, thin drop targets line
+the outer edges of its screens, and the drag tells them what it carries as
+it reaches the edge. Otherwise it covers its screens with the shield and
+nudges the pointer so the OS reports the drag (on Windows, falling back to
+the selection in the Explorer window in front). It answers
+`drag_out {id, card}` at once, then ends its own drag with Escape; the host
 sends `fetch {id}` at once and the files come as `file_*` frames from the
 agent, into the same real-drop machinery on the host. Gaze may carry a
 drag home this way too (otherwise it never moves the pointer mid-drag). Agents list `files` in `hello.features`

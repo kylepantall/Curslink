@@ -104,6 +104,7 @@ MESSAGE_TYPES = frozenset(
         "file_end",
         "file_cancel",
         "file_result",
+        "file_ack",
         "pair_hello",
         "pair_key",
         "pair_reveal",
@@ -135,7 +136,12 @@ UDP_FEATURE = "udp"
 # popup_close, popup_result; see curslink.popups); [agent.isolink] enabled =
 # false leaves it out.
 POPUPS_FEATURE = "popups"
-FILE_FRAMES = frozenset({"file_begin", "file_item", "file_data", "file_end", "file_cancel", "file_result"})
+# An agent that acknowledges the bytes of a file as they arrive (file_ack,
+# when file_begin asks for it), so the host keeps only a little in flight
+# while a drag is carried and the pointer and the drop never wait behind it.
+FILE_ACK_FEATURE = "file_ack"
+FILE_FRAMES = frozenset({"file_begin", "file_item", "file_data", "file_end", "file_cancel", "file_result",
+                         "file_ack"})
 
 
 class ProtocolError(ValueError):
@@ -232,6 +238,8 @@ def _validate(msg: Message) -> None:
             raise ProtocolError(f"{t}.id must be a string")
         if t == "file_data" and not isinstance(msg.data.get("data"), str):
             raise ProtocolError("file_data.data must be a string")
+        if t == "file_ack" and (not isinstance(msg.data.get("n"), int) or isinstance(msg.data.get("n"), bool)):
+            raise ProtocolError("file_ack.n must be an integer")
     elif t == "hello":
         if msg.data.get("v") != PROTOCOL_VERSION:
             raise ProtocolError(

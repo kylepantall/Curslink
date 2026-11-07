@@ -383,8 +383,97 @@ def make_drag_source(tid: str, paths: list[str], info: dict):
     w = Source()
     w.show()
     w.raise_()
-    _say(f"nativedrag-ready {tid}")
+    from PySide6.QtGui import QGuiApplication
+
+    if sys.platform == "darwin" and QGuiApplication.platformName() == "cocoa":
+        # No press needed: AppKit starts the drag from this window straight
+        # away and follows the real button, which is already held down.
+        def start() -> None:
+            w.dragging = True
+            w.timer.stop()
+            try:
+                started = mac_begin_drag(w, paths, card_pixmap(info),
+                                         lambda op: (_say(f"nativedrag-ended {tid} {op}"), w.close()))
+            except Exception as exc:  # pragma: no cover - macOS only
+                _say(f"log the Mac drag didn't start: {type(exc).__name__}: {exc}")
+                started = False
+            if started:
+                _say(f"nativedrag-started {tid}")
+            else:
+                w.dragging = False
+                w.timer.start(8)
+                _say(f"nativedrag-ready {tid}")  # fall back to a press
+
+        QTimer.singleShot(0, start)
+    else:
+        _say(f"nativedrag-ready {tid}")
     return w
+
+
+_MAC_SOURCE = None
+_MAC_DONE: dict = {}   # the source's ObjC pointer -> done callback
+
+
+def _mac_source_class():
+    """An NSDraggingSource that hands the drag's outcome to a callback."""
+    global _MAC_SOURCE
+    if _MAC_SOURCE is None:
+        import objc
+        from Foundation import NSObject
+
+        class CurslinkDragSource(NSObject, protocols=[objc.protocolNamed("NSDraggingSource")]):
+            def draggingSession_sourceOperationMaskForDraggingContext_(self, session, context):
+                return 1  # NSDragOperationCopy: the files stay in the temp folder
+
+            def draggingSession_endedAtPoint_operation_(self, session, point, operation):
+                cb = _MAC_DONE.pop(objc.pyobjc_id(self), None)
+                if cb is not None:
+                    cb("copy" if operation else "none")
+
+        _MAC_SOURCE = CurslinkDragSource
+    return _MAC_SOURCE
+
+
+def mac_begin_drag(widget, paths: list[str], pixmap, done) -> bool:
+    """macOS: start an AppKit drag of ``paths`` from ``widget``'s window,
+    with ``pixmap`` as the image, without a mouse-down of its own (the
+    button is held already: the drag came from another computer). ``done(op)``
+    when it ends. False if it couldn't start."""
+    import objc
+    from AppKit import NSDraggingItem, NSEvent, NSImage, NSURL
+    from Foundation import NSData, NSProcessInfo
+    from PySide6.QtCore import QBuffer, QByteArray, QIODevice
+
+    view = objc.objc_object(c_void_p=int(widget.winId()))
+    window = view.window()
+    if window is None:
+        return False
+    buf = QByteArray()
+    io = QBuffer(buf)
+    io.open(QIODevice.OpenModeFlag.WriteOnly)
+    pixmap.save(io, "PNG")
+    raw = bytes(buf.data())
+    image = NSImage.alloc().initWithData_(NSData.dataWithBytes_length_(raw, len(raw)))
+    ratio = pixmap.devicePixelRatio() or 1.0
+    iw, ih = pixmap.width() / ratio, pixmap.height() / ratio
+    at = window.mouseLocationOutsideOfEventStream()
+    local = view.convertPoint_fromView_(at, None)
+    flipped = view.isFlipped()
+    oy = local.y + 14 if flipped else local.y - 14 - ih
+    items = []
+    for i, p in enumerate(paths):
+        item = NSDraggingItem.alloc().initWithPasteboardWriter_(NSURL.fileURLWithPath_(p))
+        item.setDraggingFrame_contents_(((local.x + 14 + 6 * i, oy), (iw, ih)), image if i == 0 else None)
+        items.append(item)
+    event = NSEvent.mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure_(
+        1, at, 0, NSProcessInfo.processInfo().systemUptime(), window.windowNumber(), None, 0, 1, 1.0)  # 1: left down
+    if event is None:
+        return False
+    source = _mac_source_class().alloc().init()
+    _MAC_DONE[objc.pyobjc_id(source)] = done
+    widget._mac_source = source  # keep it alive for the drag
+    session = view.beginDraggingSessionWithItems_event_source_(items, event, source)
+    return session is not None
 
 
 class FilesOverlay:
