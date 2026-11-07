@@ -224,7 +224,11 @@ def make_effect_widget(effect: str, x: int, y: int):
                 flags |= Qt.WindowType.X11BypassWindowManagerHint
             super().__init__(None, flags)
             for attr in (Qt.WidgetAttribute.WA_TranslucentBackground, Qt.WidgetAttribute.WA_ShowWithoutActivating,
-                         Qt.WidgetAttribute.WA_TransparentForMouseEvents, Qt.WidgetAttribute.WA_DeleteOnClose):
+                         Qt.WidgetAttribute.WA_TransparentForMouseEvents, Qt.WidgetAttribute.WA_DeleteOnClose,
+                         # On macOS a tool window is an NSPanel that hides whenever its app isn't
+                         # active, and this helper never is: without this the animation on the
+                         # Mac (input coming home) never showed.
+                         Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow):
                 self.setAttribute(attr, True)
             self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             self.setGeometry(round(lx - SIZE / 2), round(ly - SIZE / 2), SIZE, SIZE)
