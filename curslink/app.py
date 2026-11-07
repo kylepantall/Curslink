@@ -961,7 +961,9 @@ def send_files_home(cfg: AgentConfig, session: AgentSession, client: AgentClient
     by a look): see curslink.files.dragout."""
     from curslink.files.dragout import AgentDragOut
 
-    drag_out = AgentDragOut(overlay.command, client.send, client.send_bulk, cfg.name)
+    from curslink.net.client import detect_screens
+
+    drag_out = AgentDragOut(overlay.command, client.send, client.send_bulk, cfg.name, screens=detect_screens)
 
     def on_line(line: str) -> None:  # the helper's reader thread
         try:

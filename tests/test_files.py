@@ -778,3 +778,105 @@ async def test_end_to_end_agent_to_host_over_tls(tmp_path):
         dragout.PROBE_WAIT_S = old
         await server.close()
         await asyncio.wait_for(task, 3)
+
+
+# ------------------------------------------- speed: little in flight, fast answers
+
+
+def test_receiver_acks_only_when_asked(tmp_path):
+    receiver = FileReceiver(tmp_path / "in")
+    begin = dict(id="a1", count=1, total=4, **{"from": "Mac"})
+    assert receiver.handle(decode(encode("file_begin", ack=True, **begin))) is None
+    receiver.handle(decode(encode("file_item", id="a1", i=0, path="x.bin", size=4)))
+    ack = decode(receiver.handle(decode(encode("file_data", id="a1", i=0, data="aGk="))))
+    assert ack.t == "file_ack" and ack.data == {"id": "a1", "n": 2}
+    receiver.handle(decode(encode("file_begin", **dict(begin, id="a2"))))
+    receiver.handle(decode(encode("file_item", id="a2", i=0, path="y.bin", size=4)))
+    assert receiver.handle(decode(encode("file_data", id="a2", i=0, data="aGk="))) is None
+
+
+async def test_sender_keeps_only_its_window_in_flight(tmp_path, monkeypatch):
+    monkeypatch.setattr("curslink.files.transfer.CHUNK", 1000)
+    f = tmp_path / "big.bin"
+    f.write_bytes(b"z" * 10_000)
+    out = Outgoing("w1", "pc", meta.describe([str(f)]), window=3000)
+    frames = []
+
+    async def send(t, **d):
+        frames.append(t)
+
+    task = asyncio.get_running_loop().create_task(send_files(send, out, "Mac"))
+    await settle()
+    assert frames.count("file_data") == 3 and not task.done()   # waiting for acks
+    assert decode(encode("file_begin", id="x", ack=True)).get("ack") is True
+    out.ack(2000)
+    await settle()
+    assert frames.count("file_data") == 5
+    out.set_window(100_000)                                    # dropped: open up
+    await settle()
+    assert task.done() and frames[-1] == "file_end" and frames.count("file_data") == 10
+
+
+def test_outer_sides_skip_edges_between_screens():
+    from curslink.files.dragout import outer_sides
+
+    screens = [{"x": 0, "y": 0, "width": 1920, "height": 1080}, {"x": 1920, "y": 0, "width": 1280, "height": 1024}]
+    sides = {(s["x"], s["side"]) for s in outer_sides(screens)}
+    assert (0, "right") not in sides and (1920, "left") not in sides
+    assert {(0, "left"), (0, "top"), (0, "bottom"), (1920, "right"), (1920, "top"), (1920, "bottom")} <= sides
+
+
+async def test_agent_knows_the_file_before_it_crosses(tmp_path, monkeypatch):
+    import curslink.files.dragout as dragout
+
+    monkeypatch.setattr(dragout, "WATCH_AFTER_S", 0.01)
+    f = tmp_path / "x.pdf"
+    f.write_text("x")
+    sent, helper, order = [], [], []
+
+    async def nothing(t, **d):
+        pass
+
+    def nudge(release):
+        order.append("nudge-release" if release else "nudge")
+
+    out = AgentDragOut(helper.append, lambda t, **d: (sent.append((t, d)), order.append(t)), nothing, "PC",
+                       nudge=nudge, explorer=lambda: [], screens=lambda: [{"x": 0, "y": 0, "width": 800, "height": 600}])
+    out.on_button("left", True)
+    await asyncio.sleep(0.05)
+    assert helper[-1].startswith("strips ") and len(json.loads(helper[-1][7:])) == 4
+    out.on_helper("drag " + json.dumps({"paths": [str(f)]}))   # the drag reached an edge
+    out.start()
+    await asyncio.sleep(0.6)
+    assert sent[0][0] == "drag_out" and sent[0][1]["card"]["name"] == "x.pdf"
+    assert order == ["drag_out", "nudge-release"]               # answered first, no probing nudge
+    assert "strips off" in helper
+
+
+async def test_a_plain_click_takes_the_strips_down(monkeypatch):
+    import curslink.files.dragout as dragout
+
+    monkeypatch.setattr(dragout, "WATCH_AFTER_S", 0.01)
+    helper = []
+
+    async def nothing(t, **d):
+        pass
+
+    out = AgentDragOut(helper.append, lambda t, **d: None, nothing, "PC", nudge=lambda r: None,
+                       explorer=lambda: [], screens=lambda: [{"x": 0, "y": 0, "width": 800, "height": 600}])
+    out.on_button("left", True)
+    out.on_button("left", False)                                # quicker than the watch
+    await asyncio.sleep(0.05)
+    assert helper == []
+    out.on_button("left", True)
+    await asyncio.sleep(0.05)
+    out.on_button("left", False)
+    assert helper[-1] == "strips off"
+
+
+async def test_the_card_shows_at_once_and_gives_way_to_the_real_drag(tmp_path):
+    drop, receiver, helper, calls = native(tmp_path)
+    drop.begin("c1", CARD)
+    assert helper[-2].startswith("card ") and helper[-1].startswith("nativedrag ")
+    drop.on_helper("nativedrag-started c1")
+    assert helper[-1] == "card hide"
