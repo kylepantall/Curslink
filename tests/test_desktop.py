@@ -586,3 +586,60 @@ def test_scroll_tally_logs_the_first_then_every_so_often(caplog):
         t.add(0, 2)
     lines = [r.getMessage() for r in caplog.records]
     assert len(lines) == 2 and "1 in" in lines[0] and "2 in" in lines[1] and "dy +3.00" in lines[1]
+
+
+def test_mac_cursor_shown_again_if_a_hung_app_kept_it_hidden(monkeypatch):
+    """Coming home while the app in front isn't responding can leave the
+    cursor hidden; it's checked and shown again."""
+    import curslink.inputs.pynput_backend as pb
+
+    class CG:
+        shows = 0
+        visible = False
+
+        def CGDisplayShowCursor(self, d):
+            CG.shows += 1
+
+    class IsVisible:
+        restype = None
+
+        def __call__(self):
+            return CG.visible
+
+    CG.CGCursorIsVisible = IsVisible()
+
+    cg = CG()
+    monkeypatch.setattr(pb, "_mac_lib", lambda path: cg)
+    monkeypatch.setattr(pb, "_mac_sets_cursor_in_background", lambda a, b: None)
+    nudges = []
+    monkeypatch.setattr(pb, "_mac_nudge_cursor", lambda: nudges.append(1))
+    monkeypatch.setattr(pb, "_MAC_SHOW_CHECKS_S", ())
+    monkeypatch.setattr(pb, "_mac_hidden", False)
+    pb._mac_check_shown(pb._mac_show_gen, 1)
+    assert CG.shows == 1 and nudges == [1]
+    CG.visible = True
+    pb._mac_check_shown(pb._mac_show_gen, 1)
+    assert CG.shows == 1                       # showing: left alone
+    CG.visible = False
+    pb._mac_check_shown(pb._mac_show_gen - 1, 1)
+    assert CG.shows == 1                       # stale check (hidden again since): ignored
+
+
+def test_windows_refused_moves_are_logged_now_and_then(monkeypatch, caplog):
+    import logging
+
+    import curslink.inputs.pynput_backend as pb
+
+    monkeypatch.setattr(pb, "_win_foreground", lambda: "Game.exe (not responding, runs as administrator)")
+    t = [0.0]
+    f = pb._WinInjectFailures(clock=lambda: t[0])
+    with caplog.at_level(logging.INFO, logger="curslink.inputs.pynput_backend"):
+        for _ in range(50):
+            f.failed(5, False)
+            t[0] += 0.01
+        t[0] += 5.0
+        f.failed(5, True)
+        f.ok()
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 2 and "Game.exe" in warnings[0] and "error 5" in warnings[0]
+    assert "51 moves were refused" in caplog.records[-1].getMessage()

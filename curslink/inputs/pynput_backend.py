@@ -456,30 +456,77 @@ def _mac_warp(x: float, y: float) -> None:
         log.debug("couldn't warp the cursor", exc_info=True)
 
 
+def _mac_sets_cursor_in_background(cg, cf) -> None:
+    cg._CGSDefaultConnection.restype = ctypes.c_int
+    cid = cg._CGSDefaultConnection()
+    cf.CFStringCreateWithCString.restype = ctypes.c_void_p
+    cf.CFStringCreateWithCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32]
+    key = cf.CFStringCreateWithCString(None, b"SetsCursorInBackground", 0x08000100)
+    true = ctypes.c_void_p.in_dll(cf, "kCFBooleanTrue")
+    cg.CGSSetConnectionProperty.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p]
+    cg.CGSSetConnectionProperty(cid, cid, key, true)
+
+
 def _mac_cursor_visible(visible: bool) -> None:
     """Hide or show the Mac's cursor. A background process may only do that
     after setting "SetsCursorInBackground" on its window server connection
     (what Synergy and Barrier do)."""
-    global _mac_hidden
+    global _mac_hidden, _mac_show_gen
     if visible != _mac_hidden:
         return  # already that way (hiding counts, so never hide twice)
     try:
         cg, cf = _mac_lib(_CG_PATH), _mac_lib(_CF_PATH)
+        _mac_sets_cursor_in_background(cg, cf)
+        _mac_show_gen += 1
         if not visible:
-            cg._CGSDefaultConnection.restype = ctypes.c_int
-            cid = cg._CGSDefaultConnection()
-            cf.CFStringCreateWithCString.restype = ctypes.c_void_p
-            cf.CFStringCreateWithCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32]
-            key = cf.CFStringCreateWithCString(None, b"SetsCursorInBackground", 0x08000100)
-            true = ctypes.c_void_p.in_dll(cf, "kCFBooleanTrue")
-            cg.CGSSetConnectionProperty.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p]
-            cg.CGSSetConnectionProperty(cid, cid, key, true)
             cg.CGDisplayHideCursor(0)
         else:
             cg.CGDisplayShowCursor(0)
+            _mac_check_shown(_mac_show_gen, 0)
         _mac_hidden = not visible
     except Exception:  # pragma: no cover - macOS only
         log.debug("couldn't %s the cursor", "show" if visible else "hide", exc_info=True)
+
+
+_mac_show_gen = 0
+# When the frontmost app isn't responding, the window server can leave the
+# cursor hidden after we show it again (it waits on that app). So look again
+# a few times after showing it, and show it again if it's still hidden.
+_MAC_SHOW_CHECKS_S = (0.05, 0.25, 1.0, 3.0)
+
+
+def _mac_check_shown(gen: int, attempt: int) -> None:
+    if gen != _mac_show_gen or _mac_hidden:
+        return  # hidden again on purpose since, or shown for good
+    try:
+        cg, cf = _mac_lib(_CG_PATH), _mac_lib(_CF_PATH)
+        if attempt > 0:
+            cg.CGCursorIsVisible.restype = ctypes.c_bool
+            if not cg.CGCursorIsVisible():
+                log.warning("the cursor was still hidden after input came home (is the app in front "
+                            "not responding?); showing it again")
+                _mac_sets_cursor_in_background(cg, cf)
+                cg.CGDisplayShowCursor(0)
+                _mac_nudge_cursor()
+    except Exception:  # pragma: no cover - macOS only
+        log.debug("couldn't check the cursor is showing", exc_info=True)
+    if attempt < len(_MAC_SHOW_CHECKS_S):
+        timer = threading.Timer(_MAC_SHOW_CHECKS_S[attempt], _mac_check_shown, (gen, attempt + 1))
+        timer.daemon = True
+        timer.start()
+
+
+def _mac_nudge_cursor() -> None:
+    """Post a mouse-moved event where the cursor already is: the window
+    server redraws the cursor for it even when the app in front is hung."""
+    try:
+        import Quartz
+
+        at = Quartz.CGEventGetLocation(Quartz.CGEventCreate(None))
+        event = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventMouseMoved, at, Quartz.kCGMouseButtonLeft)
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
+    except Exception:  # pragma: no cover - macOS only
+        log.debug("couldn't nudge the cursor", exc_info=True)
 
 
 def _mac_no_event_suppression() -> None:
@@ -675,14 +722,98 @@ def _win_move(x: int, y: int) -> bool:
     # which read the same numbers as physical pixels: the pointer was boxed
     # into the top-left part of a scaled screen and moved too slowly.
     try:
-        user32 = ctypes.windll.user32
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
         vx, vy = user32.GetSystemMetrics(76), user32.GetSystemMetrics(77)
         vw, vh = user32.GetSystemMetrics(78), user32.GetSystemMetrics(79)
         nx, ny = win_absolute(x, y, vx, vy, vw, vh)
         inp = _INPUT(type=0)
         inp.mi = _MOUSEINPUT(nx, ny, 0, _MOUSEEVENTF_MOVE | _MOUSEEVENTF_ABSOLUTE | _MOUSEEVENTF_VIRTUALDESK, 0, 0)
         if user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT)) == 1:
+            _win_failures.ok()
             return True
+        error = ctypes.get_last_error()
+        # Windows refuses injected input while the app in front runs as
+        # administrator and we don't (UIPI), and on the lock and UAC screens.
+        # SetCursorPos still works in some of those cases.
+        moved = bool(user32.SetCursorPos(int(x), int(y)))
+        _win_failures.failed(error, moved)
+        return True
     except Exception:
         log.debug("SendInput move failed; falling back to SetCursorPos", exc_info=True)
     return False
+
+
+class _WinInjectFailures:
+    """Logs (at most every few seconds) when Windows won't take the moves
+    we inject, with what's in front, since that's nearly always why."""
+
+    EVERY_S = 5.0
+
+    def __init__(self, clock=time.monotonic):
+        self.clock = clock
+        self.count = 0
+        self.logged_at: float | None = None
+
+    def ok(self) -> None:
+        if self.count:
+            log.info("Windows takes injected input again (%d moves were refused)", self.count)
+            self.count = 0
+            self.logged_at = None
+
+    def failed(self, error: int, moved: bool) -> None:
+        self.count += 1
+        now = self.clock()
+        if self.logged_at is not None and now - self.logged_at < self.EVERY_S:
+            return
+        self.logged_at = now
+        log.warning(
+            "Windows refused an injected pointer move (error %d, %d so far; SetCursorPos %s). In front: %s. "
+            "If that app runs as administrator, Windows blocks input from Curslink until it's closed, "
+            "or until Curslink runs as administrator too.",
+            error, self.count, "worked" if moved else "failed too", _win_foreground(),
+        )
+
+
+_win_failures = _WinInjectFailures()
+
+
+def _win_foreground() -> str:
+    """The app in front: its program name, whether it's not responding and
+    whether it runs as administrator (best effort)."""
+    try:
+        from ctypes import wintypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+        user32.GetForegroundWindow.restype = wintypes.HWND
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return "nothing (a lock, UAC or secure screen?)"
+        hung = bool(user32.IsHungAppWindow(hwnd))
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        process = kernel32.OpenProcess(0x1000, False, pid.value)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not process:
+            return f"pid {pid.value}{', not responding' if hung else ''} (can't look inside it)"
+        try:
+            buf = ctypes.create_unicode_buffer(1024)
+            size = wintypes.DWORD(len(buf))
+            name = buf.value.rsplit("\\", 1)[-1] if kernel32.QueryFullProcessImageNameW(
+                process, 0, buf, ctypes.byref(size)) else f"pid {pid.value}"
+            elevated = None
+            token = wintypes.HANDLE()
+            if advapi32.OpenProcessToken(process, 0x0008, ctypes.byref(token)):  # TOKEN_QUERY
+                value, got = wintypes.DWORD(), wintypes.DWORD()
+                if advapi32.GetTokenInformation(token, 20, ctypes.byref(value), 4, ctypes.byref(got)):
+                    elevated = bool(value.value)  # TokenElevation
+                kernel32.CloseHandle(token)
+        finally:
+            kernel32.CloseHandle(process)
+        notes = [n for n, on in (("not responding", hung), ("runs as administrator", elevated)) if on]
+        if elevated is None:
+            notes.append("couldn't tell if it runs as administrator")
+        return name + (f" ({', '.join(notes)})" if notes else "")
+    except Exception:
+        return "unknown"

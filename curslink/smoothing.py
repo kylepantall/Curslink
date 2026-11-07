@@ -8,11 +8,17 @@ Replayed as they land, the pointer stalls and then jumps.
 
 So positions are played back on the host's timeline instead, a few
 milliseconds behind it, and the pointer is moved between reports at a
-steady rate. How far behind is measured continuously: just enough to
-cover how late nearly all recent reports were (the 99th percentile) plus one gap
-between reports (to have the next one to move towards), and never more
-than ``MAX_DELAY_S``. On a wired link with a fast mouse that's a
-millisecond or two.
+steady rate. How far behind adapts to the link as it goes: the target is
+just enough to cover how late nearly all recent reports were (the 98th
+percentile of the last few seconds) plus one gap between reports (to have
+the next one to move towards), never more than ``MAX_DELAY_S``. On a wired
+link with a fast mouse that's a millisecond or two; on busy Wi-Fi it grows.
+
+The delay never jumps to its target, because a jump in the delay is a
+jump (or a freeze) of the pointer. It glides there instead: when the link
+gets worse, playback runs a little slower than real time until it has
+enough slack (``RISE_PER_S``); when the link recovers, a little faster
+until it's caught up (``FALL_PER_S``). Both are too gentle to see.
 
 Clicks, scrolls and keys don't wait: the session calls :meth:`snap`
 first, which puts the pointer on the newest position at once, so a click
@@ -30,10 +36,13 @@ from typing import Callable
 log = logging.getLogger(__name__)
 
 TICK_S = 0.004            # pointer updates while playing back: 250 a second
-MAX_DELAY_S = 0.06        # never play back further behind than this (35 ms in 0.4.10-0.4.17: on
-                          # a busy Wi-Fi link half the moves arrived later than that: stutter)
-STATS_EVERY_S = 0.1       # re-measure the delay this often
-WINDOW_S = 2.0            # ... from this much recent history
+MAX_DELAY_S = 0.12        # never play back further behind than this (35 ms in 0.4.10-0.4.17,
+                          # 60 ms in 0.4.18: busy Wi-Fi had moves later than both: stutter)
+STATS_EVERY_S = 0.1       # re-measure the target delay this often
+WINDOW_S = 3.0            # ... from this much recent history
+LATE_PCT = 0.98           # cover this share of recent reports
+RISE_PER_S = 0.4          # link got worse: add up to 0.4 s of delay a second (playback at 60% speed)
+FALL_PER_S = 0.05         # link recovered: shed 50 ms of delay a second (playback at 105% speed)
 OFFSET_WINDOW_S = 10.0    # the clock offset from this much (it drifts slowly)
 REPORT_EVERY_S = 10.0     # log how the link is doing this often while active
 
@@ -56,8 +65,10 @@ class PointerSmoother:
         self._samples: deque[tuple[float, float, float]] = deque()   # (host ts s, x, y), oldest first
         self._history: deque[tuple[float, float]] = deque()          # (arrival s, host ts s)
         self._offset: float | None = None   # arrival - ts at its smallest: clock offset + least delay
-        self.delay_s = 0.0
+        self.delay_s = 0.0          # how far behind playback is now
+        self.target_s = 0.0         # ... and where it's heading (see _measure)
         self._stats_at = 0.0
+        self._stepped_at: float | None = None
         self._at: tuple[int, int] | None = None   # where the pointer was last put
         self.active = False
         self._wake = threading.Event()
@@ -122,6 +133,7 @@ class PointerSmoother:
                 return
             if now - self._stats_at >= STATS_EVERY_S:
                 self._measure(now)
+            self._glide(now)
             p = now - self._offset - self.delay_s   # "now", on the host's clock
             samples = self._samples
             while len(samples) > 1 and samples[1][0] <= p:
@@ -149,9 +161,18 @@ class PointerSmoother:
         recent = [(a, t) for a, t in history if now - a <= WINDOW_S]
         late = [a - t - self._offset for a, t in recent]
         gaps = [t1 - t0 for (_, t0), (_, t1) in zip(recent, recent[1:]) if t1 > t0]
-        jitter = _pct(late, 0.99)
+        jitter = _pct(late, LATE_PCT)
         gap = min(_pct(gaps, 0.5), 0.02) if gaps else 0.0
-        self.delay_s = min(self.max_delay_s, jitter + gap)
+        self.target_s = min(self.max_delay_s, jitter + gap)
+
+    def _glide(self, now: float) -> None:
+        """Move the delay towards its target gently (see the module docs)."""
+        dt = 0.0 if self._stepped_at is None else min(max(now - self._stepped_at, 0.0), 0.05)
+        self._stepped_at = now
+        if self.delay_s < self.target_s:
+            self.delay_s = min(self.target_s, self.delay_s + RISE_PER_S * dt)
+        elif self.delay_s > self.target_s:
+            self.delay_s = max(self.target_s, self.delay_s - FALL_PER_S * dt)
 
     def _put(self, x: float, y: float) -> None:
         at = (round(x), round(y))
@@ -225,7 +246,7 @@ class _LinkReport:
         ms = 1000.0
         log.info(
             "pointer: %d moves in %.1fs (%.0f/s); arriving late by p50 %.1f / p95 %.1f / max %.1f ms; "
-            "longest gap %.0f ms; playing back %.1f ms behind; moving the pointer took avg %.2f / max %.2f ms",
+            "longest gap %.0f ms; playing back %.1f ms behind (adapts to the link); moving the pointer took avg %.2f / max %.2f ms",
             self.count, span, self.count / max(span, 1e-6),
             _pct(self.late, 0.5) * ms, _pct(self.late, 0.95) * ms, max(self.late) * ms,
             max(self.gaps, default=0.0) * ms, delay * ms,
