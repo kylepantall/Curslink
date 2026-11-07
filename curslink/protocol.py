@@ -68,6 +68,7 @@ MESSAGE_TYPES = frozenset(
         "pong",
         "facing",
         "look",
+        "hint",
         "bye",
         "drag",
         "file_begin",
@@ -90,7 +91,7 @@ HOST_FEATURES = ("facing",)
 # What this agent understands beyond the base protocol, sent in hello.features.
 # An agent without "look" would reject a look frame as unknown and drop the
 # connection, so the host only sends one to agents that list it.
-AGENT_FEATURES = ("look",)
+AGENT_FEATURES = ("look", "hint")
 # Added to hello.features by an agent that takes dragged files (drag and
 # file_* frames); it's optional ([agent.files] enabled = false leaves it out).
 FILES_FEATURE = "files"
@@ -169,6 +170,9 @@ def _validate(msg: Message) -> None:
     elif t == "look":
         if msg.data.get("hide") is not True and not isinstance(msg.data.get("screen"), str):
             raise ProtocolError("look needs a screen, or hide")
+    elif t == "hint":
+        if msg.data.get("hide") is not True and not isinstance(msg.data.get("screens"), list):
+            raise ProtocolError("hint needs screens, or hide")
     elif t == "drag":
         if msg.data.get("hide") is not True and not isinstance(msg.data.get("card"), dict):
             raise ProtocolError("drag needs a card, or hide")

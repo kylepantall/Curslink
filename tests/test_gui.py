@@ -448,3 +448,44 @@ def test_layout_page_saves_overlap_when_allowed(desktop, qapp):
     # turning it off again with the screens still overlapping can't be saved
     page.overlap_toggle.setChecked(False)
     assert not page.save_button.isEnabled()
+
+
+def test_overlap_shows_on_the_real_monitor_while_editing(desktop, qapp):
+    from curslink.gui.overlaphint import OverlapHint, regions_for
+    from PySide6.QtGui import QGuiApplication
+
+    page, home, laptop = _host_with_laptop(desktop)
+    # As if the Layout page were on screen, without showing the main window
+    # (on macOS that reaches for a native window the offscreen platform lacks).
+    page.isVisible = lambda: True
+    sent = []
+    desktop.service.send = sent.append
+    hx, hy, hw, hh = home.layout_rect()
+    page.scene.clearSelection()
+    laptop.setSelected(True)
+    page.overlap_toggle.setChecked(True)
+    page.spins["x"].setValue(hx + hw - 200)
+    page.spins["y"].setValue(hy + hh - 100)
+    page.bring_to_front(laptop)
+    page.overlaps_changed()
+    me = desktop.config().get("host", "device_id")
+    payload = page.hint_payload()
+    (entry,) = payload[me]["screens"]
+    assert entry["regions"][0]["rect"] == [hw - 200, hh - 100, 200, 100]
+    assert "Work laptop stands here" == entry["regions"][0]["label"]
+    assert page.hint is not None and page.hint.showing  # on this computer's monitor
+    # saving finishes the edit: the marks go
+    page.save()
+    assert not page.hint.showing
+    # the area scales from layout pixels to the monitor's own size
+    q = QGuiApplication.primaryScreen()
+    g = q.geometry()
+    (rect, _label, bad), = regions_for(q, {"size": [g.width() * 2, g.height() * 2],
+                                           "regions": [{"rect": [100, 50, 200, 100], "bad": True}]})
+    assert (rect.x(), rect.y(), rect.width(), rect.height()) == (50, 25, 100, 50) and bad
+    hint = OverlapHint()
+    hint.show({"screens": [{"screen": "main", "size": [g.width(), g.height()],
+                            "regions": [{"rect": [0, 0, 10, 10]}]}]})
+    assert hint.showing
+    hint.show({"hide": True})
+    assert not hint.showing

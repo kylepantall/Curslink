@@ -8,6 +8,7 @@ screen behind when it is, since that part of it is blocked out.
 
 from __future__ import annotations
 
+import json
 import sys
 
 from PySide6.QtCore import QPointF, QRectF, Qt
@@ -160,6 +161,8 @@ class ScreenItem(QGraphicsRectItem):
             self.refresh()
             self.page.selection_changed()
         elif change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged and self.page.items:
+            if not self.page.dirty:
+                self.page.set_dirty(True)
             self.page.overlaps_changed(dragging=self)
         return super().itemChange(change, value)
 
@@ -279,6 +282,8 @@ class LayoutPage(Page):
         self.canvas = Card(padding=12)
         self.scene = QGraphicsScene(self)
         self.tag: CoverTag | None = None
+        self.hint = None  # OverlapHint on this computer's monitors, while editing
+        self._hint_sent = ""
         self.view = LayoutView(self.scene)
         self.canvas.body.addWidget(self.view)
         self.add(self.canvas, 1)
@@ -327,6 +332,7 @@ class LayoutPage(Page):
 
     def shown(self) -> None:
         self.load_if_clean()
+        self.update_hint()
 
     def load_if_clean(self) -> None:
         if not self.dirty:
@@ -360,7 +366,7 @@ class LayoutPage(Page):
             for i, s in enumerate(d.get("screens", [])):
                 screen = {"id": str(s.get("id", f"screen{i}")), "x": int(s.get("x", 0)), "y": int(s.get("y", 0)),
                           "width": int(s.get("width", 1920)), "height": int(s.get("height", 1080)),
-                          "z": int(s.get("z", 0))}
+                          "z": int(s.get("z", 0)), "os_x": int(s.get("os_x", 0)), "os_y": int(s.get("os_y", 0))}
                 item = ScreenItem(self, d.get("id"), d.get("name", d.get("id")), screen, d.get("id") == me)
                 self.scene.addItem(item)
                 self.items.append(item)
@@ -413,6 +419,7 @@ class LayoutPage(Page):
             return
         cfg.save()
         self.set_dirty(False)
+        self.update_hint([])
         self.app.config_saved()
 
     def set_dirty(self, dirty: bool) -> None:
@@ -504,6 +511,53 @@ class LayoutPage(Page):
             self.overlap_row.show()
         if self.items:
             self.set_dirty(self.dirty)
+        self.update_hint(pairs)
+
+    # -- the overlap, on the real monitors --------------------------------------
+    def hint_payload(self, pairs=None) -> dict[str, dict]:
+        """``{device_id: {"screens": [...]}}``: on each screen that another
+        stands in front of, the area it covers (see curslink.gui.overlaphint).
+        Only while there are unsaved changes and the page is on screen."""
+        if not (self.dirty and self.isVisible() and self.app.role == "host"):
+            return {}
+        pairs = self.overlap_pairs() if pairs is None else pairs
+        out: dict[str, dict] = {}
+        entries: dict[str, dict] = {}
+        for behind, front, (x, y, w, h) in pairs:
+            bx, by, bw, bh = behind.layout_rect()
+            s = behind.screen
+            entry = entries.get(behind.key)
+            if entry is None:
+                entry = {"screen": s["id"], "os": [s.get("os_x", 0), s.get("os_y", 0), bw, bh],
+                         "size": [bw, bh], "regions": []}
+                entries[behind.key] = entry
+                out.setdefault(behind.device_id, {"screens": []})["screens"].append(entry)
+            label = (f"{front.device_name} stands here" if self.allow_overlap
+                     else f"Overlaps {front.device_name}: drag apart or allow overlap")
+            entry["regions"].append({"rect": [x - bx, y - by, w, h], "label": label, "bad": not self.allow_overlap})
+        return out
+
+    def update_hint(self, pairs=None) -> None:
+        payload = self.hint_payload(pairs)
+        me = self.app.config().get("host", "device_id") if self.app.has_config() else None
+        local = payload.pop(me, None) if me else None
+        if local:
+            if self.hint is None:
+                from curslink.gui.overlaphint import OverlapHint
+
+                self.hint = OverlapHint()
+            self.hint.show(local)
+        elif self.hint is not None:
+            self.hint.hide()
+        # Paired computers' screens: through the running service.
+        command = "hint " + json.dumps({"devices": payload}, separators=(",", ":"))
+        if command != self._hint_sent and (payload or self._hint_sent):
+            self.app.service.send(command)
+            self._hint_sent = command if payload else ""
+
+    def hideEvent(self, event) -> None:  # noqa: N802
+        super().hideEvent(event)
+        self.update_hint([])
 
     @staticmethod
     def _restyle(w) -> None:

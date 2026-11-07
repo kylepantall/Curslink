@@ -329,6 +329,8 @@ async def run_host(cfg: HostConfig) -> None:
             loop.create_task(calibrate_on())
         elif line.startswith("look "):
             look_command(server, line[5:])
+        elif line.startswith("hint "):
+            hint_command(server, line[5:])
         else:
             host_command(router, stop, line)
 
@@ -477,6 +479,30 @@ def look_command(server: HostServer, payload: str) -> None:
             server.send(device_id, "look", **data)
         else:
             server.send(device_id, "look", hide=True)
+
+
+def hint_command(server: HostServer, payload: str) -> None:
+    """``hint {"devices": {device_id: {"screens": [...]}}}`` marks where
+    screens overlap on those agents' monitors while the Layout page is being
+    edited (see curslink.gui.overlaphint); agents not listed take theirs down."""
+    import json
+
+    try:
+        data = json.loads(payload)
+        devices = data.get("devices", {}) if isinstance(data, dict) else None
+        if not isinstance(devices, dict):
+            raise ValueError("no devices")
+    except ValueError as exc:
+        log.debug("bad hint command %r: %s", payload, exc)
+        return
+    for device_id in list(server.connections):
+        if not server.supports(device_id, "hint"):
+            continue
+        hint = devices.get(device_id)
+        if isinstance(hint, dict) and isinstance(hint.get("screens"), list) and hint["screens"]:
+            server.send(device_id, "hint", screens=hint["screens"])
+        else:
+            server.send(device_id, "hint", hide=True)
 
 
 def start_gaze(cfg: HostConfig, arbiter: GazeArbiter, loop: asyncio.AbstractEventLoop):
@@ -637,10 +663,12 @@ async def run_agent(cfg: AgentConfig) -> None:
         resolve=lambda: resolve_host(cfg, store),
     )
     session.on_look = lambda data: events.emit("look", **data)
+    session.on_hint = lambda data: events.emit("hint", **data)
 
     def on_state(state: str, detail: str) -> None:
         if state != "connected":
             events.emit("look", hide=True)  # the host can't take it down now
+            events.emit("hint", hide=True)
         events.emit("host", state=state, detail=detail)
 
     client.on_state = on_state
