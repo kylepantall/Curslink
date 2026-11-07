@@ -400,9 +400,14 @@ def _listen(name: str, app: Curslink) -> QLocalServer:
     server.listen(name)
 
     def on_connection():
+        # Being connected to is the request: on Windows the other copy can
+        # write and hang up before readyRead fires, and then it never did.
         conn = server.nextPendingConnection()
-        if conn is not None:
-            conn.readyRead.connect(lambda: (conn.readAll(), app.show_window()))
+        while conn is not None:
+            conn.disconnected.connect(conn.deleteLater)
+            conn.readyRead.connect(conn.readAll)
+            app.show_window()
+            conn = server.nextPendingConnection()
 
     server.newConnection.connect(on_connection)
     return server
