@@ -524,6 +524,21 @@ def test_no_widget_opens_as_a_stray_window(desktop, qapp):
         qapp.removeEventFilter(watch)
 
 
+def _widest(widget, depth=0):
+    # what's asking for the width, for the failure message
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QWidget
+
+    out = []
+    for child in widget.findChildren(QWidget, options=Qt.FindChildOption.FindDirectChildrenOnly):
+        want = child.minimumSizeHint().width()
+        if child.isVisibleTo(widget) and want > 250 and depth < 8:
+            text = child.text()[:40] if hasattr(child, "text") else ""
+            out.append(f"{'  ' * depth}{type(child).__name__} {want} {text!r}")
+            out.extend(_widest(child, depth + 1))
+    return "\n".join(out) if depth == 0 else out
+
+
 def test_layout_page_fits_the_window_with_an_overlap(desktop, qapp, monkeypatch):
     # Side by side, the bottom cards (four number fields and the Edges card,
     # whose "in front of" line didn't wrap) wanted ~800 px, so in a smaller
@@ -550,7 +565,8 @@ def test_layout_page_fits_the_window_with_an_overlap(desktop, qapp, monkeypatch)
             w.show()
             qapp.processEvents()
             qapp.processEvents()
-            assert page.widget().minimumSizeHint().width() <= page.viewport().width(), width
+            assert page.widget().minimumSizeHint().width() <= page.viewport().width(), (
+                width, page.bottom_row.direction(), _widest(page.widget()))
         assert page.bottom_row.direction() == page.bottom_row.Direction.LeftToRight
         w.resize(900, 760)
         qapp.processEvents()
