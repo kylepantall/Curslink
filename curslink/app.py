@@ -684,6 +684,10 @@ async def run_agent(cfg: AgentConfig) -> None:
     session.on_hint = lambda data: events.emit("hint", **data)
 
     def on_state(state: str, detail: str) -> None:
+        if state == "connected" and client.host and not detail.startswith("relay"):
+            peer = paired_host(cfg, store)
+            if peer is not None and peer.address != client.host:
+                store.set_address(peer.device_id, client.host)
         if state != "connected":
             events.emit("look", hide=True)  # the host can't take it down now
             events.emit("hint", hide=True)
@@ -874,7 +878,8 @@ async def resolve_host(cfg: AgentConfig, store: PairingStore) -> ConnectTarget:
                             ", ".join(found.addresses), found.control_port, address)
             else:
                 log.info("host found on the LAN at %s (it advertises %s)", address, ", ".join(found.addresses))
-            store.set_address(peer.device_id, address)
+            # Remembered once a connection works (see run_agent), not here:
+            # an address that only answered the probe mustn't become "last good".
             return ConnectTarget(address, found.control_port, ctx, auth_key, relay)
         if peer.address:
             # mDNS didn't reach us (some routers and mesh Wi-Fi drop it one
