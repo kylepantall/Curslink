@@ -13,7 +13,7 @@ from typing import Awaitable, Callable
 from curslink.inputs.base import InputSink
 from curslink.net.framing import STREAM_LIMIT, read_message
 from curslink.net.relay import RelayError, RelayTarget, agent_connect
-from curslink.protocol import AGENT_FEATURES, PROTOCOL_VERSION, Message, ProtocolError, encode
+from curslink.protocol import AGENT_FEATURES, FILES_FEATURE, PROTOCOL_VERSION, Message, ProtocolError, encode
 from curslink.security import channel_binding, hello_auth
 
 log = logging.getLogger(__name__)
@@ -38,6 +38,12 @@ class AgentSession:
         # The host's calibration asks this device to show "Look here" on one
         # of its screens (or to hide it). See curslink.gui.overlay.
         self.on_look: Callable[[dict], None] = lambda data: None
+        # A file drag from the host: {"card": {...}} shows the placeholder
+        # that follows the pointer, {"hide": True} takes it down.
+        self.on_drag: Callable[[dict], None] = lambda data: None
+        # A curslink.files.transfer.FileReceiver takes dropped files; without
+        # one the agent doesn't offer the "files" feature.
+        self.files = None
         self.active = False
         self.keys: set[str] = set()
         self.buttons: set[str] = set()
@@ -70,6 +76,11 @@ class AgentSession:
             self.release_all()
         elif t == "look":
             self.on_look(dict(msg.data))
+        elif t == "drag":
+            self.on_drag(dict(msg.data))
+        elif t.startswith("file_"):
+            if self.files is not None:
+                return self.files.handle(msg)
         elif t == "button":
             name, pressed = msg.data["button"], msg.data["pressed"]
             if not pressed and name not in self.buttons:
@@ -91,6 +102,7 @@ class AgentSession:
         self.active = False
         if self.smoother is not None:
             self.smoother.pause()
+        self.on_drag({"hide": True})
         for key in sorted(self.keys):
             with contextlib.suppress(Exception):
                 self.sink.key(key, False)
@@ -212,7 +224,7 @@ class AgentClient:
                 name=self.name,
                 platform=f"{platform.system()} {platform.release()}",
                 screens=detect_screens(),
-                features=list(AGENT_FEATURES),
+                features=list(AGENT_FEATURES) + ([FILES_FEATURE] if self.session.files is not None else []),
             )
             if self.facing_source is not None:
                 hello["camera"] = True
@@ -252,6 +264,8 @@ class AgentClient:
                 self.on_state("disconnected", "")
             self.connected.clear()
             self.session.release_all()
+            if self.session.files is not None:
+                self.session.files.close_all()
             writer.close()
             with contextlib.suppress(Exception):
                 await writer.wait_closed()

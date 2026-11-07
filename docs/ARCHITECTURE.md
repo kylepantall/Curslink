@@ -122,6 +122,33 @@ on ordinary webcams at desk distance. Separate monitors are usually 20 to
 40 degrees apart, which head pose resolves well. Adding eye gaze for finer
 targets is a possible later upgrade.
 
+### Dragging files to another device
+
+`curslink/files/`. No OS tells a program that isn't under the pointer that
+a file is being dragged, so the host's overlay helper puts invisible drop
+targets where the drag will be:
+
+* while the left button is held and the pointer moves, thin strips along
+  the screen sides that lead to another device; a file dragged to the edge
+  passes over one, and the OS tells the helper its paths;
+* when input leaves with the button held some other way (a look, a
+  hotkey), a target over every host screen (the "shield"), and the host
+  nudges the parked pointer a pixel so the OS reports the drag to it.
+
+With input on another device and a file drag held, the host sends `drag
+{card}` and that agent's helper shows a placeholder (name, kind, size)
+following its pointer. Letting go there isn't forwarded as a click: the
+host sends the files as `file_*` frames on the same TLS-PSK connection
+(32 KiB per frame, written only as fast as the link drains, so input queued
+behind them is barely delayed), and ends the drag on the host by letting
+an injected button-up through the grab, over the shield, which refuses the
+drop so the source app does nothing. The agent writes into a hidden staging
+folder, moves the files into Downloads only once all of them have arrived,
+never overwrites (`name (1).ext`), cleans paths (no `..`, nothing absolute)
+and shows a progress popup. Coming back to the host with the button held
+just carries on the drag there. Agents list `files` in `hello.features`
+(`[agent.files] enabled = false` turns it off); others never see these frames.
+
 ### Safety
 
 * `Ctrl+Alt+Home` always returns input to the host.

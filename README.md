@@ -49,6 +49,11 @@ next computer, with a quick "pop" or "blink" so you always see where it went.
   and shows the switch animation.
 * The webcam only estimates which way your head is turned, on the host
   itself. No video leaves your computer.
+* **Drag files across.** Drag a file (or a folder, or several) over the
+  edge to another computer, or hold it and look at that computer. A card
+  with the file's name, type and size follows the pointer there; let go and
+  it's sent over the same encrypted link and saved in Downloads, with a
+  popup showing progress. Both computers need a build with this feature.
 
 ## Getting started
 
