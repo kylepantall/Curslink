@@ -47,7 +47,7 @@ from curslink.layout import Layout
 from curslink.files.native import NativeDrop
 from curslink.files.popups import ReceivePopups
 from curslink.files.transfer import FileReceiver
-from curslink.protocol import DROP_FEATURE, FILES_FEATURE, FILES_OUT_FEATURE
+from curslink.protocol import DROP_FEATURE, FILE_ACK_FEATURE, FILES_FEATURE, FILES_OUT_FEATURE
 from curslink.router import Router, SwitchEvent
 
 log = logging.getLogger(__name__)
@@ -55,6 +55,11 @@ log = logging.getLogger(__name__)
 DRAG_START_PX = 8        # a press that moves this far is a drag
 PROBE_WAIT_S = 0.6       # how long the shield waits to hear of a drag
 SHIELD_LINGER_S = 1.0    # after a drop, before taking the shield down
+# File bytes in flight to an agent (sent, not yet acknowledged) while a drag is
+# carried there, and after it's dropped. Small while carried: the pointer's
+# moves share the Wi-Fi with them, and the drop must not queue behind them.
+CARRY_WINDOW = 128 * 1024
+DROPPED_WINDOW = 512 * 1024
 
 
 def edge_strips(layout: Layout, device_id: str, gap: int) -> list[dict]:
@@ -291,6 +296,8 @@ class DragHandoff:
             return
         # Start sending now, so a big file is (nearly) there by the time it's dropped.
         out = Outgoing(new_id(), device_id, self.items)
+        if self.server.supports(device_id, FILE_ACK_FEATURE):
+            out.window = CARRY_WINDOW
         self.outgoing[out.id] = out
         self.carry_out = out
         self.server.send(device_id, "drag", card=card(self.items), id=out.id)
@@ -313,8 +320,10 @@ class DragHandoff:
         loop = asyncio.get_running_loop()
         out, self.carry_out = self.carry_out, None
         if out is not None and out.device_id == device_id:
-            log.info("drag: dropped on %s", device_id)
+            log.info("drag: dropped on %s (%s of %s sent)", device_id, human_size(out.sent),
+                     human_size(out.total) if out.total else "?")
             self.server.send(device_id, "drag", drop=True, id=out.id)
+            out.set_window(DROPPED_WINDOW)
         else:
             log.info("drag: dropped on %s; sending", device_id)
             self.server.send(device_id, "drag", hide=True)
@@ -396,6 +405,11 @@ class DragHandoff:
     def on_files(self, device_id: str, msg) -> bytes | None:
         """file_* frames from an agent: only for transfers this computer asked for."""
         tid = msg.get("id")
+        if msg.t == "file_ack":
+            out = self.outgoing.get(tid)
+            if out is not None and out.device_id == device_id:
+                out.ack(msg.get("n"))
+            return None
         if tid not in self.expecting:
             return None
         if msg.t in ("file_end", "file_cancel"):
