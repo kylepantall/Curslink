@@ -348,6 +348,8 @@ _MAC_BUTTON_NUMBER = 3                     # kCGMouseEventButtonNumber
 _MAC_BUTTON_NUMBERS = {2: "middle", 3: "x1", 4: "x2"}
 _MAC_SCROLL = 22                           # kCGEventScrollWheel
 _MAC_SCROLL_Y, _MAC_SCROLL_X = 93, 94      # kCGScrollWheelEventFixedPtDeltaAxis1 / 2 (lines)
+_MAC_SCROLL_LINES_Y, _MAC_SCROLL_LINES_X = 11, 12  # kCGScrollWheelEventDeltaAxis1 / 2 (whole lines)
+_MAC_SCROLL_CONTINUOUS = 88                # kCGScrollWheelEventIsContinuous (trackpad, Magic Mouse)
 # Further from the park point than one report could move it: the report was
 # made before the cursor was parked there.
 # For this long after grabbing, a single report moving further than
@@ -408,8 +410,27 @@ def _mac_field(event, field: int) -> int:
 def _mac_scroll(event) -> tuple[float, float]:
     import Quartz
 
-    return (Quartz.CGEventGetDoubleValueField(event, _MAC_SCROLL_X),
-            Quartz.CGEventGetDoubleValueField(event, _MAC_SCROLL_Y))
+    return mac_scroll_lines(
+        bool(Quartz.CGEventGetIntegerValueField(event, _MAC_SCROLL_CONTINUOUS)),
+        (Quartz.CGEventGetIntegerValueField(event, _MAC_SCROLL_LINES_X),
+         Quartz.CGEventGetIntegerValueField(event, _MAC_SCROLL_LINES_Y)),
+        (Quartz.CGEventGetDoubleValueField(event, _MAC_SCROLL_X),
+         Quartz.CGEventGetDoubleValueField(event, _MAC_SCROLL_Y)),
+    )
+
+
+def mac_scroll_lines(continuous: bool, lines: tuple[int, int], fixed: tuple[float, float]) -> tuple[float, float]:
+    """How many lines a Mac scroll event scrolled, as (dx, dy).
+
+    A trackpad or Magic Mouse (continuous) scrolls fractions of a line, so
+    its fixed-point delta is the true amount. A wheel mouse's notch, with
+    macOS's scroll acceleration, comes as a fixed-point 0.1 or so when
+    turned slowly, which a Windows app would need ten notches to move for;
+    its whole-line delta is at least one line per notch, like a wheel on
+    Windows."""
+    if continuous:
+        return float(fixed[0]), float(fixed[1])
+    return float(lines[0]), float(lines[1])
 
 
 def _mac_injected(event) -> bool:

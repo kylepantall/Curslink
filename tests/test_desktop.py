@@ -660,3 +660,12 @@ def test_windows_refused_moves_are_logged_now_and_then(monkeypatch, caplog):
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 2 and "Game.exe" in warnings[0] and "error 5" in warnings[0]
     assert "51 moves were refused" in caplog.records[-1].getMessage()
+
+
+def test_mac_wheel_mouse_scrolls_whole_lines_and_trackpad_fractions():
+    from curslink.inputs.pynput_backend import mac_scroll_lines
+
+    # A slow notch on a wheel mouse: macOS says 0.1 lines fixed-point, 1 whole line.
+    assert mac_scroll_lines(False, (0, -1), (0.0, -0.1)) == (0.0, -1.0)
+    # A trackpad's fractions are the real amount.
+    assert mac_scroll_lines(True, (0, 1), (0.0, 0.25)) == (0.0, 0.25)
