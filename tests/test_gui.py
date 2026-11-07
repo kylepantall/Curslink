@@ -350,3 +350,18 @@ def test_a_screen_the_camera_couldnt_see_is_tried_again_not_skipped(desktop, qap
     page.recorded(name, (1.0, 2.0))
     assert page.step == 1 and page.results[name] == (1.0, 2.0)
     assert "couldn't see" not in page.prompt_detail.text()
+def test_menu_bar_item_with_no_height_counts_as_placed(desktop, monkeypatch):
+    # macOS 26 reports the placed menu bar item as 38 x 0; closing the
+    # window must still hide Curslink to the menu bar.
+    import sys
+
+    from PySide6.QtCore import QRect
+
+    tray = desktop.tray
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(tray, "available", lambda: True)
+    monkeypatch.setattr(tray, "isVisible", lambda: True)
+    monkeypatch.setattr(tray, "geometry", lambda: QRect(0, 982, 38, 0))
+    assert desktop.tray_placed()
+    monkeypatch.setattr(tray, "geometry", lambda: QRect())
+    assert not desktop.tray_placed()
