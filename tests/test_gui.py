@@ -560,17 +560,21 @@ def test_layout_page_fits_the_window_with_an_overlap(desktop, qapp, monkeypatch)
         page.refresh_edges()
         w = desktop.window
         w.show_page("layout")
-        for width in (900, 1400):  # Kyle's window, then a wide one
-            w.resize(width, 760)
+        # Windows' offscreen fonts come out about twice as wide as anywhere
+        # else, so scale the window with them ("Detect my screens" is ~120 px).
+        scale = max(1.0, page.detect_button.sizeHint().width() / 120)
+        for width in (900, 1400, 700):  # Kyle's window, a wide one, a narrow one
+            w.resize(round(width * scale), 760)
             w.show()
             qapp.processEvents()
             qapp.processEvents()
             assert page.widget().minimumSizeHint().width() <= page.viewport().width(), (
                 width, page.bottom_row.direction(), _widest(page.widget()))
-        assert page.bottom_row.direction() == page.bottom_row.Direction.LeftToRight
-        w.resize(900, 760)
-        qapp.processEvents()
-        assert page.bottom_row.direction() == page.bottom_row.Direction.TopToBottom
+            stacked = page.bottom_row.direction() == page.bottom_row.Direction.TopToBottom
+            assert stacked == (page.viewport().width() < page.side_by_side_width()), width
+            if width == 1400:
+                assert not stacked
+        assert stacked  # at 700
     finally:
         theme.manager().set_mode("system")
 

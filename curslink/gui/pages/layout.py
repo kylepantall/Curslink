@@ -354,11 +354,20 @@ class LayoutPage(Page):
         app.config_changed.connect(self.load_if_clean)
         self.load()
 
-    STACK_BELOW = 760  # page width (px) under which the bottom cards stack
+    def side_by_side_width(self) -> int:
+        """Page width the bottom cards need next to each other."""
+        m = self.layout_.contentsMargins()
+        return (self.inspector.minimumSizeHint().width() + self.edges_card.minimumSizeHint().width()
+                + self.bottom_row.spacing() + m.left() + m.right())
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
-        narrow = self.viewport().width() < self.STACK_BELOW
+        self.fit_bottom_row()
+
+    def fit_bottom_row(self) -> None:
+        # Measured rather than a fixed width, since the fonts (and so the
+        # cards) differ between platforms and as the edges listed change.
+        narrow = self.viewport().width() < self.side_by_side_width()
         want = QBoxLayout.Direction.TopToBottom if narrow else QBoxLayout.Direction.LeftToRight
         if self.bottom_row.direction() != want:
             self.bottom_row.setDirection(want)
@@ -720,3 +729,4 @@ class LayoutPage(Page):
             w = label("No screens of different devices touch, so the pointer can't cross by the edges. "
                       "Move a screen next to another device's.", "warn", wrap=True)
             self.edges_box.addWidget(w)
+        self.fit_bottom_row()
