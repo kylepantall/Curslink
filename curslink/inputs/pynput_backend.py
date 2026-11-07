@@ -104,6 +104,7 @@ class PynputCapture:
         # the tap holds up every mouse event on the system, so it must be quick.
         self.tap_times: list[float] = []
         self._grabbed_at = 0.0
+        self._park_lock = threading.Lock()
 
     def start(self, handler: CaptureHandler) -> None:
         from pynput import mouse
@@ -129,7 +130,8 @@ class PynputCapture:
             return
         if grabbed:
             self._grabbed_at = time.monotonic()
-        self._grabbed = grabbed
+        with self._park_lock:  # no tap warps to the park point once this says "not grabbed"
+            self._grabbed = grabbed
         if self._mac:
             # The listeners keep running; the event taps read _grabbed.
             # Detaching the cursor only works for the frontmost app, which
@@ -188,7 +190,12 @@ class PynputCapture:
             dx, dy = self._mac_motion(event)
             if dx or dy:
                 self._handler.on_motion(dx, dy)
-            _mac_warp(*self.park_at)
+            # This very report may be the one that sends input home: by now
+            # the router may have let go and put the cursor on the Mac's edge,
+            # so don't drag it back to the park point.
+            with self._park_lock:
+                if self._grabbed:
+                    _mac_warp(*self.park_at)
             if len(self.tap_times) < 20000:
                 self.tap_times.append(time.perf_counter() - started)
         return None  # suppressed: this Mac doesn't see it
@@ -413,6 +420,15 @@ class PynputSink:
 
     def move_to(self, x: int, y: int) -> None:
         if sys.platform == "win32" and _win_move(x, y):
+            return
+        if sys.platform == "darwin":
+            # Input coming home: put the cursor where it crossed the edge by
+            # warping it (what Synergy does), then tie it back to the mouse,
+            # which also cancels macOS's short freeze after a warp. A posted
+            # mouse-moved event could lose to reports still in flight from
+            # the parked position and leave the cursor mid-screen.
+            _mac_warp(x, y)
+            _mac_attach_cursor(True)
             return
         self._mouse.position = (x, y)
 

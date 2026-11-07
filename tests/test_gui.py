@@ -328,5 +328,6 @@ def test_switch_animation_never_takes_focus_or_clicks(qapp):
     assert flags & Qt.WindowType.WindowDoesNotAcceptFocus
     assert flags & Qt.WindowType.WindowTransparentForInput
     assert w.testAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+    assert w.testAttribute(Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow)  # else hidden on the Mac
     assert not w.isActiveWindow()
     w.close()
