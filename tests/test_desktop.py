@@ -431,3 +431,32 @@ def test_mac_drops_the_parking_jump_right_after_grabbing_but_not_later(monkeypat
     assert capture._mac_motion((6, 2)) == (6, 2)        # real motion straight away
     now[0] += 1.0
     assert capture._mac_motion((-300, 0)) == (-300, 0)  # later, a fast flick is a flick
+
+
+def test_mac_input_coming_home_lands_on_the_edge_it_crossed(monkeypatch):
+    import curslink.inputs.pynput_backend as pb
+
+    calls = []
+    monkeypatch.setattr(pb, "_mac_warp", lambda x, y: calls.append(("warp", x, y)))
+    monkeypatch.setattr(pb, "_mac_attach_cursor", lambda attached: calls.append(("attach", attached)))
+    monkeypatch.setattr(pb, "_mac_cursor_visible", lambda visible: None)
+    monkeypatch.setattr(pb, "_mac_injected", lambda event: False)
+    monkeypatch.setattr(pb, "_mac_delta", lambda event: (40, 0))
+    monkeypatch.setattr(pb.sys, "platform", "darwin")
+
+    sink = pb.PynputSink.__new__(pb.PynputSink)  # no pynput controllers needed
+    sink.move_to(3455, 610)
+    assert calls == [("warp", 3455, 610), ("attach", True)]  # a warp, not a posted event
+
+    capture = pb.PynputCapture(park_at=(756, 491))
+    capture._mac = True
+
+    class Handler:
+        def on_motion(self, dx, dy):
+            capture.set_grab(False)  # this report sends input home
+
+    capture._handler = Handler()
+    capture.set_grab(True)
+    del calls[:]
+    capture._mac_mouse_tap(5, object())
+    assert ("warp", 756, 491) not in calls  # not dragged back to the park point
