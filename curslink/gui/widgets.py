@@ -264,11 +264,15 @@ class Card(QFrame):
             outer.addWidget(heading)
             self.heading = heading
         self.body = outer
-        holder = QWidget()
-        self.rows = QVBoxLayout(holder)
+        # The rows' holder sits first in the body. Hidden until it has a row:
+        # empty and visible, it still took the body's spacing, which left a
+        # gap above the content of every card without rows.
+        self._holder = QWidget()
+        self._holder.setVisible(rows)
+        self.rows = QVBoxLayout(self._holder)
         self.rows.setContentsMargins(0, 0, 0, 0)
         self.rows.setSpacing(0)
-        outer.addWidget(holder)
+        outer.addWidget(self._holder)
 
     def add_row(self, *widgets: QWidget, stretch_first: bool = True) -> QFrame:
         """A row with a line above it (for list-style cards)."""
@@ -281,6 +285,7 @@ class Card(QFrame):
         for i, w in enumerate(widgets):
             h.addWidget(w, 1 if (i == 0 and stretch_first) else 0)
         self.rows.addWidget(row)
+        self._holder.setVisible(True)
         return row
 
     def clear_rows(self) -> None:

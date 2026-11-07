@@ -63,6 +63,9 @@ class OverlayProcess:
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     text=True,
+                    # The packaged helper is the console build: never let it
+                    # open a console window of its own.
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0,
                 )
                 threading.Thread(target=self._read, args=(self._proc,), name="curslink-overlay-out",
                                  daemon=True).start()
