@@ -25,6 +25,8 @@ gaze = [
 # The desktop app (`curslink gui`): window, tray / menu bar icon.
 gui = [
     "PySide6-Essentials>=6.8",
+    # The QR code a phone scans to pair (pure Python).
+    "segno>=1.6",
     # macOS: the window's glass (vibrancy), hiding the Dock icon, camera names.
     "pyobjc-framework-Cocoa>=10; sys_platform == 'darwin'",
     "pyobjc-framework-AVFoundation>=10; sys_platform == 'darwin'",

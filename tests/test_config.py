@@ -70,3 +70,20 @@ def test_jump_screens_are_parsed_and_unknown_ones_skipped():
     raw["gaze"]["jump_screens"] = "everything"
     with pytest.raises(ConfigError):
         host_config(raw)
+
+
+def test_place_a_phone_against_an_edge(tmp_path):
+    from curslink.configedit import ConfigFile
+
+    cfg = ConfigFile(tmp_path / "c.toml")
+    cfg.add_device("mac", "Mac", [{"id": "main", "x": 0, "y": 0, "width": 1512, "height": 982}])
+    cfg.add_device("phone", "Pixel", [{"id": "phone", "x": 0, "y": 0, "width": 411, "height": 914}])
+    assert cfg.side_of("phone", "mac") == "right"
+    cfg.place_beside("phone", "mac", "left")
+    (s,) = cfg.raw()["devices"][1]["screens"]
+    assert (s["x"], s["y"]) == (-411, 34)
+    assert cfg.side_of("phone", "mac") == "left"
+    cfg.place_beside("phone", "mac", "bottom")
+    (s,) = cfg.raw()["devices"][1]["screens"]
+    assert (s["x"], s["y"]) == (550, 982)
+    assert cfg.side_of("phone", "mac") == "bottom"

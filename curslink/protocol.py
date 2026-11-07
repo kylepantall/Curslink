@@ -36,7 +36,9 @@ Host -> agent
     popup_close  {chat}                it opened on another device: close it here
 
 Agent -> host
-    hello        {v, device_id, name, platform, screens, auth, camera}
+    hello        {v, device_id, name, platform, screens, auth, camera, ping_s}
+                                       ping_s (optional): ping this agent only this
+                                       often (s, up to 15); a phone saves battery
     pong         {n, ts}               ts: the ping's, echoed (times the round trip)
     facing       {facing}              the agent's own camera sees the user
                                        facing it (true) or not (false)

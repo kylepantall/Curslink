@@ -435,13 +435,36 @@ The router, layout, gaze maths, protocol and networking have no platform
 dependencies and are covered by the test suite, including real TLS
 connections between a host and an agent.
 
+## The Android agent (`android/`)
+
+A Kotlin app speaking the same protocol. `android/core` is a plain JVM
+library (TLS-PSK through BouncyCastle, since Android's own TLS dropped PSK;
+pairing; UDP moves; the relay), tested in CI against the real Python host
+(`android/interop/host.py`). The app around it:
+
+* A foreground service keeps the link open while the phone sleeps (the app
+  asks to be left out of battery optimisation, and asks the host for a ping
+  every 5 s, `hello.ping_s`, instead of every 0.5 s). It advertises the
+  phone over mDNS for pairing and finds the host the same way.
+* On `enter` it turns the screen on (`ACQUIRE_CAUSES_WAKEUP`) and opens an
+  invisible activity over the lock screen that asks to dismiss it. The
+  running accessibility service is what lets it start from the background.
+* An `AccessibilityService` draws the pointer in an accessibility overlay
+  (shape from the node under it), plays the left button as one continued
+  touch stroke, scrolls by sliding a finger with a pause before lifting (no
+  fling), and types through the Android 13 accessibility input method.
+* The phone reports its screen in dp, upright; the host's coordinates are
+  scaled onto the screen as it's turned now, so rotating keeps the edge.
+* Pairing by QR code: the host's Devices page shows `curslink://pair?...`
+  with a one-time token; the phone proves it in place of a typed code (see
+  `curslink.pairing.qr`). Pairing messages carry `screens`, so the host lays
+  the phone out at its real size before it ever connects.
+
 ## Roadmap
 
-1. **Android agent** (Kotlin): speaks the same protocol. Pointer and
-   gestures via an `AccessibilityService` (`dispatchGesture`), text via
-   a custom IME or accessibility actions. Alternative path: the host acts
-   as a Bluetooth HID keyboard/mouse to the phone (Linux BlueZ can do
-   this), which needs no app on the phone at all.
+1. **Android agent**: done in `android/` (see below). Still open: the host
+   acting as a Bluetooth HID mouse/keyboard to the phone, which would give
+   Android's own pointer and hover; files and Isolink popups to a phone.
 2. **Pairing UX**: answer incoming pairing requests in the app's window
    rather than the Tk dialog. (Discovery, code pairing, pairing from the
    app and adding a paired agent to the layout are done.)

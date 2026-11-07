@@ -7,7 +7,7 @@ import threading
 import time
 
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QHBoxLayout, QLineEdit, QMessageBox, QVBoxLayout
+from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QVBoxLayout
 
 from curslink.config import agent_config, host_config
 from curslink.gui.common import call_on_main, in_background, main_thread
@@ -75,11 +75,93 @@ class Pairing:
             loop.close()
 
 
+class QrSession:
+    """The listener behind one pairing QR code, on its own thread and event loop."""
+
+    def __init__(self, me, control_port: int, relay, on_ready, on_paired, on_failed):
+        self.me, self.control_port, self.relay = me, control_port, relay
+        # Called on the Qt thread: on_ready(url), on_paired(PairResult, address), on_failed(message).
+        self.on_ready, self.on_paired, self.on_failed = on_ready, on_paired, on_failed
+        main_thread()
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._stop: asyncio.Event | None = None
+
+    def start(self) -> None:
+        threading.Thread(target=self._run, name="curslink-qr-pairing", daemon=True).start()
+
+    def cancel(self) -> None:
+        loop, stop = self._loop, self._stop
+        if loop and stop:
+            try:
+                loop.call_soon_threadsafe(stop.set)
+            except RuntimeError:
+                pass
+
+    def _run(self) -> None:
+        from curslink.pairing.discovery import local_addresses, rank_addresses
+        from curslink.pairing.qr import QrPairing
+
+        async def main():
+            self._stop = asyncio.Event()
+            done = asyncio.get_running_loop().create_future()
+
+            def paired(result, address):
+                if not done.done():
+                    done.set_result((result, address))
+
+            qr = QrPairing(self.me, paired)
+            await qr.start()
+            try:
+                addresses = list(rank_addresses(local_addresses()))
+                relay = self.relay
+                call_on_main(lambda: self.on_ready(qr.url(addresses, self.control_port,
+                                                          relay.address if relay else "", relay.key if relay else "")))
+                stopped = asyncio.ensure_future(self._stop.wait())
+                await asyncio.wait([done, stopped], timeout=qr.lifetime_s, return_when=asyncio.FIRST_COMPLETED)
+                stopped.cancel()
+                return done.result() if done.done() else None
+            finally:
+                await qr.close()
+
+        loop = asyncio.new_event_loop()
+        self._loop = loop
+        try:
+            outcome = loop.run_until_complete(main())
+        except OSError as exc:
+            call_on_main(lambda: self.on_failed(f"Can't take pairing requests here: {exc}"))
+        except Exception as exc:  # a bug, but don't take the app down
+            call_on_main(lambda: self.on_failed(f"Pairing failed: {exc}"))
+        else:
+            if outcome is None:
+                call_on_main(lambda: self.on_failed(""))
+            else:
+                call_on_main(lambda: self.on_paired(*outcome))
+        finally:
+            loop.close()
+
+
+def qr_pixmap(text: str, scale: int = 6):
+    import io
+
+    import segno
+    from PySide6.QtGui import QPixmap
+
+    buffer = io.BytesIO()
+    segno.make(text, error="m").save(buffer, kind="png", scale=scale, border=2, dark="#000000", light="#ffffff")
+    pixmap = QPixmap()
+    pixmap.loadFromData(buffer.getvalue(), "PNG")
+    return pixmap
+
+
+EDGES = (("Right", "right"), ("Left", "left"), ("Above", "top"), ("Below", "bottom"))
+
+
 class DevicesPage(Page):
     def __init__(self, app):
         super().__init__("Devices", "Pair once and each device gets its own key. Nothing secret goes in a config file.")
         self.app = app
         self.pairing: Pairing | None = None
+        self.qr: QrSession | None = None
         self.found = []
 
         self.code_card = Card()
@@ -115,6 +197,33 @@ class DevicesPage(Page):
 
         self.this = Card("This computer", rows=True)
         self.add(self.this)
+
+        # Hosts only: a phone with the Curslink app scans this to pair.
+        self.phone = Card("Pair a phone", rows=True)
+        self.phone_row = QHBoxLayout()
+        self.phone_row.setContentsMargins(20, 10, 20, 14)
+        self.phone_row.setSpacing(18)
+        self.qr_image = QLabel()
+        self.qr_image.setAccessibleName("Pairing QR code")
+        self.qr_image.hide()
+        self.phone_row.addWidget(self.qr_image)
+        words = QVBoxLayout()
+        self.phone_text = label("Install Curslink on your Android phone, then scan a code from here to pair it. "
+                                "Afterwards, push the pointer past the edge you choose for the phone and it wakes "
+                                "up with your mouse and keyboard on it.", wrap=True)
+        words.addWidget(self.phone_text)
+        buttons = QHBoxLayout()
+        self.qr_button = button("Show QR code", "primary", self.show_qr)
+        self.qr_cancel = button("Cancel", None, self.cancel_qr)
+        self.qr_cancel.hide()
+        buttons.addWidget(self.qr_button)
+        buttons.addWidget(self.qr_cancel)
+        buttons.addStretch(1)
+        words.addLayout(buttons)
+        words.addStretch(1)
+        self.phone_row.addLayout(words, 1)
+        self.phone.body.addLayout(self.phone_row)
+        self.add(self.phone)
 
         self.paired = Card("Paired with this computer", rows=True)
         self.add(self.paired)
@@ -227,15 +336,20 @@ class DevicesPage(Page):
         connected = {a.device_id for a in self.app.status.agents.values() if a.connected}
         if self.app.status.host_state == "connected":
             connected |= {p.device_id for p in peers if p.role == "host"}
+        self.phone.setVisible(self.app.role == "host")
         for p in peers:
             t = time.localtime(p.paired_at)
             when = f"{t.tm_mday} {time.strftime('%b %Y', t)}" if p.paired_at else "earlier"
             on = p.device_id in connected
-            self.paired.add_row(
+            widgets = [
                 text_block(p.name, f"{p.role.title()} · id {p.device_id} · paired {when}"),
                 pill("Connected" if on else "Offline", "on" if on else "off"),
-                button("Unpair", "danger", lambda _=False, peer=p: self.unpair(peer)),
-            )
+            ]
+            edge = self.edge_picker(p) if self.app.role == "host" and p.role == "agent" else None
+            if edge is not None:
+                widgets.insert(1, edge)
+            widgets.append(button("Unpair", "danger", lambda _=False, peer=p: self.unpair(peer)))
+            self.paired.add_row(*widgets)
         self.draw_found()
 
     def draw_found(self) -> None:
@@ -329,10 +443,95 @@ class DevicesPage(Page):
         if message:
             self.say(message)
 
-    def paired_ok(self, result) -> None:
-        address = self.pairing.address if self.pairing else ""
-        self.pairing = None
-        self.code_card.hide()
+    # -- phones -------------------------------------------------------------
+    def edge_picker(self, peer):
+        """Which edge of this computer's screens leads to the device: picking
+        one moves the device there in the layout."""
+        try:
+            cfg = self.app.config()
+            me, _ = self.me()
+            if not cfg.has_device(peer.device_id):
+                return None
+            side = cfg.side_of(peer.device_id, me.device_id)
+        except Exception:
+            return None
+        box = QComboBox()
+        box.setAccessibleName(f"Edge that leads to {peer.name}")
+        if side is None:
+            box.addItem("Edge: as laid out", None)
+        for text, value in EDGES:
+            box.addItem(f"Edge: {text.lower()}", value)
+        box.setCurrentIndex(max(0, box.findData(side)))
+        box.setToolTip(f"Push the pointer off this edge of your screens to reach {peer.name}. "
+                       "Fine-tune it on the Layout page.")
+
+        def picked(_index: int) -> None:
+            value = box.currentData()
+            if value:
+                self.place(peer, me.device_id, value)
+
+        box.currentIndexChanged.connect(picked)
+        return box
+
+    def place(self, peer, anchor: str, side: str) -> None:
+        cfg = self.app.config()
+        try:
+            cfg.place_beside(peer.device_id, anchor, side)
+        except (KeyError, ValueError) as exc:
+            self.say(f"Couldn't move {peer.name}: {exc}")
+            return
+        cfg.save()
+        self.app.config_saved()
+        where = dict((v, t.lower()) for t, v in EDGES)[side]
+        self.say(f"{peer.name} is now off the {where} edge of your screens." if side in ("left", "right")
+                 else f"{peer.name} is now {where} your screens.", ok=True)
+
+    def show_qr(self) -> None:
+        if self.qr is not None:
+            return
+        me, _ = self.me()
+        cfg = host_config(self.app.config().raw(), base_dir=self.app.config_path.parent)
+        self.message.hide()
+        self.qr_button.setEnabled(False)
+        self.qr = QrSession(me, cfg.port, cfg.relay, self.qr_ready, self.qr_paired, self.qr_failed)
+        self.qr.start()
+
+    def qr_ready(self, url: str) -> None:
+        self.qr_image.setPixmap(qr_pixmap(url))
+        self.qr_image.show()
+        self.qr_button.hide()
+        self.qr_cancel.show()
+        self.phone_text.setText("Open Curslink on your phone and tap Scan QR code. The phone needs to be on "
+                                "this network to pair; afterwards it can also reach you through your relay."
+                                if self.app.config().raw().get("relay") else
+                                "Open Curslink on your phone and tap Scan QR code. The phone needs to be on "
+                                "this network.")
+
+    def cancel_qr(self) -> None:
+        if self.qr:
+            self.qr.cancel()
+
+    def _qr_done(self) -> None:
+        self.qr = None
+        self.qr_image.hide()
+        self.qr_cancel.hide()
+        self.qr_button.show()
+        self.qr_button.setEnabled(True)
+
+    def qr_failed(self, message: str) -> None:
+        self._qr_done()
+        if message:
+            self.say(message)
+
+    def qr_paired(self, result, address: str) -> None:
+        self._qr_done()
+        self.paired_ok(result, address)
+
+    def paired_ok(self, result, address: str | None = None) -> None:
+        if address is None:
+            address = self.pairing.address if self.pairing else ""
+            self.pairing = None
+            self.code_card.hide()
         peer = result.peer
         self.store().add(peer.device_id, peer.name, peer.role, result.key, address)
         note = f"Paired with {peer.name}."
@@ -340,15 +539,20 @@ class DevicesPage(Page):
             cfg = self.app.config()
             if not cfg.has_device(peer.device_id):
                 agent = self.app.status.agents.get(peer.device_id)
+                # What it reported when it connected, else what it said while
+                # pairing (a phone does), else a placeholder screen.
+                reported = (agent.screens if agent else []) or getattr(result, "extra", {}).get("screens") or []
                 screens = [
                     {"id": s.get("name") or f"screen{i + 1}", "x": s["x"], "y": s["y"],
                      "width": s["width"], "height": s["height"]}
-                    for i, s in enumerate((agent.screens if agent else []) or [])
-                    if all(k in s for k in ("x", "y", "width", "height"))
+                    for i, s in enumerate(reported)
+                    if isinstance(s, dict) and all(isinstance(s.get(k), (int, float)) and not isinstance(s.get(k), bool)
+                                                   for k in ("x", "y", "width", "height"))
                 ]
                 cfg.add_device(peer.device_id, peer.name, screens or None)
                 cfg.save()
-                note += " It's been added to the right of your screens; arrange it on the Layout page."
+                note += (" It's been added to the right of your screens: pick another edge for it below, "
+                         "or arrange it on the Layout page.")
                 self.app.config_saved()
         self.say(note, ok=True)
         self.refresh()

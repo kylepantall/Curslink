@@ -291,6 +291,54 @@ class ConfigFile:
             raise KeyError(device_id)
         device["screens"] = _screens_aot(screens)
 
+    def _box(self, device_id: str) -> tuple[int, int, int, int] | None:
+        device = self._device(device_id)
+        screens = list(device.get("screens", [])) if device is not None else []
+        if not screens:
+            return None
+        x0 = min(int(s.get("x", 0)) for s in screens)
+        y0 = min(int(s.get("y", 0)) for s in screens)
+        x1 = max(int(s.get("x", 0)) + int(s.get("width", 0)) for s in screens)
+        y1 = max(int(s.get("y", 0)) + int(s.get("height", 0)) for s in screens)
+        return x0, y0, x1, y1
+
+    def side_of(self, device_id: str, anchor_id: str) -> str | None:
+        """Which edge of ``anchor_id``'s screens ``device_id`` sits against:
+        "left", "right", "top" or "bottom" (None if it isn't beside them)."""
+        a, d = self._box(anchor_id), self._box(device_id)
+        if a is None or d is None:
+            return None
+        gaps = {"right": d[0] - a[2], "left": a[0] - d[2], "bottom": d[1] - a[3], "top": a[1] - d[3]}
+        side, gap = max(gaps.items(), key=lambda kv: kv[1])
+        return side if gap >= -1 else None
+
+    def place_beside(self, device_id: str, anchor_id: str, side: str) -> None:
+        """Move ``device_id`` (all its screens) against one edge of
+        ``anchor_id``'s screens, centred along it: pushing the pointer off
+        that edge then lands on it. Edges calibrated for it are dropped."""
+        a, d = self._box(anchor_id), self._box(device_id)
+        if a is None or d is None:
+            raise KeyError(device_id if d is None else anchor_id)
+        w, h = d[2] - d[0], d[3] - d[1]
+        if side == "right":
+            nx, ny = a[2], a[1] + ((a[3] - a[1]) - h) // 2
+        elif side == "left":
+            nx, ny = a[0] - w, a[1] + ((a[3] - a[1]) - h) // 2
+        elif side == "top":
+            nx, ny = a[0] + ((a[2] - a[0]) - w) // 2, a[1] - h
+        elif side == "bottom":
+            nx, ny = a[0] + ((a[2] - a[0]) - w) // 2, a[3]
+        else:
+            raise ValueError(f"unknown side {side!r}")
+        dx, dy = nx - d[0], ny - d[1]
+        for s in self._device(device_id).get("screens", []):
+            s["x"] = int(s.get("x", 0)) + dx
+            s["y"] = int(s.get("y", 0)) + dy
+        for link in self.links():
+            ends = (str(link.get("a", "")), str(link.get("b", "")))
+            if any(e.split("/")[0] == device_id for e in ends):
+                self.remove_link(*ends)
+
     def remove_device(self, device_id: str) -> bool:
         devices = self.doc.get("devices")
         if devices is None:

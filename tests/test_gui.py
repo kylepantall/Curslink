@@ -734,3 +734,50 @@ def test_paired_computer_draws_the_edge_layer(qapp):
     assert not window.clickable and window.state.points == [50] and not hint.windows
     hint.show({"hide": True})
     assert not hint.showing
+
+
+def test_pair_a_phone_by_qr_code_and_pick_its_edge(desktop, qapp):
+    import asyncio
+    import time
+
+    from curslink.pairing.handshake import DeviceInfo, initiate
+    from curslink.pairing.qr import parse_invite
+
+    desktop.window.pages["setup"].create()
+    w = desktop.window
+    w.show_page("devices")
+    page = w.pages["devices"]
+    assert page.phone.isVisibleTo(w)
+    urls = []
+    page.qr_ready = (lambda real: lambda url: (urls.append(url), real(url)))(page.qr_ready)
+    page.show_qr()
+    for _ in range(200):
+        qapp.processEvents()
+        if urls:
+            break
+        time.sleep(0.01)
+    assert urls and not page.qr_image.pixmap().isNull()
+    invite = parse_invite(urls[0])
+
+    async def scan():
+        reader, writer = await asyncio.open_connection("127.0.0.1", invite["pairing_port"])
+        try:
+            return await initiate(reader, writer, DeviceInfo("pixel", "Pixel 9", "agent"), lambda c, p: None,
+                                  token=invite["token"],
+                                  about={"screens": [{"x": 0, "y": 0, "width": 411, "height": 914, "name": "phone"}]})
+        finally:
+            writer.close()
+
+    asyncio.run(scan())
+    for _ in range(200):
+        qapp.processEvents()
+        if page.qr is None:
+            break
+        time.sleep(0.01)
+    assert page.qr is None and page.store().get("pixel") is not None
+    phone = next(d for d in desktop.config().devices() if d["id"] == "pixel")
+    assert (phone["screens"][0]["width"], phone["screens"][0]["height"]) == (411, 914)
+    me = desktop.config().get("host", "device_id")
+    assert desktop.config().side_of("pixel", me) == "right"
+    page.place(page.store().get("pixel"), me, "left")
+    assert desktop.config().side_of("pixel", me) == "left"

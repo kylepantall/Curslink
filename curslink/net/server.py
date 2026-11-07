@@ -19,6 +19,9 @@ log = logging.getLogger(__name__)
 HELLO_TIMEOUT_S = 5.0
 PING_INTERVAL_S = 0.5   # often enough to measure the round trip as it changes
 DEAD_AFTER_S = 7.0
+# An agent on battery (a phone) can ask for slower pings in hello.ping_s, so
+# a link kept open all day doesn't keep waking its radio twice a second.
+MAX_PING_INTERVAL_S = 15.0
 # If an agent stops reading, don't buffer more than this before dropping it.
 MAX_BUFFER_BYTES = 256 * 1024
 # Bulk frames (dropped files) wait for the connection to drain past this, so
@@ -42,6 +45,11 @@ class AgentConnection:
     features: frozenset = frozenset()  # hello.features: what else it understands
     rtts: list = field(default_factory=list)  # ping round trips (s) since last taken
     udp: HostPath | None = None   # moves by UDP (see curslink.net.udp), when the agent takes them
+    ping_s: float = PING_INTERVAL_S
+
+    @property
+    def dead_after_s(self) -> float:
+        return max(DEAD_AFTER_S, 3 * self.ping_s + 1)
 
 
 class HostServer:
@@ -206,6 +214,7 @@ class HostServer:
                 last_seen=loop.time(),
                 camera=hello.get("camera") is True,
                 features=frozenset(f for f in (hello.get("features") or []) if isinstance(f, str)),
+                ping_s=_ping_interval(hello.get("ping_s")),
             )
             self.connections[device_id] = conn
             welcome = {"device_id": device_id, "features": list(HOST_FEATURES)}
@@ -269,13 +278,19 @@ class HostServer:
         loop = asyncio.get_running_loop()
         n = 0
         while True:
-            await asyncio.sleep(PING_INTERVAL_S)
-            if loop.time() - conn.last_seen > DEAD_AFTER_S:
+            await asyncio.sleep(conn.ping_s)
+            if loop.time() - conn.last_seen > conn.dead_after_s:
                 log.warning("agent %s timed out", conn.device_id)
                 conn.writer.transport.abort()
                 return
             n += 1
             self.send(conn.device_id, "ping", n=n, ts=round(time.monotonic() * 1000.0, 2))
+
+
+def _ping_interval(value) -> float:
+    if not _is_num(value):
+        return PING_INTERVAL_S
+    return min(max(float(value), PING_INTERVAL_S), MAX_PING_INTERVAL_S)
 
 
 def _is_num(value) -> bool:
