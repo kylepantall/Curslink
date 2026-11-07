@@ -191,6 +191,8 @@ class GazeArbiter:
     def on_facing(self, t: float, device_id: str, facing: bool) -> None:
         """A device's own camera says whether the user is facing it."""
         was_facing = self._facing(device_id, t)
+        last = self.reports.get(device_id)
+        said_facing = last is not None and last.facing  # however old: did it last see you?
         self.reports[device_id] = _Report(facing, t)
         if self.suspended or device_id not in self.cameras:
             return
@@ -198,7 +200,7 @@ class GazeArbiter:
             return  # agents' cameras were turned off on the host
         current = self._current().device_id
         if not self.host_live(t):
-            self._facing_only(t, device_id, facing and not was_facing, facing, current)
+            self._facing_only(t, device_id, facing and not was_facing, facing, current, said_facing)
             return
         if not facing or current == device_id:
             return
@@ -207,7 +209,8 @@ class GazeArbiter:
             log.info("gaze: %s sees you facing it and the host sees you turned away", device_id)
             self._do_switch(target)
 
-    def _facing_only(self, t: float, device_id: str, turned_to: bool, facing: bool, current: str) -> None:
+    def _facing_only(self, t: float, device_id: str, turned_to: bool, facing: bool, current: str,
+                     was_facing: bool = True) -> None:
         """No calibrated host camera to ask: the devices' own cameras decide.
 
         Only *turning to* a device moves the pointer there, not the
@@ -221,6 +224,12 @@ class GazeArbiter:
             return
         if current != device_id:
             return  # you weren't on it anyway
+        if not was_facing:
+            # Only *turning away* counts, not the once-a-second "still not
+            # facing": a camera that never saw you (Kyle's PC camera failed to
+            # open) used to send input home every second you weren't moving
+            # the mouse, even right after you'd pushed it over the edge.
+            return
         others = [d for d in self.cameras if d != device_id and self._facing(d, t)
                   and (self.settings.enabled or d == self.local_id)]
         if others:

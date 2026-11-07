@@ -229,6 +229,7 @@ class Router:
     def on_button(self, button: str, pressed: bool) -> None:
         if self.is_local:
             return
+        self._moved_at = self.clock()  # clicking counts as using the mouse
         if pressed:
             self._remote_buttons.add(button)
         else:
@@ -237,6 +238,7 @@ class Router:
 
     def on_scroll(self, dx: float, dy: float) -> None:
         if not self.is_local:
+            self._moved_at = self.clock()  # so does scrolling: gaze waits
             self._scrolls.add(dx, dy)
             self.transport.send(self.active_device, "scroll", dx=dx, dy=dy)
 

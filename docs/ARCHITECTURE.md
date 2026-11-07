@@ -194,7 +194,7 @@ moves back on the host's timeline (`curslink/smoothing.py`), a few
 milliseconds behind it, and moves the pointer between reports at 250 Hz.
 How far behind adapts: the 99th percentile of how late reports have
 arrived over the last two seconds, plus one gap between reports (needed to
-have the next point to move towards), capped at 35 ms. On a clean link
+have the next point to move towards), capped at 60 ms. On a clean link
 with a fast mouse that's about 2 ms. Clicks, scrolls and keys don't wait;
 the pointer snaps to the newest position first, so they land where the
 host saw them.
