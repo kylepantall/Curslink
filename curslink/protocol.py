@@ -25,6 +25,11 @@ Host -> agent
                                        device: show (or take down) the
                                        placeholder that follows the pointer
     file_*                             a dropped file, see curslink.files.transfer
+    drag_out     {}                    input is leaving for the host with the left
+                                       button held: is it a file? End the drag here
+                                       and say (drag_out back)
+    fetch        {id} | {id, cancel}   send the files of that drag_out now (it
+                                       was dropped on the host), or forget them
 
 Agent -> host
     hello        {v, device_id, name, platform, screens, auth, camera}
@@ -32,6 +37,8 @@ Agent -> host
     facing       {facing}              the agent's own camera sees the user
                                        facing it (true) or not (false)
     file_result  {id, ok, ...}         dropped files saved (or why not)
+    drag_out     {id, card} | {none}   what the drag leaving this device carries
+    file_*                             its files, once the host fetches them
 
 ``hello.camera`` is true when the agent runs its own camera to confirm
 gaze switches (see :mod:`curslink.gaze.confirm`). An agent only sends
@@ -75,6 +82,8 @@ MESSAGE_TYPES = frozenset(
         "hint",
         "bye",
         "drag",
+        "drag_out",
+        "fetch",
         "file_begin",
         "file_item",
         "file_data",
@@ -99,6 +108,12 @@ AGENT_FEATURES = ("look", "hint")
 # Added to hello.features by an agent that takes dragged files (drag and
 # file_* frames); it's optional ([agent.files] enabled = false leaves it out).
 FILES_FEATURE = "files"
+# An agent that can hand a file drag over to the host (drag_out / fetch, and
+# file_* frames the other way).
+FILES_OUT_FEATURE = "files_out"
+# An agent that takes a dragged file's bytes while it's carried (drag {id,
+# card}, then drag {drop, id} or drag {hide, id}) and drops it as a real file.
+DROP_FEATURE = "drop"
 # Added by an agent that reached the host directly and takes moves by UDP
 # (see curslink.net.udp); [agent].udp = false leaves it out.
 UDP_FEATURE = "udp"
@@ -183,6 +198,9 @@ def _validate(msg: Message) -> None:
     elif t == "drag":
         if msg.data.get("hide") is not True and not isinstance(msg.data.get("card"), dict):
             raise ProtocolError("drag needs a card, or hide")
+    elif t == "fetch":
+        if not isinstance(msg.data.get("id"), str):
+            raise ProtocolError("fetch.id must be a string")
     elif t in FILE_FRAMES:
         if not isinstance(msg.data.get("id"), str):
             raise ProtocolError(f"{t}.id must be a string")

@@ -14,7 +14,7 @@ from curslink.inputs.base import InputSink
 from curslink.net.framing import STREAM_LIMIT, read_message
 from curslink.net.relay import RelayError, RelayTarget, agent_connect
 from curslink.net.udp import AgentUdp
-from curslink.protocol import (AGENT_FEATURES, FILES_FEATURE, PROTOCOL_VERSION, UDP_FEATURE, Message, ProtocolError,
+from curslink.protocol import (AGENT_FEATURES, FILES_FEATURE, FILES_OUT_FEATURE, DROP_FEATURE, PROTOCOL_VERSION, UDP_FEATURE, Message, ProtocolError,
                                encode)
 from curslink.security import channel_binding, hello_auth
 from curslink.tally import Tally
@@ -54,6 +54,9 @@ class AgentSession:
         # A curslink.files.transfer.FileReceiver takes dropped files; without
         # one the agent doesn't offer the "files" feature.
         self.files = None
+        # A curslink.files.dragout.AgentDragOut hands file drags leaving
+        # this device over to the host (drag_out, fetch, file_result).
+        self.drag_out = None
         self.active = False
         self.keys: set[str] = set()
         self.buttons: set[str] = set()
@@ -115,6 +118,16 @@ class AgentSession:
             self.on_hint(dict(msg.data))
         elif t == "drag":
             self.on_drag(dict(msg.data))
+        elif t == "drag_out":
+            if self.drag_out is not None:
+                # The host won't send this button's release: the drag is ours to end.
+                self.buttons.discard("left")
+                self.drag_out.start()
+        elif t == "fetch":
+            if self.drag_out is not None:
+                self.drag_out.fetch(dict(msg.data))
+        elif t == "file_result" and self.drag_out is not None and self.drag_out.owns(msg.get("id")):
+            self.drag_out.result(dict(msg.data))
         elif t.startswith("file_"):
             if self.files is not None:
                 return self.files.handle(msg)
@@ -229,6 +242,24 @@ class AgentClient:
             return
         writer.write(encode("facing", facing=bool(facing)))
 
+    def send(self, t: str, **data) -> None:
+        """A frame to the host now, if connected (dropped otherwise)."""
+        writer = self._writer
+        if writer is not None and not writer.transport.is_closing():
+            writer.write(encode(t, **data))
+
+    async def send_bulk(self, t: str, **data) -> None:
+        """A frame of a big transfer to the host, waiting while the
+        connection is busy. Raises ConnectionError once it's gone."""
+        writer = self._writer
+        if writer is None or writer.transport.is_closing():
+            raise ConnectionError("not connected to the host")
+        writer.write(encode(t, **data))
+        while writer.transport.get_write_buffer_size() > 64 * 1024:
+            if self._writer is not writer or writer.transport.is_closing():
+                raise ConnectionError("the host disconnected")
+            await asyncio.sleep(0.002)
+
     async def _refresh_facing(self) -> None:
         while True:
             if self.facing_source is not None:
@@ -268,7 +299,9 @@ class AgentClient:
         reader, writer = await self._open()
         self.session.new_connection()
         try:
-            features = list(AGENT_FEATURES) + ([FILES_FEATURE] if self.session.files is not None else [])
+            features = list(AGENT_FEATURES) + ([FILES_FEATURE, DROP_FEATURE] if self.session.files is not None else [])
+            if self.session.drag_out is not None:
+                features.append(FILES_OUT_FEATURE)
             if self.udp_enabled and self._direct:
                 features.append(UDP_FEATURE)
             hello = dict(
@@ -325,6 +358,8 @@ class AgentClient:
             self.session.release_all()
             if self.session.files is not None:
                 self.session.files.close_all()
+            if self.session.drag_out is not None:
+                self.session.drag_out.close()
             writer.close()
             with contextlib.suppress(Exception):
                 await writer.wait_closed()

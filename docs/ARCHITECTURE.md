@@ -154,7 +154,31 @@ source app does nothing. The agent writes into a hidden staging
 folder, moves the files into Downloads only once all of them have arrived,
 never overwrites (`name (1).ext`), cleans paths (no `..`, nothing absolute)
 and shows a progress popup. Coming back to the host with the button held
-just carries on the drag there. Agents list `files` in `hello.features`
+just carries on the drag there.
+
+Files start moving as soon as the drag crosses (agents that list `drop`
+get `drag {id, card}` and the bytes straight away; `drag {drop, id}` or
+`drag {hide, id}` follows). The receiving side then makes it a real drop
+(`curslink/files/native.py`): empty placeholders with the real names go in
+a temp folder, the overlay helper puts a small window under the pointer,
+the device presses the button on it and the helper starts a real OS drag of
+those paths with the file card as its image. Let go on the desktop or in a
+folder and the file manager copies them there; on an app, it gets the temp
+paths. If you let go before every byte has arrived, the button-up waits
+(the agent simply doesn't send it yet; a Mac host's event tap holds the
+real one back) with a progress popup, then the drop happens. Where a real
+drag can't be started (a Windows or Linux host, a Mac or Linux agent, or it
+doesn't start within 1.5 s) the card follows the pointer and the files go
+to Downloads.
+
+The other way, agent to host: coming home with an agent's left button held,
+the router doesn't send that button-up but `drag_out`. The agent covers its
+screens with the shield, nudges the pointer so the OS reports the drag (on
+Windows, falling back to the selection in the Explorer window in front),
+ends its own drag with Escape, and answers `drag_out {id, card}`; the host
+sends `fetch {id}` at once and the files come as `file_*` frames from the
+agent, into the same real-drop machinery on the host. Gaze may carry a
+drag home this way too (otherwise it never moves the pointer mid-drag). Agents list `files` in `hello.features`
 (`[agent.files] enabled = false` turns it off); others never see these frames.
 
 ### Safety

@@ -49,11 +49,12 @@ next computer, with a quick "pop" or "blink" so you always see where it went.
   and shows the switch animation.
 * The webcam only estimates which way your head is turned, on the host
   itself. No video leaves your computer.
-* **Drag files across.** Drag a file (or a folder, or several) over the
-  edge to another computer, or hold it and look at that computer. A card
-  with the file's name, type and size follows the pointer there; let go and
-  it's sent over the same encrypted link and saved in Downloads, with a
-  popup showing progress. Both computers need a build with this feature.
+* **Drag files across, either way.** Drag files or folders over the edge
+  to another computer (or hold them and look at it), and back. They start
+  sending straight away, and on the other side it's a real drag: drop on the
+  desktop or in a folder and they're saved there, drop on an app and it
+  opens them. Let go before a big file has arrived and the drop waits, with
+  a progress popup.
 
 ## Getting started
 

@@ -113,6 +113,11 @@ class Router:
         # The key name to send to a device: lets the app swap Cmd and Ctrl
         # between a Mac and a PC (see inputs.keys.swap_for).
         self.key_for: Callable[[str, str], str] = lambda device_id, key: key
+        # File drags leaving another device for this one (curslink.files.handoff):
+        # can_drag_out(device) says whether it can hand its drag over, and
+        # drag_out(device) asks it to, instead of letting go of its left button.
+        self.can_drag_out: Callable[[str], bool] = lambda device_id: False
+        self.drag_out: Callable[[str], None] = lambda device_id: None
         self._blocked_said = ""
         # After arriving by gaze or a hotkey (home or on another device) the pointer may land right on
         # the edge it left by; it has to leave that edge before an edge push
@@ -306,8 +311,10 @@ class Router:
     def on_gaze(self, target: Target) -> None:
         if not self.settings.gaze_switching or self.gaze_paused:
             return
-        if self._remote_buttons:
-            return  # never yank the pointer away mid-drag
+        if self._remote_buttons and not (
+                self._remote_buttons == {"left"} and target.device_id == self.local_id
+                and self.can_drag_out(self.active_device)):
+            return  # never yank the pointer away mid-drag (unless it carries a file home)
         if self.clock() - self._moved_at < GAZE_HOLD_S:
             return  # the mouse is moving: it decides (gaze is asked again shortly)
         try:
@@ -382,8 +389,15 @@ class Router:
             elif self.transport.is_connected(old):
                 for key in sorted(self._remote_keys):
                     self.transport.send(old, "key", key=self.key_for(old, key), pressed=False)
+                # A drag leaving that device for this one may be a file: the
+                # device finds out and ends its drag itself, rather than let go
+                # of the button wherever its pointer stopped.
+                dragging_out = new == self.local_id and "left" in self._remote_buttons and self.can_drag_out(old)
                 for button in sorted(self._remote_buttons):
-                    self.transport.send(old, "button", button=button, pressed=False)
+                    if not (dragging_out and button == "left"):
+                        self.transport.send(old, "button", button=button, pressed=False)
+                if dragging_out:
+                    self.drag_out(old)
                 self.transport.send(old, "leave", effect=effect, x=exit_x, y=exit_y)
             self._remote_keys.clear()
             self._remote_buttons.clear()

@@ -113,4 +113,6 @@ def card(items: list[Dragged]) -> dict:
         "count": len(items),
         "ext": "" if first.is_dir else Path(first.name).suffix.lstrip(".").upper()[:4],
         "dir": first.is_dir,
+        # every top-level item, so the receiver can lay out a real drag of them
+        "items": [{"name": i.name, "dir": i.is_dir} for i in items[:500]],
     }
