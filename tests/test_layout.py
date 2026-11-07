@@ -63,3 +63,61 @@ def test_edge_pushes(layout):
 def test_clamp_to_device_slides_along_edge(layout):
     screen, x, y = layout.clamp_to_device("laptop", 6000, 500)
     assert screen.device_id == "laptop" and x == 3840 + 1280 - 1 and y == 500
+
+
+def _overlapping(allow=True, laptop_z=1):
+    # A 1000x600 monitor, with the laptop standing in front of its bottom-right corner.
+    return Layout.from_devices(
+        [
+            Device("pc", "PC", (Screen("main", "pc", 0, 0, 1000, 600),)),
+            Device("lap", "Laptop", (Screen("main", "lap", 800, 400, 500, 300, z=laptop_z),)),
+        ],
+        allow_overlap=allow,
+    )
+
+
+def test_overlap_allowed_when_flag_on():
+    lay = _overlapping()
+    (behind, front), = lay.overlaps()
+    assert (behind.device_id, front.device_id) == ("pc", "lap")
+    assert behind.overlap(front) == (800, 400, 200, 200)
+
+
+def test_overlap_still_refused_without_flag():
+    with pytest.raises(ValueError, match="pc/main and lap/main overlap"):
+        _overlapping(allow=False)
+
+
+def test_screen_hidden_completely_is_refused():
+    with pytest.raises(ValueError, match="completely hidden"):
+        Layout.from_devices(
+            [
+                Device("a", "A", (Screen("s", "a", 10, 10, 50, 50),)),
+                Device("b", "B", (Screen("s", "b", 0, 0, 100, 100, z=1),)),
+            ],
+            allow_overlap=True,
+        )
+
+
+def test_front_screen_owns_the_shared_area():
+    lay = _overlapping()
+    assert lay.screen_at(900, 500).device_id == "lap"
+    assert lay.screen_at(900, 500, "pc") is None  # blocked out
+    assert lay.screen_at(100, 100, "pc").device_id == "pc"
+    assert lay.covered_by("pc", 900, 500).device_id == "lap"
+    assert lay.covered_by("pc", 100, 100) is None
+    # with the monitor in front instead, the laptop's corner is the one hidden
+    lay = _overlapping(laptop_z=-1)
+    assert lay.screen_at(900, 500).device_id == "pc"
+    assert lay.covered_by("lap", 900, 500).device_id == "pc"
+
+
+def test_pushing_into_the_blocked_corner_crosses():
+    lay = _overlapping()
+    # just above the laptop, moving down onto it
+    hit = lay.find_crossing("pc", 900, 399, 0, 1)
+    assert hit and hit.screen.device_id == "lap"
+    # from the laptop, up past its top edge, onto the visible monitor
+    hit = lay.find_crossing("lap", 900, 400, 0, -1)
+    assert hit and hit.screen.device_id == "pc" and hit.y < 400
+

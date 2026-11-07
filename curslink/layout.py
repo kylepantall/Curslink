@@ -9,6 +9,12 @@ Each screen also records its origin in its own device's OS coordinate
 space (``os_x``/``os_y``), which is where that monitor lives in the device's
 display settings. That lets us translate a global point into the absolute
 coordinates the device's OS expects when we warp its cursor.
+
+Screens may overlap only when the layout allows it (``allow_overlap``), for
+a laptop standing in front of part of a monitor. Then the screen in front
+(higher ``z``; on a tie, the one listed later) owns the shared area, and the
+covered part of the screen behind is blocked out: the pointer can't rest
+there, and pushing into it crosses to the screen in front.
 """
 
 from __future__ import annotations
@@ -27,6 +33,7 @@ class Screen:
     height: int
     os_x: int = 0
     os_y: int = 0
+    z: int = 0  # stacking order when screens overlap: higher is in front
 
     @property
     def right(self) -> int:
@@ -61,6 +68,14 @@ class Screen:
     def from_os(self, ox: float, oy: float) -> tuple[float, float]:
         return (ox - self.os_x + self.x, oy - self.os_y + self.y)
 
+    def overlap(self, other: "Screen") -> tuple[int, int, int, int] | None:
+        """The shared area ``(x, y, width, height)``, or None if they don't overlap."""
+        x0, y0 = max(self.x, other.x), max(self.y, other.y)
+        x1, y1 = min(self.right, other.right), min(self.bottom, other.bottom)
+        if x0 < x1 and y0 < y1:
+            return (x0, y0, x1 - x0, y1 - y0)
+        return None
+
 
 @dataclass(frozen=True)
 class Device:
@@ -76,15 +91,40 @@ class Crossing:
     y: float
 
 
+def overlap_message(a: Screen, b: Screen) -> str:
+    return f"screens {a.device_id}/{a.id} and {b.device_id}/{b.id} overlap"
+
+
 @dataclass
 class Layout:
     devices: dict[str, Device] = field(default_factory=dict)
+    allow_overlap: bool = False
 
     @classmethod
-    def from_devices(cls, devices: Iterable[Device]) -> "Layout":
-        layout = cls({d.id: d for d in devices})
+    def from_devices(cls, devices: Iterable[Device], allow_overlap: bool = False) -> "Layout":
+        layout = cls({d.id: d for d in devices}, allow_overlap)
         layout.validate()
         return layout
+
+    def overlaps(self) -> list[tuple[Screen, Screen]]:
+        """Every overlapping pair, as ``(behind, in front)``."""
+        stack = self._stack()
+        out = []
+        for i, a in enumerate(stack):
+            for b in stack[i + 1 :]:
+                if a.overlap(b):
+                    out.append((a, b))
+        return out
+
+    def _stack(self) -> list[Screen]:
+        """All screens, back to front."""
+        order = list(self.screens())
+        return [s for _, s in sorted(enumerate(order), key=lambda p: (p[1].z, p[0]))]
+
+    def in_front(self, a: Screen, b: Screen) -> bool:
+        """Is ``a`` drawn in front of ``b``?"""
+        stack = self._stack()
+        return stack.index(a) > stack.index(b)
 
     def validate(self) -> None:
         seen: set[tuple[str, str]] = set()
@@ -95,12 +135,16 @@ class Layout:
             if (s.device_id, s.id) in seen:
                 raise ValueError(f"duplicate screen id {s.device_id}/{s.id}")
             seen.add((s.device_id, s.id))
-        for i, a in enumerate(all_screens):
-            for b in all_screens[i + 1 :]:
-                if a.x < b.right and b.x < a.right and a.y < b.bottom and b.y < a.bottom:
-                    raise ValueError(
-                        f"screens {a.device_id}/{a.id} and {b.device_id}/{b.id} overlap"
-                    )
+        pairs = self.overlaps()
+        if pairs and not self.allow_overlap:
+            raise ValueError(overlap_message(*pairs[0]))
+        for behind, front in pairs:
+            if front.x <= behind.x and front.y <= behind.y and front.right >= behind.right \
+                    and front.bottom >= behind.bottom:
+                raise ValueError(
+                    f"screen {behind.device_id}/{behind.id} is completely hidden behind "
+                    f"{front.device_id}/{front.id}"
+                )
 
     def screens(self, device_id: str | None = None) -> Iterable[Screen]:
         for device in self.devices.values():
@@ -114,9 +158,30 @@ class Layout:
         raise KeyError(f"{device_id}/{screen_id}")
 
     def screen_at(self, x: float, y: float, device_id: str | None = None) -> Screen | None:
-        for s in self.screens(device_id):
+        """The screen you'd see at a point: the front one where screens overlap.
+
+        With ``device_id``, only if that device's screen is the one in front
+        there, so a covered (blocked out) area belongs to nobody behind it.
+        """
+        if not self.allow_overlap:
+            for s in self.screens(device_id):
+                if s.contains(x, y):
+                    return s
+            return None
+        for s in reversed(self._stack()):
             if s.contains(x, y):
-                return s
+                return s if device_id is None or s.device_id == device_id else None
+        return None
+
+    def covered_by(self, device_id: str, x: float, y: float) -> Screen | None:
+        """Another device's screen standing in front of ``device_id`` at a point."""
+        if not self.allow_overlap:
+            return None
+        front = self.screen_at(x, y)
+        if front is None or front.device_id == device_id:
+            return None
+        if any(s.contains(x, y) for s in self.screens(device_id)):
+            return front
         return None
 
     def screen_at_os(self, device_id: str, ox: float, oy: float) -> Screen | None:
@@ -126,13 +191,23 @@ class Layout:
         return None
 
     def clamp_to_device(self, device_id: str, x: float, y: float) -> tuple[Screen, float, float]:
-        """Nearest point on any of the device's screens (lets the pointer slide along edges)."""
+        """Nearest point on any of the device's screens (lets the pointer slide along edges).
+
+        A point blocked out behind another device's screen is only used when
+        nothing visible is found; callers can check with :meth:`screen_at`.
+        """
         best: tuple[float, Screen, float, float] | None = None
+        blocked: tuple[float, Screen, float, float] | None = None
         for s in self.screens(device_id):
             cx, cy = s.clamp(x, y)
             dist = (cx - x) ** 2 + (cy - y) ** 2
+            if self.allow_overlap and self.screen_at(cx, cy, device_id) is None:
+                if blocked is None or dist < blocked[0]:
+                    blocked = (dist, s, cx, cy)
+                continue
             if best is None or dist < best[0]:
                 best = (dist, s, cx, cy)
+        best = best or blocked
         if best is None:
             raise KeyError(f"device {device_id!r} has no screens")
         return best[1], best[2], best[3]

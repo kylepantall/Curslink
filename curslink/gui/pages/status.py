@@ -20,9 +20,16 @@ class StatusPage(Page):
         self.run_button = button("Stop linking", None, self.toggle_run)
         self.header.addWidget(self.run_button)
 
+        self.error_row = QWidget()
+        er = QHBoxLayout(self.error_row)
+        er.setContentsMargins(0, 0, 0, 0)
         self.error = label("", "error", wrap=True)
-        self.error.hide()
-        self.add(self.error)
+        er.addWidget(self.error, 1)
+        # Screens that overlap: an old config, or one edited by hand.
+        self.fix_layout = button("Fix in Layout", None, lambda: self.app.window.show_page("layout"))
+        er.addWidget(self.fix_layout)
+        self.error_row.hide()
+        self.add(self.error_row)
 
         # macOS: Accessibility / Input Monitoring, asked for here until granted.
         from curslink.gui.permissions import PermissionsCard
@@ -149,10 +156,16 @@ class StatusPage(Page):
         self.run_button.style().polish(self.run_button)
 
         if state == FAILED and app.service.error:
-            self.error.setText(f"Curslink stopped: {app.service.error}")
-            self.error.show()
+            overlap = "overlap" in app.service.error or "hidden behind" in app.service.error
+            text = f"Curslink stopped: {app.service.error}"
+            if overlap:
+                text += (". Move those screens apart on the Layout page, or turn on Allow overlap there if one "
+                         "really stands in front of the other.")
+            self.error.setText(text)
+            self.fix_layout.setVisible(overlap)
+            self.error_row.show()
         else:
-            self.error.hide()
+            self.error_row.hide()
 
         names = self.device_names()
         # Host: the live map of the screens while linking; until then the
