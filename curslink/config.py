@@ -293,6 +293,7 @@ def host_config(raw: dict[str, Any], base_dir: Path = Path(".")) -> HostConfig:
         gaze_jump_screens=jump_screens(raw.get("gaze", {}), layout),
         return_hotkey=host.get("return_hotkey", "ctrl+alt+home"),
         gaze_toggle_hotkey=host.get("gaze_toggle_hotkey", "ctrl+alt+g"),
+        swap_cmd_ctrl=bool(host.get("swap_cmd_ctrl", True)),
     )
     if router.effect not in ("pop", "blink", "none"):
         raise ConfigError("[host].effect must be pop, blink or none")

@@ -26,6 +26,41 @@ def family(name: str) -> str:
     return _FAMILY_OF.get(name, name)
 
 
+# Macs put the everyday shortcuts (copy, paste, tabs) on Cmd, PCs on Ctrl, and
+# the key beside them is the other one. Swapping the two between a Mac and a
+# PC keeps the shortcut under the same finger: Cmd+C on a Mac keyboard is
+# Ctrl+C on Windows, and Ctrl (with Win) on a PC keyboard drives the Mac's
+# Cmd (and Ctrl). Option and Alt are already the same key on the wire.
+_CMD_CTRL_SWAP = {
+    "cmd": "ctrl", "cmd_l": "ctrl_l", "cmd_r": "ctrl_r",
+    "ctrl": "cmd", "ctrl_l": "cmd_l", "ctrl_r": "cmd_r",
+}
+
+
+def os_family(platform: str) -> str:
+    """``"mac"``, ``"pc"`` (Windows, Linux) or ``""`` for unknown.
+
+    Takes ``sys.platform`` (``darwin``, ``win32``) or ``platform.system()``
+    style text (``"Darwin 24.1"``, ``"Windows 11"``) as agents send in hello.
+    """
+    p = (platform or "").strip().lower()
+    if p.startswith(("darwin", "mac", "ios")):
+        return "mac"
+    if p.startswith(("win", "linux", "cygwin", "freebsd", "openbsd", "netbsd")):
+        return "pc"
+    return ""
+
+
+def swap_for(local_platform: str, remote_platform: str) -> bool:
+    """Should Cmd and Ctrl trade places when typing from one onto the other?"""
+    a, b = os_family(local_platform), os_family(remote_platform)
+    return bool(a and b and a != b)
+
+
+def swap_cmd_ctrl(key: str) -> str:
+    return _CMD_CTRL_SWAP.get(key, key)
+
+
 def normalize_char(char: str | None, vk: int | None) -> str | None:
     """Undo control-character mangling (Ctrl+A arrives as ``"\\x01"`` on Windows)."""
     if char and len(char) == 1 and ord(char) >= 32 and char != "\x7f":
