@@ -81,11 +81,15 @@ class PynputCapture:
     macOS does that badly: every warp makes the OS ignore the real mouse for a
     quarter of a second (the "local events suppression interval"), which is
     what made the pointer on the other computer skip and stick. So on macOS
-    the deltas are read straight from each event, the hidden cursor is only
-    warped back when it strays from the park point (and re-associated with
-    the mouse straight after, which cancels that freeze), and the listeners
-    stay running the whole time, switching suppression on and off in their
-    event tap instead of being torn down and rebuilt at every switch.
+    the cursor is detached from the mouse while grabbed
+    (``CGAssociateMouseAndMouseCursorPosition``), the hidden cursor is warped back to the park
+    point after every report, and the listeners stay running the whole time,
+    switching suppression on and off in their event tap instead of being torn
+    down and rebuilt at every switch.
+
+    The motion is read from where each report left the cursor relative to
+    the park point, not from the report's delta fields, which macOS pollutes
+    with the jump of the warp before them (see ``_mac_motion``).
     """
 
     def __init__(self, park_at: tuple[int, int] = (400, 400)):
@@ -126,10 +130,11 @@ class PynputCapture:
         self._grabbed = grabbed
         if self._mac:
             # The listeners keep running; the event taps read _grabbed.
-            # Detaching the cursor from the mouse only works for the frontmost
-            # app, which this background service never is, so instead the
-            # (hidden) cursor is held near the park point by warping it back
-            # whenever it strays (a warp posts no event, so nothing hovers).
+            # Detaching the cursor only works for the frontmost app, which
+            # this background service never is, so the cursor is also held
+            # at the park point (a warp: no event, so nothing here hovers)
+            # and hidden while input is on another computer.
+            _mac_attach_cursor(not grabbed)
             if grabbed:
                 _mac_warp(*self.park_at)
             _mac_cursor_visible(not grabbed)
@@ -178,19 +183,36 @@ class PynputCapture:
             return event
         if event_type in _MAC_MOVES and self._handler is not None and not _mac_injected(event):
             started = time.perf_counter()
-            dx, dy = _mac_delta(event)
+            dx, dy = self._mac_motion(event)
             if dx or dy:
                 self._handler.on_motion(dx, dy)
-                # Warping is a round trip to the window server, so only when
-                # the cursor has wandered off, not after every report (a
-                # gaming mouse sends 1000 a second).
-                x, y = _mac_location(event)
-                px, py = self.park_at
-                if abs(x - px) > _MAC_STRAY_PX or abs(y - py) > _MAC_STRAY_PX:
-                    _mac_warp(px, py)
+            _mac_warp(*self.park_at)
             if len(self.tap_times) < 20000:
                 self.tap_times.append(time.perf_counter() - started)
         return None  # suppressed: this Mac doesn't see it
+
+    def _mac_motion(self, event) -> tuple[float, float]:
+        """How far this report moved the mouse.
+
+        Not the event's own delta fields: after a warp, macOS folds the warp's
+        jump into the next report's delta, so the first report after
+        switching away carried "back towards the park point" (hundreds of
+        pixels towards the edge just crossed) and bounced input straight back
+        home, and every report after a re-park was off by the last one. The
+        cursor is put back on the park point after every report, so where
+        this report left it, minus the park point, is the motion.
+        """
+        x, y = _mac_location(event)
+        px, py = self.park_at
+        dx, dy = x - px, y - py
+        if not dx and not dy:
+            # The cursor didn't move at all: it really is detached from the
+            # mouse (only the frontmost app gets that), so the delta fields
+            # are all there is, and with no warp moving it they're honest.
+            return _mac_delta(event)
+        if abs(dx) > _MAC_STALE_PX or abs(dy) > _MAC_STALE_PX:
+            return 0, 0  # reported before the cursor was parked (as input switched): not motion
+        return dx, dy
 
     def _mac_key_tap(self, event_type, event):
         return event if not self._grabbed else None
@@ -242,7 +264,9 @@ _MAC_MOVES = frozenset({5, 6, 7, 27})
 _MAC_TAP_DISABLED = frozenset({0xFFFFFFFE, 0xFFFFFFFF})
 _MAC_DELTA_X, _MAC_DELTA_Y = 4, 5          # kCGMouseEventDeltaX / DeltaY
 _MAC_SOURCE_PID = 41                       # kCGEventSourceUnixProcessID
-_MAC_STRAY_PX = 50                         # warp the parked cursor back past this
+# Further from the park point than one report could move it: the report was
+# made before the cursor was parked there.
+_MAC_STALE_PX = 400
 
 
 def _mac_listener(base):
@@ -335,10 +359,6 @@ def _mac_warp(x: float, y: float) -> None:
         cg = _mac_lib(_CG_PATH)
         cg.CGWarpMouseCursorPosition.argtypes = [_CGPoint]
         cg.CGWarpMouseCursorPosition(_CGPoint(float(x), float(y)))
-        # Without this, macOS ignores the real mouse for a moment after a
-        # warp (the local events suppression interval, which the call in
-        # _mac_no_event_suppression may not switch off on current macOS).
-        cg.CGAssociateMouseAndMouseCursorPosition(1)
     except Exception:  # pragma: no cover - macOS only
         log.debug("couldn't warp the cursor", exc_info=True)
 

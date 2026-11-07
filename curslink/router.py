@@ -13,6 +13,7 @@ on the host's asyncio loop), which keeps the logic easy to test. Inputs:
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import Callable, Protocol
 
@@ -22,6 +23,12 @@ from curslink.inputs.keys import Hotkey
 from curslink.layout import Layout, Screen
 
 log = logging.getLogger(__name__)
+
+# Right after input moves to a device, an edge push straight back to the
+# device it came from is ignored for this long. A real "oops, back" takes
+# longer than this; a bogus first report (see PynputCapture._mac_motion)
+# doesn't, and used to bounce input home within 15 ms of arriving.
+RETURN_GUARD_S = 0.15
 
 
 class Transport(Protocol):
@@ -89,6 +96,8 @@ class Router:
         # the edge it left by; it has to leave that edge before an edge push
         # counts again, or the next pointer event bounces input straight back.
         self._edge_armed = True
+        self.clock: Callable[[], float] = time.monotonic
+        self._arrived: tuple[float, str] | None = None  # (when, from which device)
 
         first = next(iter(layout.screens(local_device_id)), None)
         if first is None:
@@ -147,6 +156,8 @@ class Router:
             crossing = self.layout.find_crossing(
                 self.active_device, self.x, self.y, dx, dy, self.settings.gap_tolerance_px
             )
+            if crossing and self._just_came_from(crossing.screen.device_id):
+                crossing = None
             if crossing and self.available(crossing.screen.device_id):
                 self.switch_to(crossing.screen, crossing.x, crossing.y, "edge")
                 return
@@ -158,6 +169,12 @@ class Router:
             self.transport.send(self.active_device, "move", x=ox, y=oy)
         else:
             self.transport.send(self.active_device, "move", x=ox, y=oy, ts=round(ts * 1000.0, 2))
+
+    def _just_came_from(self, device_id: str) -> bool:
+        if self._arrived is None:
+            return False
+        when, source = self._arrived
+        return source == device_id and self.clock() - when < RETURN_GUARD_S
 
     def on_button(self, button: str, pressed: bool) -> None:
         if self.is_local:
@@ -266,6 +283,8 @@ class Router:
             self._remote_buttons.clear()
 
         self.active_device, self.screen, self.x, self.y = new, screen, x, y
+        if old != new:
+            self._arrived = (self.clock(), old)
         ox, oy = screen.to_os(x, y)
         effect = self.settings.effect
         if new == self.local_id:
