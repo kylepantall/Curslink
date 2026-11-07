@@ -346,6 +346,8 @@ class FilesOverlay:
                         if r not in rects:
                             rects.append(r)
                 self.strips = [make_catcher(QRect(r)) for r in rects]
+                _say("log drop targets on " + ", ".join(
+                    f"{r.x()},{r.y()} {r.width()}x{r.height()}" for r in rects))
         elif word == "shield":
             self._close(self.shield)
             if rest == "on":

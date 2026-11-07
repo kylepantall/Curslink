@@ -355,7 +355,14 @@ def start_file_drags(cfg: HostConfig, router: Router, server: HostServer, overla
     """Dragging files to another device (see curslink.files.handoff)."""
     from curslink.files.handoff import DragHandoff
 
-    handoff = DragHandoff(router, server, overlay.command, capture.inject_drag_end, cfg.name, emit=events.emit)
+    from curslink.files import macdrag
+
+    # macOS says what's being dragged on its drag pasteboard; elsewhere the
+    # overlay helper's drop targets find out.
+    drag_source = macdrag.drag_pasteboard if macdrag.available() else None
+    handoff = DragHandoff(router, server, overlay.command, capture.inject_drag_end, cfg.name, emit=events.emit,
+                          drag_source=drag_source)
+    log.info("file drags: %s", "read from the drag pasteboard" if drag_source else "found by drop targets at the edges")
 
     def on_line(line: str) -> None:  # the helper's reader thread
         try:
