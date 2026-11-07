@@ -137,7 +137,12 @@ class HostServer:
         loop = asyncio.get_running_loop()
         try:
             hello = await asyncio.wait_for(read_message(reader), HELLO_TIMEOUT_S)
-            if hello is None or hello.t != "hello":
+            if hello is None:
+                # An agent checking this address answers (a TLS handshake,
+                # then gone: see pairing.discovery.reachable). Not an error.
+                log.debug("%s checked we're here", peer)
+                return
+            if hello.t != "hello":
                 raise ProtocolError("expected hello")
             device_id = hello.data["device_id"]
             if device_id not in self.known_devices:

@@ -323,7 +323,7 @@ async def test_agent_tries_the_last_good_address_first(tmp_path, monkeypatch):
 
     tried = []
 
-    async def reachable(addresses, port, timeout=1.0):
+    async def reachable(addresses, port, timeout=1.0, ssl=None):
         tried.append(list(addresses))
         return answer["addr"]
 

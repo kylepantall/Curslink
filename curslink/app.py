@@ -870,7 +870,7 @@ async def resolve_host(cfg: AgentConfig, store: PairingStore) -> ConnectTarget:
             # here (VM bridges, VPNs): use one that answers.
             # Last time's address first: it worked then.
             order = sorted(found.addresses, key=lambda a: a != peer.address)
-            address = await reachable(order, found.control_port)
+            address = await reachable(order, found.control_port, ssl=ctx)
             if address is None:
                 address = peer.address if peer.address in found.addresses else found.address
                 log.warning("host found on the LAN, but none of its addresses (%s) answer on port %d: "

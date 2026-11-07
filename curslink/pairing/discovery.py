@@ -101,14 +101,17 @@ def rank_addresses(addresses, networks=None) -> tuple[str, ...]:
     return tuple(sorted(addresses, key=key))
 
 
-async def reachable(addresses, port: int, timeout: float = 2.0) -> str | None:
-    """The first of ``addresses`` (in order) that accepts a TCP connection on
-    ``port``. All are tried at once, so a few that never answer cost one
-    ``timeout``, not one each (Wi-Fi can take over a second to answer)."""
+async def reachable(addresses, port: int, timeout: float = 2.0, ssl=None) -> str | None:
+    """The first of ``addresses`` (in order) that accepts a connection on
+    ``port`` within ``timeout``. All are tried at once, so a few that never
+    answer cost one ``timeout``, not one each (Wi-Fi can take over a second
+    to answer). With ``ssl`` (the pairing's TLS-PSK context) the TLS
+    handshake has to complete too: proof it's really that paired device,
+    not just something listening on the port."""
 
     async def probe(addr: str) -> bool:
         try:
-            _reader, writer = await asyncio.wait_for(asyncio.open_connection(addr, port), timeout)
+            _reader, writer = await asyncio.wait_for(asyncio.open_connection(addr, port, ssl=ssl), timeout)
         except (OSError, asyncio.TimeoutError):
             return False
         writer.close()
