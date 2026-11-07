@@ -28,8 +28,10 @@ android {
             create("release") {
                 storeFile = file(keystore)
                 storePassword = System.getenv("CURSLINK_ANDROID_KEYSTORE_PASSWORD")
-                keyAlias = System.getenv("CURSLINK_ANDROID_KEY_ALIAS") ?: "curslink"
-                keyPassword = System.getenv("CURSLINK_ANDROID_KEY_PASSWORD") ?: System.getenv("CURSLINK_ANDROID_KEYSTORE_PASSWORD")
+                // Unset secrets arrive as empty strings.
+                keyAlias = System.getenv("CURSLINK_ANDROID_KEY_ALIAS")?.ifEmpty { null } ?: "curslink"
+                keyPassword = System.getenv("CURSLINK_ANDROID_KEY_PASSWORD")?.ifEmpty { null }
+                    ?: System.getenv("CURSLINK_ANDROID_KEYSTORE_PASSWORD")
             }
         }
     }
