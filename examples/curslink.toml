@@ -73,6 +73,15 @@ confirm_with_agents = true   # agents running their own camera ([agent.gaze])
 # [files]
 # enabled = true
 
+# --- Isolink's floating chats ---------------------------------------------
+# Drag one of Isolink's floating chats over an edge (or look at the other
+# computer while you hold it) and it opens there, still held, when that
+# computer's Isolink is linked to the same account. Isolink asks once whether
+# to let Curslink do this; change it in Isolink's Connected apps.
+# See [agent.isolink] for the other end.
+# [isolink]
+# enabled = true
+
 # --- The layout ----------------------------------------------------------
 # Place every screen of every device in ONE shared coordinate space, arranged
 # like your real desk. x/y/width/height are in pixels in that shared space.
@@ -144,6 +153,10 @@ udp = true                   # take pointer moves by UDP when the host is reache
 # [agent.files]
 # enabled = true
 # folder = ""                # where they're saved; empty = Downloads
+
+# Isolink's floating chats carried here from the host (see [isolink]).
+# [agent.isolink]
+# enabled = true
 
 # [agent.gaze]
 # enabled = true

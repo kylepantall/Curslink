@@ -70,6 +70,10 @@ class HostServer:
         self.on_drag_out: Callable[[str, dict], None] = lambda device_id, data: None
         # (device_id, file_* frame) -> reply frame or None: files an agent sends us.
         self.on_files: Callable[[str, Message], bytes | None] = lambda device_id, msg: None
+        # (device_id, frame data): what that agent's Isolink says (isolink), and
+        # whether it opened a floating chat carried to it (popup_result).
+        self.on_isolink: Callable[[str, dict], None] = lambda device_id, data: None
+        self.on_popup_result: Callable[[str, dict], None] = lambda device_id, data: None
         self.host = host
         self.port = port
         # (device_id, hello.auth, TLS channel binding) -> allowed? See security.HelloVerifier.
@@ -252,6 +256,10 @@ class HostServer:
             self.on_file_result(conn.device_id, dict(msg.data))
         elif msg.t == "drag_out":
             self.on_drag_out(conn.device_id, dict(msg.data))
+        elif msg.t == "isolink":
+            self.on_isolink(conn.device_id, dict(msg.data))
+        elif msg.t == "popup_result":
+            self.on_popup_result(conn.device_id, dict(msg.data))
         elif msg.t.startswith("file_"):
             reply = self.on_files(conn.device_id, msg)
             if reply and not conn.writer.transport.is_closing():

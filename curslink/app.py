@@ -296,6 +296,7 @@ async def run_host(cfg: HostConfig) -> None:
         relay.start()
         log.info("waiting for agents via relay %s", cfg.relay.address)
     handoff = start_file_drags(cfg, router, server, overlay, capture, loop) if cfg.files else None
+    isolink = start_popups(router, server, capture) if cfg.isolink else None
     bridge = LoopBridge(loop, router, handoff)
     capture.start(bridge)
     reporter = loop.create_task(report_capture(bridge, capture, server, router))
@@ -356,6 +357,8 @@ async def run_host(cfg: HostConfig) -> None:
         reporter.cancel()
         camera.stop()
         capture.stop()
+        if isolink is not None:
+            await isolink.stop()
         overlay.close()
         await pairing.close()
         if relay:
@@ -446,6 +449,27 @@ def start_file_drags(cfg: HostConfig, router: Router, server: HostServer, overla
     server.on_drag_out = handoff.on_drag_out
     server.on_files = handoff.on_files
     return handoff
+
+
+def start_popups(router: Router, server: HostServer, capture):
+    """Carrying Isolink's floating chats to other devices (see curslink.popups)."""
+    from curslink.isolink import IsolinkLink, default_token_file
+    from curslink.popups import PopupHandoff
+
+    link = IsolinkLink(default_token_file())
+    popups = PopupHandoff(router, server, link, capture.inject_drag_end,
+                          lambda: router.local_sink.button("left", True), emit=events.emit)
+    server.on_isolink = popups.on_isolink
+    server.on_popup_result = popups.on_result
+    disconnected = server.on_disconnect
+
+    def on_disconnect(device_id: str) -> None:
+        popups.on_disconnect(device_id)
+        disconnected(device_id)
+
+    server.on_disconnect = on_disconnect
+    link.start()
+    return link
 
 
 def _ms(values: list[float], q: float) -> float:
@@ -798,6 +822,7 @@ async def run_agent(cfg: AgentConfig) -> None:
         events.emit("host", state=state, detail=detail)
 
     client.on_state = on_state
+    isolink = agent_popups(cfg, session, sink, client) if cfg.isolink else None
     camera = start_facing(cfg, client, asyncio.get_running_loop()) if cfg.gaze.enabled else None
     pairing = Pairing(cfg.pairing, DeviceInfo(cfg.device_id, cfg.name, "agent"), store)
     await pairing.start()
@@ -818,9 +843,40 @@ async def run_agent(cfg: AgentConfig) -> None:
             camera.stop()
         if smoother:
             smoother.close()
+        if isolink is not None:
+            await isolink.stop()
         await pairing.close()
         if overlay:
             overlay.close()
+
+
+def agent_popups(cfg: AgentConfig, session: AgentSession, sink, client: AgentClient):
+    """Isolink's floating chats the host carries here (see curslink.popups)."""
+    from curslink.isolink import IsolinkLink, default_token_file
+    from curslink.popups import AgentPopups
+
+    link = IsolinkLink(default_token_file())
+
+    def send(t: str, **data) -> None:
+        if "popups" in client.host_features:  # an older host would drop the link on a frame it doesn't know
+            client.send(t, **data)
+
+    def press() -> None:
+        session.buttons.add("left")  # so the host's button-up lets go of it
+        sink.button("left", True)
+
+    popups = AgentPopups(link, send, press)
+    session.popups = popups
+    on_state = client.on_state
+
+    def state(state: str, detail: str) -> None:
+        on_state(state, detail)
+        if state == "connected":
+            popups.report()
+
+    client.on_state = state
+    link.start()
+    return link
 
 
 def receive_files(cfg: AgentConfig, session: AgentSession, overlay):
