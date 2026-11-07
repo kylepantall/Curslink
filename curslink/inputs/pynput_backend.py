@@ -559,6 +559,9 @@ class PynputSink:
         self._keyboard = keyboard.Controller()
         self.modifier_map = modifier_map or {}
         self._scroll_carry = (0.0, 0.0)
+        from curslink.tally import Tally
+
+        self.notches = Tally("scroll given to Windows as whole notches")
 
     def move_to(self, x: int, y: int) -> None:
         if sys.platform == "win32" and _win_move(x, y):
@@ -594,6 +597,8 @@ class PynputSink:
             wx, wy = int(sx), int(sy)  # towards zero, so the rest carries over
             self._scroll_carry = (sx - wx, sy - wy)
             if wx or wy:
+                self.notches.add(wx, wy)
+            if (wx or wy) and not _win_wheel(wx, wy):
                 self._mouse.scroll(wx, wy)
             return
         self._mouse.scroll(dx, dy)
@@ -705,6 +710,7 @@ class _INPUT(ctypes.Structure):
 
 _MOUSEEVENTF_MOVE, _MOUSEEVENTF_ABSOLUTE, _MOUSEEVENTF_VIRTUALDESK = 0x0001, 0x8000, 0x4000
 _MOUSEEVENTF_LEFTUP = 0x0004
+_MOUSEEVENTF_WHEEL, _MOUSEEVENTF_HWHEEL, _WHEEL_DELTA = 0x0800, 0x1000, 120
 def win_absolute(x: float, y: float, vx: int, vy: int, vw: int, vh: int) -> tuple[int, int]:
     """A virtual-desktop pixel -> SendInput's 0..65535 absolute coordinates."""
     nx = round((x - vx) * 65535 / max(1, vw - 1))
@@ -743,6 +749,26 @@ def _win_move(x: int, y: int) -> bool:
     return False
 
 
+def _win_wheel(notches_x: int, notches_y: int) -> bool:
+    """Whole wheel notches through SendInput, so a refusal is logged (with
+    what's in front) like a refused move. False if this can't be tried."""
+    try:
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        for flag, notches in ((_MOUSEEVENTF_WHEEL, notches_y), (_MOUSEEVENTF_HWHEEL, notches_x)):
+            if not notches:
+                continue
+            inp = _INPUT(type=0)
+            inp.mi = _MOUSEINPUT(0, 0, (notches * _WHEEL_DELTA) & 0xFFFFFFFF, flag, 0, 0)
+            if user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT)) == 1:
+                _win_failures.ok()
+            else:
+                _win_failures.failed(ctypes.get_last_error(), False, what="scroll")
+        return True
+    except Exception:
+        log.debug("SendInput scroll failed; falling back to pynput", exc_info=True)
+    return False
+
+
 class _WinInjectFailures:
     """Logs (at most every few seconds) when Windows won't take the moves
     we inject, with what's in front, since that's nearly always why."""
@@ -760,17 +786,19 @@ class _WinInjectFailures:
             self.count = 0
             self.logged_at = None
 
-    def failed(self, error: int, moved: bool) -> None:
+    def failed(self, error: int, moved: bool, what: str = "move") -> None:
         self.count += 1
         now = self.clock()
         if self.logged_at is not None and now - self.logged_at < self.EVERY_S:
             return
         self.logged_at = now
         log.warning(
-            "Windows refused an injected pointer move (error %d, %d so far; SetCursorPos %s). In front: %s. "
+            "Windows refused an injected pointer %s (error %d, %d so far%s). In front: %s. "
             "If that app runs as administrator, Windows blocks input from Curslink until it's closed, "
             "or until Curslink runs as administrator too.",
-            error, self.count, "worked" if moved else "failed too", _win_foreground(),
+            what, error, self.count,
+            ("; SetCursorPos worked" if moved else "; SetCursorPos failed too") if what == "move" else "",
+            _win_foreground(),
         )
 
 

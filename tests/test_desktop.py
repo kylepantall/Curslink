@@ -563,12 +563,29 @@ def test_windows_adds_up_fractional_scrolls_into_whole_notches(monkeypatch):
     sink = pb.PynputSink.__new__(pb.PynputSink)
     sink._mouse = type("M", (), {"scroll": lambda self, dx, dy: sent.append((dx, dy))})()
     sink._scroll_carry = (0.0, 0.0)
+    from curslink.tally import Tally
+
+    sink.notches = Tally("notches")
     monkeypatch.setattr(pb.sys, "platform", "win32")
+    monkeypatch.setattr(pb, "_win_wheel", lambda x, y: False)  # not on Windows: pynput's own wheel
     for _ in range(9):
         sink.scroll(0.0, 0.25)
     assert sent == [(0, 1), (0, 1)]              # 2.25 lines: two notches, a quarter waiting
     sink.scroll(0.0, -3.5)
     assert sent[-1] == (0, -3)                   # down, carry included (0.25 - 3.5 = -3.25)
+
+
+def test_windows_wheel_refusals_are_logged_like_moves(caplog, monkeypatch):
+    import logging
+
+    import curslink.inputs.pynput_backend as pb
+
+    f = pb._WinInjectFailures(clock=lambda: 0.0)
+    monkeypatch.setattr(pb, "_win_foreground", lambda: "Taskmgr.exe (administrator)")
+    with caplog.at_level(logging.WARNING, logger="curslink.input"):
+        f.failed(5, False, what="scroll")
+    assert "refused an injected pointer scroll (error 5, 1 so far)" in caplog.text
+    assert "Taskmgr.exe" in caplog.text
 
 
 def test_scroll_tally_logs_the_first_then_every_so_often(caplog):

@@ -280,7 +280,6 @@ async def run_host(cfg: HostConfig) -> None:
     server.on_disconnect = agent_disconnected
     router.listeners.append(lambda e: events.emit(
         "switch", **{"from": e.from_device, "to": e.to_device, "screen": e.screen.id, "reason": e.reason}))
-    router.on_gaze_paused = lambda paused: events.emit("gaze", paused=paused)
     remember_positions(router)
     if cfg.lan:
         await server.start()
@@ -316,7 +315,14 @@ async def run_host(cfg: HostConfig) -> None:
         active=router.active_device, screen=router.screen.id,
         gaze=tracker is not None, gaze_paused=router.gaze_paused,
     )
-    gaze = {"tracker": tracker}
+    camera = HostCamera(tracker, lambda: start_gaze(cfg, arbiter, loop) if cfg.gaze.enabled else None,
+                        lambda: arbiter.set_camera(cfg.device_id, False), loop)
+
+    def gaze_paused(paused: bool) -> None:
+        events.emit("gaze", paused=paused)
+        loop.create_task(camera.pause() if paused else camera.resume(router))
+
+    router.on_gaze_paused = gaze_paused
 
     async def calibrate_on() -> None:
         """The app is calibrating: give it the camera, and keep input here.
@@ -325,9 +331,7 @@ async def run_host(cfg: HostConfig) -> None:
         if not router.is_local:
             router.go_home("app")
         arbiter.suspended = True  # agents' cameras mustn't take the pointer mid-calibration
-        running, gaze["tracker"] = gaze["tracker"], None
-        if running is not None:
-            await loop.run_in_executor(None, running.stop)
+        await camera.pause(for_good=True)
         events.emit("calibrating", on=True)
 
     def command(line: str) -> None:
@@ -346,14 +350,51 @@ async def run_host(cfg: HostConfig) -> None:
         await stop.wait()
     finally:
         reporter.cancel()
-        if gaze["tracker"]:
-            gaze["tracker"].stop()
+        camera.stop()
         capture.stop()
         overlay.close()
         await pairing.close()
         if relay:
             await relay.close()
         await server.close()
+
+
+class HostCamera:
+    """This computer's camera for gaze: paused gaze lets go of it (its light
+    goes off), resuming opens it again. Calibration takes it for good; the
+    app restarts the host afterwards."""
+
+    def __init__(self, tracker, start: Callable[[], object], released: Callable[[], None],
+                 loop: asyncio.AbstractEventLoop):
+        self.tracker = tracker
+        self._start = start
+        self._released = released
+        self._loop = loop
+        self._lock = asyncio.Lock()
+        self._held = False  # calibrating: don't reopen it
+
+    async def pause(self, for_good: bool = False) -> None:
+        async with self._lock:
+            self._held = self._held or for_good
+            running, self.tracker = self.tracker, None
+            if running is None:
+                return
+            await self._loop.run_in_executor(None, running.stop)
+            self._released()
+            log.info("camera released (%s)", "calibrating" if for_good else "gaze paused")
+
+    async def resume(self, router: Router) -> None:
+        async with self._lock:
+            if self.tracker is not None or self._held or router.gaze_paused:
+                return
+            self.tracker = self._start()
+            if self.tracker is not None:
+                log.info("gaze resumed: camera reopened")
+
+    def stop(self) -> None:
+        if self.tracker is not None:
+            self.tracker.stop()
+            self.tracker = None
 
 
 def start_file_drags(cfg: HostConfig, router: Router, server: HostServer, overlay, capture,
