@@ -244,7 +244,9 @@ class GazeArbiter:
         if target is None:
             return
         if self.confirms(target.device_id, t):
-            self._switch(target)
+            # Forced back to wherever the router really is, so a switch it
+            # held off (the hand was on the mouse) is proposed again.
+            self._do_switch(target)
             return
         # Not confirmed yet: undo the classifier's switch so it proposes it
         # again after another dwell, by when the agent may have caught up.

@@ -9,6 +9,8 @@ from curslink.router import Router, RouterSettings
 def parts(layout):
     capture, sink, transport, overlay = FakeCapture(), FakeSink(), FakeTransport({"laptop"}), FakeOverlay()
     router = Router(layout, "desktop", capture, sink, transport, overlay, RouterSettings(gaze_switching=True))
+    ticks = iter(range(1000, 10**6))
+    router.clock = lambda: float(next(ticks))  # a second passes per look: the mouse is never "just moved"
     return router, capture, sink, transport, overlay
 
 
@@ -273,6 +275,7 @@ def test_gaze_back_to_a_device_left_by_its_edge_doesnt_bounce_straight_home(part
     now[0] += 1.0
     router.on_motion(-50, 0)                    # and back home by its left edge
     assert router.is_local
+    now[0] += 1.0
     router.on_gaze(Target("laptop", "main"))    # look at it again: lands on that edge
     assert router.active_device == "laptop" and router.x < 3840 + 24
     now[0] += 1.0
@@ -328,3 +331,29 @@ def test_remote_pointer_cant_rest_in_a_blocked_area():
     now[0] += 5
     router.on_motion(-250, -200)  # into the hidden corner: crosses to the PC in front
     assert router.is_local
+
+
+def test_gaze_waits_while_the_mouse_is_moving(parts):
+    router, *_ = parts
+    now = [10.0]
+    router.clock = lambda: now[0]
+    router.on_pointer(500, 400)
+    now[0] += 0.1
+    router.on_gaze(Target("laptop", "main"))  # the hand is driving
+    assert router.is_local
+    now[0] += 0.5
+    router.on_gaze(Target("laptop", "main"))  # mouse still: gaze decides
+    assert router.active_device == "laptop"
+
+
+def test_the_animation_plays_where_the_pointer_leaves_and_where_it_lands(parts):
+    router, _, _, transport, overlay = parts
+    router.on_pointer(3839, 500)              # leave the desktop's right edge
+    assert overlay.shown[-1][1:] == (3839, 500)
+    enter = transport.of_type("enter")[-1][2]
+    assert enter["x"] <= 2                      # and land on the laptop's left edge
+    router.clock = lambda: 1e9
+    router.on_motion(-50, 0)                    # back home: the laptop shows where it left
+    leave = transport.of_type("leave")[-1][2]
+    assert leave["x"] <= 2 and leave["effect"] == "pop"
+    assert overlay.shown[-1][1] > 3700          # and home shows where it came in

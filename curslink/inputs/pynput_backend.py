@@ -238,6 +238,20 @@ class PynputCapture:
             return event
         if self._pass_injected and _mac_injected(event):
             return event
+        if event_type in _MAC_OTHER_BUTTONS and self._handler is not None and not _mac_injected(event):
+            # pynput calls every button past left and right "middle"; the
+            # button number says which (back and forward are 3 and 4).
+            name = _MAC_BUTTON_NUMBERS.get(_mac_field(event, _MAC_BUTTON_NUMBER))
+            if name:
+                self._handler.on_button(name, event_type == _MAC_OTHER_DOWN)
+            return None
+        if event_type == _MAC_SCROLL and self._handler is not None and not _mac_injected(event):
+            # pynput reports whole lines only, so a smooth wheel, a Magic
+            # Mouse or a trackpad mostly scrolled 0: send the fractional lines.
+            dx, dy = _mac_scroll(event)
+            if dx or dy:
+                self._handler.on_scroll(dx, dy)
+            return None
         if event_type in _MAC_MOVES and self._handler is not None and not _mac_injected(event):
             started = time.perf_counter()
             dx, dy = self._mac_motion(event)
@@ -295,6 +309,8 @@ class PynputCapture:
         if injected or self._handler is None:
             return
         name = getattr(button, "name", None)
+        if self._mac and name == "middle":
+            return  # every "other" button on macOS; the event tap tells them apart
         if name == "button8":
             name = "x1"
         elif name == "button9":
@@ -303,6 +319,8 @@ class PynputCapture:
             self._handler.on_button(name, pressed)
 
     def _on_scroll(self, x, y, dx, dy, injected=False):
+        if self._mac:
+            return  # the event tap sends the fractional lines (see _mac_mouse_tap)
         if not injected and self._handler is not None:
             self._handler.on_scroll(dx, dy)
 
@@ -320,6 +338,12 @@ _MAC_MOVES = frozenset({5, 6, 7, 27})
 _MAC_TAP_DISABLED = frozenset({0xFFFFFFFE, 0xFFFFFFFF})
 _MAC_DELTA_X, _MAC_DELTA_Y = 4, 5          # kCGMouseEventDeltaX / DeltaY
 _MAC_SOURCE_PID = 41                       # kCGEventSourceUnixProcessID
+_MAC_OTHER_DOWN, _MAC_OTHER_UP = 25, 26    # kCGEventOtherMouseDown / Up
+_MAC_OTHER_BUTTONS = frozenset({_MAC_OTHER_DOWN, _MAC_OTHER_UP})
+_MAC_BUTTON_NUMBER = 3                     # kCGMouseEventButtonNumber
+_MAC_BUTTON_NUMBERS = {2: "middle", 3: "x1", 4: "x2"}
+_MAC_SCROLL = 22                           # kCGEventScrollWheel
+_MAC_SCROLL_Y, _MAC_SCROLL_X = 93, 94      # kCGScrollWheelEventFixedPtDeltaAxis1 / 2 (lines)
 # Further from the park point than one report could move it: the report was
 # made before the cursor was parked there.
 # For this long after grabbing, a single report moving further than
@@ -369,6 +393,19 @@ def _mac_delta(event) -> tuple[int, int]:
 
     return (Quartz.CGEventGetIntegerValueField(event, _MAC_DELTA_X),
             Quartz.CGEventGetIntegerValueField(event, _MAC_DELTA_Y))
+
+
+def _mac_field(event, field: int) -> int:
+    import Quartz
+
+    return Quartz.CGEventGetIntegerValueField(event, field)
+
+
+def _mac_scroll(event) -> tuple[float, float]:
+    import Quartz
+
+    return (Quartz.CGEventGetDoubleValueField(event, _MAC_SCROLL_X),
+            Quartz.CGEventGetDoubleValueField(event, _MAC_SCROLL_Y))
 
 
 def _mac_injected(event) -> bool:

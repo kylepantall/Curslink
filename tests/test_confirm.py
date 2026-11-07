@@ -440,3 +440,43 @@ async def test_facing_camera_refreshes_and_reports_changes():
     finally:
         cam.stop()
 
+
+
+def test_crossing_an_edge_by_hand_isnt_undone_by_gaze(tmp_path, layout):
+    """Looking at the desktop and pushing the mouse over the edge to the
+    laptop: gaze used to "see" you look back at the desktop 250 ms later and
+    pull the pointer back, over and over."""
+    from conftest import FakeCapture, FakeOverlay, FakeTransport
+    from curslink.app import make_arbiter as app_arbiter
+    from curslink.config import GazeConfig, HostConfig
+    from curslink.router import Router, RouterSettings
+
+    cal = Calibration()
+    cal.add(Target("desktop", "left"), -10, 0)
+    cal.add(Target("desktop", "right"), 10, 0)
+    cal.add(Target("laptop", "main"), 40, 0)
+    cal.save(tmp_path / "cal.json")
+    cfg = HostConfig("desktop", None, layout,
+                     gaze=GazeConfig(enabled=True, calibration=tmp_path / "cal.json",
+                                     settings=GazeSettings(dwell_s=0.0)))
+    router = Router(layout, "desktop", FakeCapture(), FakeSink(), FakeTransport(connected={"laptop"}),
+                    FakeOverlay(), RouterSettings(gaze_switching=True))
+    now = [100.0]
+    router.clock = lambda: now[0]
+    arbiter = app_arbiter(cfg, router)
+    router.on_pointer(2500, 500)
+    now[0] += 1
+    for i in range(5):
+        arbiter.on_sample(now[0] + i / 30, 10, 0)   # looking at the right monitor
+    router.on_pointer(3839, 500)                    # and pushing over the edge
+    assert router.active_device == "laptop"
+    now[0] += 1
+    for i in range(30):                             # still looking at the right monitor
+        arbiter.on_sample(now[0] + i / 30, 10, 0)
+    assert router.active_device == "laptop"
+    for i in range(10):                             # look at the laptop, then back
+        arbiter.on_sample(now[0] + 1 + i / 30, 40, 0)
+    for i in range(10):
+        arbiter.on_sample(now[0] + 2 + i / 30, -10, 0)
+    assert router.is_local                           # a real look back still switches
+

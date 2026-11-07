@@ -30,6 +30,12 @@ log = logging.getLogger(__name__)
 # doesn't, and used to bounce input home within 15 ms of arriving.
 RETURN_GUARD_S = 0.15
 
+# While the mouse is moving, the hand is driving: gaze waits until it has
+# been still this long. Otherwise a glance mid-move (or gaze beating the
+# pointer to the edge) took the pointer to the remembered spot or the middle
+# of the screen instead of where it was crossing.
+GAZE_HOLD_S = 0.4
+
 # Arriving on another computer by gaze or a hotkey, the pointer comes back
 # where it was left, usually just inside the edge it left by. Edge switching
 # waits until it has been at least this far from that edge.
@@ -108,6 +114,7 @@ class Router:
         self._edge_armed = True
         self.clock: Callable[[], float] = time.monotonic
         self._arrived: tuple[float, str] | None = None  # (when, from which device)
+        self._moved_at = -1e9  # when the mouse last moved (self.clock())
 
         first = next(iter(layout.screens(local_device_id)), None)
         if first is None:
@@ -150,6 +157,7 @@ class Router:
         if screen is None:
             return
         x, y = screen.from_os(ox, oy)
+        self._moved_at = self.clock()
         if self.settings.edge_switching:
             front = self.layout.covered_by(self.local_id, x, y)
             if front is not None:
@@ -180,6 +188,8 @@ class Router:
         (see curslink.smoothing)."""
         if self.is_local:
             return
+        if dx or dy:
+            self._moved_at = self.clock()
         nx, ny = self.x + dx, self.y + dy
         here = self.layout.screen_at(nx, ny, self.active_device)
         if here is None and self.settings.edge_switching:
@@ -255,6 +265,8 @@ class Router:
             return
         if self._remote_buttons:
             return  # never yank the pointer away mid-drag
+        if self.clock() - self._moved_at < GAZE_HOLD_S:
+            return  # the mouse is moving: it decides (gaze is asked again shortly)
         try:
             screen = self.layout.screen(target.device_id, target.screen_id)
         except KeyError:
@@ -315,16 +327,21 @@ class Router:
                 return
         self._last_pos[old] = (self.x, self.y)
         self._screen_pos[(self.screen.device_id, self.screen.id)] = (self.x, self.y)
+        effect = self.settings.effect
+        # Where the pointer leaves from: the animation plays there too, so you
+        # see it cut across the edge rather than only where it lands.
+        exit_x, exit_y = self.screen.to_os(self.x, self.y)
 
         if old != new:
             if old == self.local_id:
                 self._release_local_keys()
+                self.overlay.show(effect, exit_x, exit_y)
             elif self.transport.is_connected(old):
                 for key in sorted(self._remote_keys):
                     self.transport.send(old, "key", key=key, pressed=False)
                 for button in sorted(self._remote_buttons):
                     self.transport.send(old, "button", button=button, pressed=False)
-                self.transport.send(old, "leave")
+                self.transport.send(old, "leave", effect=effect, x=exit_x, y=exit_y)
             self._remote_keys.clear()
             self._remote_buttons.clear()
 
@@ -332,7 +349,6 @@ class Router:
         if old != new:
             self._arrived = (self.clock(), old)
         ox, oy = screen.to_os(x, y)
-        effect = self.settings.effect
         if new == self.local_id:
             if old != new:
                 self.capture.set_grab(False)
