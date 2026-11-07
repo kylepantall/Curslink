@@ -2,15 +2,11 @@
 
 Used by CI to show what Qt's native styles look like on each platform::
 
-    python packaging/screenshots.py OUT_DIR [--print]
-
-With ``--print`` each PNG is also written to stdout as base64 lines
-(``SHOT <name> <chunk>``) so it can be read back from a CI log.
+    python packaging/screenshots.py OUT_DIR
 """
 
 from __future__ import annotations
 
-import base64
 import os
 import shutil
 import sys
@@ -55,11 +51,6 @@ def main(argv: list[str]) -> int:
             win.grab().save(str(path))
             shots.append(path)
             print("saved", path, flush=True)
-    if "--print" in argv:
-        for path in shots:
-            data = base64.b64encode(path.read_bytes()).decode()
-            for i in range(0, len(data), 3000):
-                print(f"SHOT {path.name} {data[i:i + 3000]}")
     win.close()
     return 0
 
