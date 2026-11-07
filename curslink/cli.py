@@ -259,7 +259,7 @@ def cmd_calibrate(args) -> int:
     for a, b, gap in close_pairs(cal, cfg.gaze.settings.switch_margin_deg):
         print(
             f"Warning: {a.key} and {b.key} are only {gap:.1f} deg apart; "
-            "gaze may struggle to tell them apart (consider gaze.within_device = false)."
+            "gaze may struggle to tell them apart (leave them out of gaze.jump_screens)."
         )
     return 0
 

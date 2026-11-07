@@ -275,9 +275,9 @@ class GazeArbiter:
         targets = self.classifier.targets if self.classifier is not None else []
         calibrated = [t for t in targets if t.device_id == device_id]
         if calibrated:
-            return calibrated[0]
+            return Target(device_id, calibrated[0].screen_id, guess=True)
         screens = self._screens_of(device_id)
-        return Target(device_id, screens[0]) if screens else None
+        return Target(device_id, screens[0], guess=True) if screens else None
 
     def _do_switch(self, target: Target | None) -> None:
         if target is None:

@@ -333,6 +333,28 @@ def test_switch_animation_never_takes_focus_or_clicks(qapp):
     w.close()
 
 
+def test_settings_turn_monitor_jumps_on_and_off(desktop, qapp):
+    from curslink.config import host_config
+
+    desktop.window.pages["setup"].create()
+    cfg = desktop.config()
+    cfg.add_device("laptop", "Work laptop")
+    cfg.save()
+    desktop.config_saved(restart=False)
+    page = desktop.window.pages["settings"]
+    page.load()
+    assert "laptop/main" in page.jump_toggles and not any(t.isChecked() for t in page.jump_toggles.values())
+    page.jump_toggles["laptop/main"].click()
+    assert desktop.config().get("gaze", "jump_screens") == ["laptop/main"]
+    assert page.jump_toggles["laptop/main"].isChecked()
+    page.jump_all_on.click()
+    everything = list(page.jump_toggles)
+    assert desktop.config().get("gaze", "jump_screens") == everything
+    assert len(host_config(desktop.config().raw()).router.gaze_jump_screens) == len(everything)
+    page.jump_all_off.click()
+    assert desktop.config().get("gaze", "jump_screens") == []
+
+
 def test_a_screen_the_camera_couldnt_see_is_tried_again_not_skipped(desktop, qapp):
     desktop.window.pages["setup"].create()
     cfg = desktop.config()

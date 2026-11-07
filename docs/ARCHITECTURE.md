@@ -106,8 +106,12 @@ calibration" and "calibrated host plus agent cameras" all work.
 
 Gaze picks a *device*, not a monitor: looking at another computer brings
 the pointer back to wherever you left it there, and looking between the
-monitors of the device you're on does nothing (unless `[gaze]
-within_device = true`).
+monitors of the device you're on does nothing. Monitors listed in `[gaze]
+jump_screens` (Settings > "Jump to the monitor you look at") are the
+exception: looking at one puts the pointer on that monitor, where it last
+was there, even on the device you're already using. Only a calibrated look
+counts; a device's own camera only knows the device, so it still picks the
+device. (The older `within_device = true` turns every monitor on.)
 
 While the desktop app calibrates, the host keeps linking but hands its
 camera to the app (`calibrate on` on the service's stdin). For a screen of
