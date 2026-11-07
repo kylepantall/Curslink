@@ -10,7 +10,7 @@ from curslink.gaze.zones import Target
 from curslink.isolink import ChatDrag, IsolinkLink
 from curslink.net.client import AgentSession
 from curslink.popups import AgentPopups, PopupHandoff
-from curslink.protocol import POPUPS_FEATURE, ProtocolError, decode, encode
+from curslink.protocol import POPUPS_FEATURE, PREPARE_FEATURE, ProtocolError, decode, encode
 from curslink.router import Router, RouterSettings
 
 
@@ -90,9 +90,11 @@ async def test_link_asks_for_windows_keeps_the_secret_and_hears_drags(tmp_path):
     await settle()
     assert link.dragging is None
 
-    assert await link.open_chat("h_chat", held=True, open_=True) is True
+    await link.prepare_chat("h_chat")
+    assert await link.open_chat("h_chat", held=True, open_=True, grab=(40, 12)) is True
     await link.close_chat("h_chat")
-    assert isolink.calls == [("windows.open", {"chat": "h_chat", "held": True, "open": True}),
+    assert isolink.calls == [("windows.prepare", {"chat": "h_chat"}),
+                             ("windows.open", {"chat": "h_chat", "held": True, "open": True, "grabX": 40, "grabY": 12}),
                              ("windows.close", {"chat": "h_chat"})]
 
     isolink.event("capabilities.changed", {"capabilities": []})
@@ -137,19 +139,28 @@ class FakeLink(IsolinkLink):
     def __init__(self, me="h_me", windows=True):
         super().__init__(None)
         self.me, self.windows = me, windows
-        self.opened, self.closed = [], []
+        self.opened, self.closed, self.prepared, self.unprepared, self.grabs = [], [], [], [], []
 
-    async def open_chat(self, chat, held, open_):
+    async def open_chat(self, chat, held, open_, grab=None):
         self.opened.append((chat, held, open_))
+        self.grabs.append(grab)
         return True
+
+    async def prepare_chat(self, chat):
+        self.prepared.append(chat)
+
+    async def unprepare_chat(self, chat):
+        self.unprepared.append(chat)
 
     async def close_chat(self, chat):
         self.closed.append(chat)
 
 
 class PopupsTransport(FakeTransport):
+    features = {POPUPS_FEATURE, PREPARE_FEATURE}
+
     def supports(self, device_id, feature):
-        return device_id in self.connected and feature == POPUPS_FEATURE
+        return device_id in self.connected and feature in self.features
 
 
 @pytest.fixture
@@ -165,13 +176,16 @@ def popups(layout):
 async def test_a_chat_dragged_over_the_edge_opens_on_the_laptop(popups):
     handoff, router, transport, link, injected, _ = popups
     handoff.on_isolink("laptop", {"me": "h_me", "windows": True, "dragging": None})
-    link.dragging = ChatDrag("h_chat", open=True)
+    link.dragging = ChatDrag("h_chat", open=True, grab_x=40, grab_y=12)
+    link.on_change()
+    assert transport.of_type("popup_prepare") == [("laptop", "popup_prepare", {"chat": "h_chat"})]
     router.on_pointer(3839, 500)
     assert router.active_device == "laptop"
     await settle()
     assert injected == ["let_go"]
     (dev, _, data), = transport.of_type("popup_in")
-    assert dev == "laptop" and data == {"chat": "h_chat", "open": True}
+    assert dev == "laptop" and data == {"chat": "h_chat", "open": True, "grabX": 40, "grabY": 12}
+    assert not transport.of_type("popup_unprepare"), "it's the one it went to"
     assert link.closed == []  # not until it opened there
     handoff.on_result("laptop", {"chat": "h_chat", "ok": True})
     await settle()
@@ -214,6 +228,7 @@ async def test_a_chat_dragged_on_the_laptop_comes_home(popups):
     assert handoff_files == [], "a chat isn't a file: the laptop lets go as usual"
     assert transport.of_type("button")[-1][2] == {"button": "left", "pressed": False}
     assert pressed == [True] and link.opened == [("h_chat", True, True)]
+    assert link.prepared == ["h_chat"] and link.unprepared == []
     (dev, _, data), = transport.of_type("popup_close")
     assert dev == "laptop" and data == {"chat": "h_chat"}
 
@@ -231,6 +246,48 @@ async def test_looking_away_mid_drag_carries_the_chat(popups):
     assert link.opened == [("h_chat", True, False)]
 
 
+async def test_a_drag_that_stays_lets_the_others_off(popups):
+    handoff, router, transport, link, injected, _ = popups
+    transport.connected.add("tablet")
+    handoff.on_isolink("laptop", {"me": "h_me", "windows": True})
+    handoff.on_isolink("tablet", {"me": "h_someone_else", "windows": True})
+    handoff.on_isolink("laptop", {"me": "h_me", "windows": True, "dragging": {"chat": "h_chat"}})
+    await settle()
+    assert link.prepared == ["h_chat"]
+    assert not transport.of_type("popup_prepare"), "not the dragging laptop, nor another account"
+    handoff.on_isolink("laptop", {"me": "h_me", "windows": True, "dragging": None})
+    await settle()
+    assert link.unprepared == ["h_chat"] and link.opened == []
+
+
+async def test_an_older_agent_isnt_asked_to_prepare(popups):
+    handoff, router, transport, link, _, _ = popups
+    transport.features = {POPUPS_FEATURE}
+    handoff.on_isolink("laptop", {"me": "h_me", "windows": True})
+    link.dragging = ChatDrag("h_chat", open=False)
+    link.on_change()
+    link.dragging = None
+    link.on_change()
+    assert not transport.of_type("popup_prepare") and not transport.of_type("popup_unprepare")
+
+
+async def test_coming_straight_back_carries_it_back_not_a_file_drag(popups):
+    handoff, router, transport, link, injected, pressed = popups
+    files = []
+    router.can_drag_out = lambda device_id: True
+    router.drag_out = files.append
+    PopupHandoff.__init__(handoff, router, transport, link, injected.append, lambda: pressed.append(True))
+    handoff.on_isolink("laptop", {"me": "h_me", "windows": True})
+    link.dragging = ChatDrag("h_chat", open=True)
+    router.on_pointer(3839, 500)
+    await settle()
+    assert router.active_device == "laptop"
+    # Back before the laptop said it's dragging it.
+    router.go_home("edge")
+    await settle()
+    assert files == [] and link.opened == [("h_chat", True, True)]
+
+
 # ------------------------------------------------------------------ agent side
 async def test_agent_opens_a_carried_chat_held_and_says_so():
     link, sent, sink = FakeLink(), [], FakeSink()
@@ -243,10 +300,10 @@ async def test_agent_opens_a_carried_chat_held_and_says_so():
     session.popups = AgentPopups(link, lambda t, **d: sent.append((t, d)), press)
     session.popups.report()
     assert sent[-1] == ("isolink", {"me": "h_me", "windows": True, "dragging": None})
-    session.handle(decode(encode("popup_in", chat="h_chat", open=True)))
+    session.handle(decode(encode("popup_in", chat="h_chat", open=True, grabX=40, grabY=12.5)))
     await settle()
     assert sink.calls == [("button", "left", True)]
-    assert link.opened == [("h_chat", True, True)]
+    assert link.opened == [("h_chat", True, True)] and link.grabs == [(40, 12.5)]
     assert sent[-1] == ("popup_result", {"chat": "h_chat", "ok": True})
     # The host's button-up lets go of it.
     session.handle(decode(encode("button", button="left", pressed=False)))
@@ -254,6 +311,10 @@ async def test_agent_opens_a_carried_chat_held_and_says_so():
     session.handle(decode(encode("popup_close", chat="h_other")))
     await settle()
     assert link.closed == ["h_other"]
+    session.handle(decode(encode("popup_prepare", chat="h_next")))
+    session.handle(decode(encode("popup_unprepare", chat="h_next")))
+    await settle()
+    assert link.prepared == ["h_next"] and link.unprepared == ["h_next"]
 
 
 def test_popup_frames_are_checked():

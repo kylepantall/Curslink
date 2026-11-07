@@ -14,7 +14,7 @@ from curslink.inputs.base import InputSink
 from curslink.net.framing import STREAM_LIMIT, read_message
 from curslink.net.relay import RelayError, RelayTarget, agent_connect
 from curslink.net.udp import AgentUdp
-from curslink.protocol import (AGENT_FEATURES, FILES_FEATURE, FILES_OUT_FEATURE, DROP_FEATURE, POPUPS_FEATURE, PROTOCOL_VERSION, UDP_FEATURE, Message, ProtocolError,
+from curslink.protocol import (AGENT_FEATURES, FILES_FEATURE, FILES_OUT_FEATURE, DROP_FEATURE, POPUPS_FEATURE, PREPARE_FEATURE, PROTOCOL_VERSION, UDP_FEATURE, Message, ProtocolError,
                                encode)
 from curslink.security import channel_binding, hello_auth
 from curslink.tally import Tally
@@ -126,7 +126,7 @@ class AgentSession:
                 # The host won't send this button's release: the drag is ours to end.
                 self.buttons.discard("left")
                 self.drag_out.start()
-        elif t in ("popup_in", "popup_close"):
+        elif t in ("popup_in", "popup_close", "popup_prepare", "popup_unprepare"):
             if self.popups is not None:
                 self.popups.handle(t, dict(msg.data))
         elif t == "fetch":
@@ -310,7 +310,7 @@ class AgentClient:
             if self.session.drag_out is not None:
                 features.append(FILES_OUT_FEATURE)
             if self.session.popups is not None:
-                features.append(POPUPS_FEATURE)
+                features += [POPUPS_FEATURE, PREPARE_FEATURE]
             if self.udp_enabled and self._direct:
                 features.append(UDP_FEATURE)
             hello = dict(

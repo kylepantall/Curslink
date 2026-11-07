@@ -249,14 +249,34 @@ class IsolinkLink:
         finally:
             self._waiting.pop(rid, None)
 
-    async def open_chat(self, chat: str, held: bool, open_: bool) -> bool:
+    async def open_chat(self, chat: str, held: bool, open_: bool, grab: tuple[float, float] | None = None) -> bool:
         """Float ``chat`` here; ``held``: under the pointer, carried on with
-        the press that's down now."""
+        the press that's down now. ``open_``: open rather than its bubble,
+        held at ``grab`` (from its top left) as it was where it came from."""
+        p = {"chat": chat, "held": held, "open": open_}
+        if grab is not None:
+            p["grabX"], p["grabY"] = grab
         try:
-            return await self.call("windows.open", {"chat": chat, "held": held, "open": open_}) is True
+            return await self.call("windows.open", p) is True
         except (IsolinkError, ConnectionError, asyncio.TimeoutError) as exc:
             log.info("isolink: couldn't open the chat here: %s", exc)
             return False
+
+    async def prepare_chat(self, chat: str) -> None:
+        """Have ``chat``'s window ready, hidden: it may be carried here soon."""
+        await self._quietly("windows.prepare", chat)
+
+    async def unprepare_chat(self, chat: str) -> None:
+        """It wasn't carried here after all."""
+        await self._quietly("windows.unprepare", chat)
+
+    async def _quietly(self, method: str, chat: str) -> None:
+        # An Isolink older than these just answers bad_request: carrying
+        # still works, only slower.
+        try:
+            await self.call(method, {"chat": chat})
+        except (IsolinkError, ConnectionError, asyncio.TimeoutError) as exc:
+            log.debug("isolink: %s: %s", method, exc)
 
     async def close_chat(self, chat: str) -> None:
         try:
