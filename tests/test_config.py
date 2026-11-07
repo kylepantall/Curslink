@@ -12,7 +12,7 @@ def test_example_config_loads():
     cfg = host_config(raw)
     assert cfg.device_id == "desktop"
     assert set(cfg.layout.devices) == {"desktop", "laptop"}
-    assert cfg.gaze.settings.dwell_s == pytest.approx(0.35)
+    assert cfg.gaze.settings.dwell_s == pytest.approx(0.25)
     agent = agent_config(raw)
     assert agent.device_id == "laptop" and agent.port == 24850
 

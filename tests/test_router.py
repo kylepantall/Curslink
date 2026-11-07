@@ -263,3 +263,21 @@ def test_a_device_only_guess_never_picks_the_monitor(parts):
     router.on_gaze(Target("desktop", "right", guess=True))  # a camera that only knows the device
     assert router.is_local and router.screen.id == "left"
     assert sink.calls[-1] == ("move", 500, 400)
+
+
+def test_gaze_back_to_a_device_left_by_its_edge_doesnt_bounce_straight_home(parts):
+    router, *_ = parts
+    now = [10.0]
+    router.clock = lambda: now[0]
+    router.on_pointer(3839, 500)                # over the edge to the laptop
+    now[0] += 1.0
+    router.on_motion(-50, 0)                    # and back home by its left edge
+    assert router.is_local
+    router.on_gaze(Target("laptop", "main"))    # look at it again: lands on that edge
+    assert router.active_device == "laptop" and router.x < 3840 + 24
+    now[0] += 1.0
+    router.on_motion(-3, 0)                     # a nudge towards home doesn't count yet
+    assert router.active_device == "laptop"
+    router.on_motion(40, 0)                     # off the edge...
+    router.on_motion(-80, 0)                    # ...and a real push back goes home
+    assert router.is_local

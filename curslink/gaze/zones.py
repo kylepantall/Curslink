@@ -77,7 +77,7 @@ class GazeSettings:
     # A new screen must be at least this much closer than the current one.
     switch_margin_deg: float = 3.0
     # ...and stay the best match this long before we switch.
-    dwell_s: float = 0.35
+    dwell_s: float = 0.25
     # Pitch is noisier than yaw on most webcams; weight it down a little.
     pitch_weight: float = 0.8
 
