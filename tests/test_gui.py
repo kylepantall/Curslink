@@ -633,8 +633,10 @@ def test_dragged_screen_stays_where_it_is_let_go(desktop, qapp):
     page, home, laptop = _host_with_laptop(desktop)
     page.overlap_toggle.setChecked(True)
     hx, hy, hw, hh = home.layout_rect()
-    page.view.resize(1000, 420)  # about the size it is in the window
-    page.view.fit()
+    # A fixed zoom (a layout pixel is a quarter of an on-screen pixel), not
+    # whatever the platform's offscreen view size gives.
+    page.view.resetTransform()
+    page.view.scale(2.5, 2.5)
     zoom = page.view.transform().m11()
     near = max(1, int(2 / (zoom * SCALE)))  # 2 on-screen px from the monitor's right edge
     laptop.dragging = lambda: True  # as while the mouse holds it
