@@ -21,6 +21,7 @@ from curslink.gaze.zones import Target
 from curslink.inputs.base import InputCapture, InputSink
 from curslink.inputs.keys import Hotkey
 from curslink.layout import Layout, Screen
+from curslink.tally import Tally
 
 log = logging.getLogger(__name__)
 
@@ -115,6 +116,7 @@ class Router:
         self.clock: Callable[[], float] = time.monotonic
         self._arrived: tuple[float, str] | None = None  # (when, from which device)
         self._moved_at = -1e9  # when the mouse last moved (self.clock())
+        self._scrolls = Tally("scroll sent to the other computer")
 
         first = next(iter(layout.screens(local_device_id)), None)
         if first is None:
@@ -227,6 +229,7 @@ class Router:
     def on_button(self, button: str, pressed: bool) -> None:
         if self.is_local:
             return
+        self._moved_at = self.clock()  # clicking counts as using the mouse
         if pressed:
             self._remote_buttons.add(button)
         else:
@@ -235,6 +238,8 @@ class Router:
 
     def on_scroll(self, dx: float, dy: float) -> None:
         if not self.is_local:
+            self._moved_at = self.clock()  # so does scrolling: gaze waits
+            self._scrolls.add(dx, dy)
             self.transport.send(self.active_device, "scroll", dx=dx, dy=dy)
 
     def on_key(self, key: str, pressed: bool) -> None:

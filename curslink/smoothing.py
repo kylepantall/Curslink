@@ -30,7 +30,8 @@ from typing import Callable
 log = logging.getLogger(__name__)
 
 TICK_S = 0.004            # pointer updates while playing back: 250 a second
-MAX_DELAY_S = 0.035       # never play back further behind than this
+MAX_DELAY_S = 0.06        # never play back further behind than this (35 ms in 0.4.10-0.4.17: on
+                          # a busy Wi-Fi link half the moves arrived later than that: stutter)
 STATS_EVERY_S = 0.1       # re-measure the delay this often
 WINDOW_S = 2.0            # ... from this much recent history
 OFFSET_WINDOW_S = 10.0    # the clock offset from this much (it drifts slowly)

@@ -15,6 +15,7 @@ from curslink.net.framing import STREAM_LIMIT, read_message
 from curslink.net.relay import RelayError, RelayTarget, agent_connect
 from curslink.protocol import AGENT_FEATURES, FILES_FEATURE, PROTOCOL_VERSION, Message, ProtocolError, encode
 from curslink.security import channel_binding, hello_auth
+from curslink.tally import Tally
 
 log = logging.getLogger(__name__)
 
@@ -31,6 +32,7 @@ class AgentSession:
     def __init__(self, sink: InputSink, show_effect: Callable[[str, int, int], None], smoother=None):
         self.sink = sink
         self.show_effect = show_effect
+        self.scrolls = Tally("scroll from the host")
         # A curslink.smoothing.PointerSmoother plays timestamped moves back
         # evenly; without one (or from a host that sends no ts) each move is
         # applied as it arrives.
@@ -94,7 +96,11 @@ class AgentSession:
             (self.buttons.add if pressed else self.buttons.discard)(name)
             self.sink.button(name, pressed)
         elif t == "scroll":
-            self.sink.scroll(msg.data["dx"], msg.data["dy"])
+            self.scrolls.add(msg.data["dx"], msg.data["dy"])
+            try:
+                self.sink.scroll(msg.data["dx"], msg.data["dy"])
+            except Exception:
+                log.exception("couldn't scroll by (%s, %s)", msg.data["dx"], msg.data["dy"])
         elif t == "key":
             key, pressed = msg.data["key"], msg.data["pressed"]
             if not pressed and key not in self.keys:

@@ -480,3 +480,32 @@ def test_crossing_an_edge_by_hand_isnt_undone_by_gaze(tmp_path, layout):
         arbiter.on_sample(now[0] + 2 + i / 30, -10, 0)
     assert router.is_local                           # a real look back still switches
 
+
+
+def test_a_camera_that_never_saw_you_doesnt_send_input_home(layout):
+    """Kyle's PC camera failed to open, so the PC kept reporting "not facing"
+    every second; each one sent input home the moment the mouse stopped."""
+    from types import SimpleNamespace
+
+    from conftest import FakeCapture, FakeOverlay, FakeTransport
+    from curslink.app import make_arbiter as app_arbiter, wire_agent_cameras
+    from curslink.config import HostConfig
+    from curslink.router import Router, RouterSettings
+
+    cfg = HostConfig("desktop", None, layout)  # no host camera: facing only
+    router = Router(layout, "desktop", FakeCapture(), FakeSink(), FakeTransport(connected={"laptop"}),
+                    FakeOverlay(), RouterSettings(gaze_switching=True))
+    arbiter = app_arbiter(cfg, router)
+    server = SimpleNamespace(on_connect=lambda c: None, on_disconnect=lambda d: None,
+                             on_facing=None, connections={})
+    wire_agent_cameras(server, arbiter)
+    server.on_connect(SimpleNamespace(device_id="laptop", camera=True))
+    router.on_pointer(3839, 500)                 # over the edge by hand
+    assert router.active_device == "laptop"
+    router.clock = lambda: 1e9                    # the mouse has been still a while
+    for _ in range(3):
+        server.on_facing("laptop", False)         # the once-a-second refresh
+    assert router.active_device == "laptop"
+    server.on_facing("laptop", True)
+    server.on_facing("laptop", False)             # a real turn away still goes home
+    assert router.is_local

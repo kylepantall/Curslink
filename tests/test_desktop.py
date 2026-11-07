@@ -554,3 +554,35 @@ def test_mac_back_forward_and_smooth_scroll_reach_the_other_computer(monkeypatch
     capture._mac_mouse_tap(pb._MAC_SCROLL, {"scroll": (0.0, 0.25)})  # a smooth wheel's quarter line
     assert got == [("button", "x1", True), ("button", "x1", False), ("button", "x2", True),
                    ("button", "middle", True), ("scroll", 0.0, 0.25)]
+
+
+def test_windows_adds_up_fractional_scrolls_into_whole_notches(monkeypatch):
+    import curslink.inputs.pynput_backend as pb
+
+    sent = []
+    sink = pb.PynputSink.__new__(pb.PynputSink)
+    sink._mouse = type("M", (), {"scroll": lambda self, dx, dy: sent.append((dx, dy))})()
+    sink._scroll_carry = (0.0, 0.0)
+    monkeypatch.setattr(pb.sys, "platform", "win32")
+    for _ in range(9):
+        sink.scroll(0.0, 0.25)
+    assert sent == [(0, 1), (0, 1)]              # 2.25 lines: two notches, a quarter waiting
+    sink.scroll(0.0, -3.5)
+    assert sent[-1] == (0, -3)                   # down, carry included (0.25 - 3.5 = -3.25)
+
+
+def test_scroll_tally_logs_the_first_then_every_so_often(caplog):
+    import logging
+
+    from curslink.tally import Tally
+
+    now = [0.0]
+    t = Tally("scroll", every_s=2.0, clock=lambda: now[0])
+    with caplog.at_level(logging.INFO, logger="curslink.input"):
+        t.add(0, 1)
+        now[0] = 0.5
+        t.add(0, 1)
+        now[0] = 2.6
+        t.add(0, 2)
+    lines = [r.getMessage() for r in caplog.records]
+    assert len(lines) == 2 and "1 in" in lines[0] and "2 in" in lines[1] and "dy +3.00" in lines[1]
