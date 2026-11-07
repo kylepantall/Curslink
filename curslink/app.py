@@ -16,6 +16,7 @@ from curslink import events
 from curslink.config import AgentConfig, HostConfig, PairingConfig
 from curslink.gaze.confirm import FacingDetector, GazeArbiter
 from curslink.gaze.zones import Calibration, GazeClassifier, Target
+from curslink.inputs.keys import swap_cmd_ctrl, swap_for
 from curslink.net.client import AgentClient, AgentSession, NotReady
 from curslink.net.client import Target as ConnectTarget
 from curslink.net.relay import HostRelayLink, RelayTarget, paired_room_id
@@ -268,6 +269,9 @@ async def run_host(cfg: HostConfig) -> None:
         overlay=overlay,
         settings=cfg.router,
     )
+    if cfg.router.swap_cmd_ctrl:
+        router.key_for = cmd_ctrl_swapper(server)
+
     def agent_connected(conn) -> None:
         events.emit("agent", device_id=conn.device_id, name=conn.name, platform=conn.platform,
                     connected=True, screens=conn.screens)
@@ -359,6 +363,16 @@ async def run_host(cfg: HostConfig) -> None:
         await server.close()
 
 
+def cmd_ctrl_swapper(server: HostServer, local_platform: str = sys.platform):
+    """Swap Cmd and Ctrl for keys going to a computer of the other kind (Mac vs PC)."""
+    def key_for(device_id: str, key: str) -> str:
+        conn = server.connections.get(device_id)
+        if conn is not None and swap_for(local_platform, conn.platform):
+            return swap_cmd_ctrl(key)
+        return key
+    return key_for
+
+
 class HostCamera:
     """This computer's camera for gaze: paused gaze lets go of it (its light
     goes off), resuming opens it again. Calibration takes it for good; the
@@ -400,9 +414,8 @@ class HostCamera:
 def start_file_drags(cfg: HostConfig, router: Router, server: HostServer, overlay, capture,
                      loop: asyncio.AbstractEventLoop):
     """Dragging files to another device (see curslink.files.handoff)."""
-    from curslink.files.handoff import DragHandoff
-
     from curslink.files import macdrag
+    from curslink.files.handoff import DragHandoff
 
     # macOS says what's being dragged on its drag pasteboard; elsewhere the
     # overlay helper's drop targets find out.

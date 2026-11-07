@@ -45,3 +45,28 @@ def test_windows_absolute_move_covers_the_virtual_desktop():
     assert win_absolute(-1920, 0, -1920, 0, 3840, 1080) == (0, 0)
     assert win_absolute(0, 540, -1920, 0, 3840, 1080)[0] == round(1920 * 65535 / 3839)
     assert win_absolute(99999, -5, 0, 0, 1920, 1080) == (65535, 0)  # clamped
+
+
+def test_os_family_and_swap():
+    from curslink.inputs.keys import os_family, swap_cmd_ctrl, swap_for
+
+    assert os_family("darwin") == os_family("Darwin 24.1.0") == "mac"
+    assert os_family("win32") == os_family("Windows 11") == os_family("Linux 6.8") == "pc"
+    assert os_family("?") == ""
+    assert swap_for("darwin", "Windows 10") and swap_for("win32", "Darwin 24.1")
+    assert not swap_for("darwin", "Darwin 24.1") and not swap_for("win32", "Linux 6.8")
+    assert not swap_for("darwin", "?")  # unknown: leave keys alone
+    assert [swap_cmd_ctrl(k) for k in ("cmd", "cmd_r", "ctrl_l", "alt", "a")] == ["ctrl", "ctrl_r", "cmd_l", "alt", "a"]
+
+
+def test_cmd_ctrl_swapper_follows_the_agents_platform():
+    from types import SimpleNamespace
+
+    from curslink.app import cmd_ctrl_swapper
+
+    server = SimpleNamespace(connections={"pc": SimpleNamespace(platform="Windows 11"),
+                                          "mac": SimpleNamespace(platform="Darwin 24.1")})
+    key_for = cmd_ctrl_swapper(server, "darwin")
+    assert key_for("pc", "cmd") == "ctrl" and key_for("pc", "ctrl") == "cmd"
+    assert key_for("mac", "cmd") == "cmd"
+    assert key_for("gone", "cmd") == "cmd"

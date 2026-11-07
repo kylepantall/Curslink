@@ -73,6 +73,8 @@ class RouterSettings:
     gaze_jump_screens: frozenset[tuple[str, str]] = field(default_factory=frozenset)
     return_hotkey: str = "ctrl+alt+home"     # always brings input back home
     gaze_toggle_hotkey: str = "ctrl+alt+g"   # pause / resume gaze switching
+    # Mac <-> PC: Cmd on one is Ctrl on the other, so shortcuts stay put.
+    swap_cmd_ctrl: bool = True
 
 
 @dataclass(frozen=True)
@@ -108,6 +110,9 @@ class Router:
         # macOS without Accessibility/Input Monitoring nothing is captured,
         # so "switching" would only move the label, not the mouse.
         self.blocked: Callable[[], str] = lambda: ""
+        # The key name to send to a device: lets the app swap Cmd and Ctrl
+        # between a Mac and a PC (see inputs.keys.swap_for).
+        self.key_for: Callable[[str, str], str] = lambda device_id, key: key
         self._blocked_said = ""
         # After arriving by gaze or a hotkey (home or on another device) the pointer may land right on
         # the edge it left by; it has to leave that edge before an edge push
@@ -288,7 +293,7 @@ class Router:
             self._remote_keys.add(key)
         else:
             self._remote_keys.discard(key)
-        self.transport.send(self.active_device, "key", key=key, pressed=pressed)
+        self.transport.send(self.active_device, "key", key=self.key_for(self.active_device, key), pressed=pressed)
 
     # ------------------------------------------------------------------ gaze
     def set_gaze_paused(self, paused: bool) -> None:
@@ -376,7 +381,7 @@ class Router:
                 self.overlay.show(effect, exit_x, exit_y)
             elif self.transport.is_connected(old):
                 for key in sorted(self._remote_keys):
-                    self.transport.send(old, "key", key=key, pressed=False)
+                    self.transport.send(old, "key", key=self.key_for(old, key), pressed=False)
                 for button in sorted(self._remote_buttons):
                     self.transport.send(old, "button", button=button, pressed=False)
                 self.transport.send(old, "leave", effect=effect, x=exit_x, y=exit_y)

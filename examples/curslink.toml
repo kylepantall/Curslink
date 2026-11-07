@@ -30,6 +30,7 @@ edge_switching = true        # push the pointer off a screen edge to switch
 gap_tolerance_px = 64        # bridge small gaps between screens in the layout
 return_hotkey = "ctrl+alt+home"
 gaze_toggle_hotkey = "ctrl+alt+g"
+swap_cmd_ctrl = true         # Mac <-> PC: Cmd on the Mac is Ctrl on the PC (and back)
 
 lan = true                   # accept agents on the LAN; false = relay only
 udp = true                   # send pointer moves by UDP to agents that take them
