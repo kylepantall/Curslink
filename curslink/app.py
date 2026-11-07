@@ -281,6 +281,7 @@ async def run_host(cfg: HostConfig) -> None:
     router.listeners.append(lambda e: events.emit(
         "switch", **{"from": e.from_device, "to": e.to_device, "screen": e.screen.id, "reason": e.reason}))
     router.on_gaze_paused = lambda paused: events.emit("gaze", paused=paused)
+    remember_positions(router)
     if cfg.lan:
         await server.start()
     pairing = Pairing(cfg.pairing, DeviceInfo(cfg.device_id, cfg.name, "host"), store,
@@ -651,6 +652,35 @@ def wire_agent_cameras(server: HostServer, arbiter: GazeArbiter) -> None:
         arbiter.set_camera(conn.device_id, conn.camera)
     if server.connections:
         cameras_changed()
+
+
+def positions_path():
+    from curslink.pairing.store import default_dir
+
+    return default_dir() / "pointer-positions.json"
+
+
+def remember_positions(router: Router, path=None) -> None:
+    """Where the pointer was on each device and monitor survives the host
+    restarting, and is saved after every switch."""
+    import json
+
+    path = path or positions_path()
+    try:
+        router.remember(json.loads(path.read_text()))
+    except (OSError, ValueError):
+        pass
+
+    def save(_event) -> None:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(router.remembered()))
+            tmp.replace(path)
+        except OSError:
+            log.debug("couldn't save pointer positions", exc_info=True)
+
+    router.listeners.append(save)
 
 
 async def run_agent(cfg: AgentConfig) -> None:
