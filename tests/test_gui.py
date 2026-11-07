@@ -68,7 +68,7 @@ def test_events_update_the_status_and_tray(desktop, qapp):
     qapp.processEvents()
     assert s.active == "laptop" and s.gaze_paused and s.agents["laptop"].connected
     assert "Work laptop" in desktop.tray.detail.text()
-    assert desktop.tray.gaze.text() == "Turn gaze on"
+    assert desktop.tray.gaze.text().lower() == "turn gaze on"  # title case on macOS
 
 
 def test_layout_page_saves_moves(desktop, qapp):
