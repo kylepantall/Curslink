@@ -238,8 +238,12 @@ class PynputCapture:
     def inject_drag_end(self, kind: str) -> None:
         """At the parked pointer, nudge a held left-button drag a pixel and
         back ("nudge"); or cancel it with Escape and let go of the button
-        ("release"), so the app it came from drops nothing here."""
+        ("release"), so the app it came from drops nothing here; or just let
+        go there ("let_go")."""
         x, y = self.park_at
+        if kind == "let_go":  # just let go there: the drop lands at the parked pointer
+            self.let_through(lambda: _drag_release(x, y))
+            return
         self.let_through(lambda: drag_nudge(x, y, release=kind == "release"))
 
     def release_held(self) -> None:
