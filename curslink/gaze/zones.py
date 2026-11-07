@@ -13,6 +13,10 @@ from pathlib import Path
 class Target:
     device_id: str
     screen_id: str
+    # True when only the device is known, not which of its monitors you
+    # look at (a device's own camera, or a device that wasn't calibrated).
+    # Not part of equality: it's the same target either way.
+    guess: bool = field(default=False, compare=False)
 
     @property
     def key(self) -> str:

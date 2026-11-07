@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Protocol
 
 from curslink.gaze.zones import Target
@@ -52,8 +52,13 @@ class RouterSettings:
     edge_switching: bool = True
     gaze_switching: bool = True
     gap_tolerance_px: int = 64
-    # Gaze between monitors of the *same* device jumps the cursor too.
+    # Legacy switch: every monitor is a jump monitor (see gaze_jump_screens).
     gaze_within_device: bool = False
+    # Monitors, as (device_id, screen_id), where looking puts the pointer on
+    # that very monitor, even one of the device it's already on. Looking at
+    # any other monitor only picks its device: the pointer comes back where
+    # you left it there, and nothing happens if that device is already active.
+    gaze_jump_screens: frozenset[tuple[str, str]] = field(default_factory=frozenset)
     return_hotkey: str = "ctrl+alt+home"     # always brings input back home
     gaze_toggle_hotkey: str = "ctrl+alt+g"   # pause / resume gaze switching
 
@@ -107,6 +112,8 @@ class Router:
         self.x, self.y = first.center
         self.gaze_paused = False
         self._last_pos: dict[str, tuple[float, float]] = {}
+        # Where the pointer last was on each monitor, for jump monitors.
+        self._screen_pos: dict[tuple[str, str], tuple[float, float]] = {}
         self._remote_keys: set[str] = set()
         self._remote_buttons: set[str] = set()
         self._local_keys: set[str] = set()
@@ -121,6 +128,15 @@ class Router:
     def available(self, device_id: str) -> bool:
         return device_id == self.local_id or self.transport.is_connected(device_id)
 
+    def jumps_to(self, screen: Screen) -> bool:
+        """Does looking at ``screen`` put the pointer on it (not just its device)?"""
+        return self.settings.gaze_within_device or (screen.device_id, screen.id) in self.settings.gaze_jump_screens
+
+    def _set_screen(self, screen: Screen) -> None:
+        if screen != self.screen:
+            self._screen_pos[(self.screen.device_id, self.screen.id)] = (self.x, self.y)
+        self.screen = screen
+
     # ----------------------------------------------------------- local input
     def on_pointer(self, ox: float, oy: float) -> None:
         if not self.is_local:
@@ -128,7 +144,7 @@ class Router:
         screen = self.layout.screen_at_os(self.local_id, ox, oy)
         if screen is None:
             return
-        self.screen = screen
+        self._set_screen(screen)
         self.x, self.y = screen.from_os(ox, oy)
         if not self.settings.edge_switching:
             return
@@ -163,7 +179,8 @@ class Router:
                 return
         if here is None:
             here, nx, ny = self.layout.clamp_to_device(self.active_device, nx, ny)
-        self.screen, self.x, self.y = here, nx, ny
+        self._set_screen(here)
+        self.x, self.y = nx, ny
         ox, oy = here.to_os(nx, ny)
         if ts is None:
             self.transport.send(self.active_device, "move", x=ox, y=oy)
@@ -223,11 +240,18 @@ class Router:
             return
         if not self.available(screen.device_id):
             return
-        if screen.device_id == self.active_device:
-            if not self.settings.gaze_within_device or screen == self.screen:
+        if self.jumps_to(screen) and not target.guess:
+            # A jump monitor: the pointer goes to that very monitor, where
+            # it last was on it (or its middle the first time).
+            if screen == self.screen:
                 return
-            self.switch_to(screen, *screen.center, "gaze")
+            spot = self._screen_pos.get((screen.device_id, screen.id))
+            if spot is None or not screen.contains(*spot):
+                spot = screen.center
+            self.switch_to(screen, *spot, "gaze")
             return
+        if screen.device_id == self.active_device:
+            return  # another monitor of this device: gaze picks devices
         # Gaze picks the device, not the monitor: the pointer comes back
         # wherever you left it on that device, even if your eyes land on
         # another of its screens. Only a device never visited starts on the
@@ -269,6 +293,7 @@ class Router:
                     self._blocked_said = why
                 return
         self._last_pos[old] = (self.x, self.y)
+        self._screen_pos[(self.screen.device_id, self.screen.id)] = (self.x, self.y)
 
         if old != new:
             if old == self.local_id:

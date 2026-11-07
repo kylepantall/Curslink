@@ -51,7 +51,9 @@ calibration = "calibration.json"   # written by `curslink calibrate`
 dwell_ms = 350               # how long you must look before it switches
 max_distance_deg = 12        # further than this from every screen = looking elsewhere
 switch_margin_deg = 3        # hysteresis between neighbouring screens
-within_device = false        # also jump between the host's own monitors
+jump_screens = []            # monitors ("device/screen") where looking puts the
+                             # pointer on that very monitor, e.g. ["desktop/left"];
+                             # looking at any other monitor only picks its device
 preview = false              # show the camera with head angles overlaid
 confirm_with_agents = true   # agents running their own camera ([agent.gaze])
                              # must see you facing them before gaze switches there
