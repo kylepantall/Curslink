@@ -23,6 +23,7 @@ from curslink.pairing.handshake import DeviceInfo
 from curslink.pairing.store import PairingStore
 from curslink.router import Router, SwitchEvent
 from curslink.security import HelloVerifier, client_context, server_context
+from curslink.tally import Tally
 
 log = logging.getLogger(__name__)
 
@@ -71,6 +72,7 @@ class LoopBridge:
         self._pending = False
         self._gen = 0  # a flush scheduled before the last take is stale
         self.stats = CaptureStats()
+        self.scrolls = Tally("scroll from this mouse")
 
     def on_pointer(self, x, y):
         self._loop.call_soon_threadsafe(self._pointer, x, y)
@@ -133,6 +135,7 @@ class LoopBridge:
         self._after_motion(self._button, button, pressed)
 
     def on_scroll(self, dx, dy):
+        self.scrolls.add(dx, dy)
         self._after_motion(self._router.on_scroll, dx, dy)
 
     def on_key(self, key, pressed):

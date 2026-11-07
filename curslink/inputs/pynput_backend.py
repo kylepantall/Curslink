@@ -507,6 +507,7 @@ class PynputSink:
         self._mouse = mouse.Controller()
         self._keyboard = keyboard.Controller()
         self.modifier_map = modifier_map or {}
+        self._scroll_carry = (0.0, 0.0)
 
     def move_to(self, x: int, y: int) -> None:
         if sys.platform == "win32" and _win_move(x, y):
@@ -533,6 +534,17 @@ class PynputSink:
         (self._mouse.press if pressed else self._mouse.release)(target)
 
     def scroll(self, dx: float, dy: float) -> None:
+        if sys.platform == "win32":
+            # A Mac's smooth wheel or trackpad sends fractions of a line, and
+            # plenty of Windows apps ignore a wheel turn under one notch
+            # (120): add them up and send whole notches.
+            sx, sy = self._scroll_carry
+            sx, sy = sx + dx, sy + dy
+            wx, wy = int(sx), int(sy)  # towards zero, so the rest carries over
+            self._scroll_carry = (sx - wx, sy - wy)
+            if wx or wy:
+                self._mouse.scroll(wx, wy)
+            return
         self._mouse.scroll(dx, dy)
 
     def key(self, key: str, pressed: bool) -> None:
