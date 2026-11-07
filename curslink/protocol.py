@@ -25,6 +25,15 @@ Host -> agent
                                        device: show (or take down) the
                                        placeholder that follows the pointer
     file_*                             a dropped file, see curslink.files.transfer
+    drag_out     {}                    input is leaving for the host with the left
+                                       button held: is it a file? End the drag here
+                                       and say (drag_out back)
+    fetch        {id} | {id, cancel}   send the files of that drag_out now (it
+                                       was dropped on the host), or forget them
+    popup_in     {chat, open}          an Isolink floating chat carried here:
+                                       press the left button and open it held
+                                       (answer popup_result); see curslink.popups
+    popup_close  {chat}                it opened on another device: close it here
 
 Agent -> host
     hello        {v, device_id, name, platform, screens, auth, camera}
@@ -32,6 +41,12 @@ Agent -> host
     facing       {facing}              the agent's own camera sees the user
                                        facing it (true) or not (false)
     file_result  {id, ok, ...}         dropped files saved (or why not)
+    drag_out     {id, card} | {none}   what the drag leaving this device carries
+    file_*                             its files, once the host fetches them
+    isolink      {me, windows, dragging}
+                                       what this device's Isolink says (only to a
+                                       host whose welcome.features has "popups")
+    popup_result {chat, ok}            whether a popup_in chat opened here
 
 ``hello.camera`` is true when the agent runs its own camera to confirm
 gaze switches (see :mod:`curslink.gaze.confirm`). An agent only sends
@@ -62,6 +77,10 @@ MESSAGE_TYPES = frozenset(
     {
         "hello",
         "welcome",
+        "isolink",
+        "popup_in",
+        "popup_close",
+        "popup_result",
         "enter",
         "leave",
         "move",
@@ -75,6 +94,8 @@ MESSAGE_TYPES = frozenset(
         "hint",
         "bye",
         "drag",
+        "drag_out",
+        "fetch",
         "file_begin",
         "file_item",
         "file_data",
@@ -91,7 +112,7 @@ MESSAGE_TYPES = frozenset(
 BUTTONS = frozenset({"left", "right", "middle", "x1", "x2"})
 EFFECTS = frozenset({"pop", "blink", "none"})
 # What this host understands beyond the base protocol, sent in welcome.features.
-HOST_FEATURES = ("facing",)
+HOST_FEATURES = ("facing", "popups")
 # What this agent understands beyond the base protocol, sent in hello.features.
 # An agent without "look" would reject a look frame as unknown and drop the
 # connection, so the host only sends one to agents that list it.
@@ -99,9 +120,19 @@ AGENT_FEATURES = ("look", "hint")
 # Added to hello.features by an agent that takes dragged files (drag and
 # file_* frames); it's optional ([agent.files] enabled = false leaves it out).
 FILES_FEATURE = "files"
+# An agent that can hand a file drag over to the host (drag_out / fetch, and
+# file_* frames the other way).
+FILES_OUT_FEATURE = "files_out"
+# An agent that takes a dragged file's bytes while it's carried (drag {id,
+# card}, then drag {drop, id} or drag {hide, id}) and drops it as a real file.
+DROP_FEATURE = "drop"
 # Added by an agent that reached the host directly and takes moves by UDP
 # (see curslink.net.udp); [agent].udp = false leaves it out.
 UDP_FEATURE = "udp"
+# An agent that carries Isolink's floating chats (isolink, popup_in,
+# popup_close, popup_result; see curslink.popups); [agent.isolink] enabled =
+# false leaves it out.
+POPUPS_FEATURE = "popups"
 FILE_FRAMES = frozenset({"file_begin", "file_item", "file_data", "file_end", "file_cancel", "file_result"})
 
 
@@ -183,6 +214,17 @@ def _validate(msg: Message) -> None:
     elif t == "drag":
         if msg.data.get("hide") is not True and not isinstance(msg.data.get("card"), dict):
             raise ProtocolError("drag needs a card, or hide")
+    elif t == "fetch":
+        if not isinstance(msg.data.get("id"), str):
+            raise ProtocolError("fetch.id must be a string")
+    elif t in ("popup_in", "popup_close", "popup_result"):
+        if not isinstance(msg.data.get("chat"), str) or not msg.data["chat"]:
+            raise ProtocolError(f"{t}.chat must be a non-empty string")
+    elif t == "isolink":
+        if msg.data.get("me") is not None and not isinstance(msg.data.get("me"), str):
+            raise ProtocolError("isolink.me must be a string or null")
+        if msg.data.get("dragging") is not None and not isinstance(msg.data.get("dragging"), dict):
+            raise ProtocolError("isolink.dragging must be an object or null")
     elif t in FILE_FRAMES:
         if not isinstance(msg.data.get("id"), str):
             raise ProtocolError(f"{t}.id must be a string")

@@ -169,6 +169,19 @@ def unique(folder: Path, name: str) -> Path:
     raise TransferError(f"too many copies of {name} already")
 
 
+def move_into(staging: Path, tops: list[str], folder: Path) -> list[Path]:
+    """Move ``tops`` from ``staging`` into ``folder``, never overwriting."""
+    folder.mkdir(parents=True, exist_ok=True)
+    saved = []
+    for top in tops:
+        if not (staging / top).exists():
+            continue
+        target = unique(folder, top)
+        shutil.move(str(staging / top), target)
+        saved.append(target)
+    return saved
+
+
 def default_folder() -> Path:
     downloads = Path.home() / "Downloads"
     return downloads if downloads.is_dir() else Path.home()
@@ -187,6 +200,7 @@ class Incoming:
     written: int = 0       # of the current file
     fh: object = None
     tops: list[str] = field(default_factory=list)  # top-level names, in order
+    keep: bool = False     # staging is a native drop's folder: the files stay there
 
 
 class FileReceiver:
@@ -197,6 +211,10 @@ class FileReceiver:
         self.folder = Path(folder) if folder else default_folder()
         self.on_event = on_event
         self.active: dict[str, Incoming] = {}
+        # Transfer id -> the folder to write it into and leave it in (a native
+        # drop's staging folder; see curslink.files.native), instead of the
+        # hidden staging folder whose contents move into ``folder``.
+        self.targets: dict[str, Path] = {}
 
     def handle(self, msg: Message) -> bytes | None:
         tid = msg.get("id")
@@ -229,15 +247,21 @@ class FileReceiver:
         count, total = msg.get("count"), msg.get("total")
         if not isinstance(count, int) or not isinstance(total, int) or count < 1 or count > MAX_FILES or total < 0:
             raise TransferError("bad file_begin")
-        self.folder.mkdir(parents=True, exist_ok=True)
-        free = shutil.disk_usage(self.folder).free
+        keep = tid in self.targets
+        if keep:
+            staging = self.targets[tid]
+            staging.mkdir(parents=True, exist_ok=True)
+        else:
+            self.folder.mkdir(parents=True, exist_ok=True)
+            staging = self.folder / f".curslink-{tid}.partial"
+        free = shutil.disk_usage(staging if keep else self.folder).free
         if total + SPARE_BYTES > free:
             raise TransferError(f"not enough space: {human_size(total)} needed, {human_size(free)} free")
-        staging = self.folder / f".curslink-{tid}.partial"
-        staging.mkdir()
-        _hide(staging)
+        if not keep:
+            staging.mkdir()
+            _hide(staging)
         sender = str(msg.get("from") or "the other computer")[:80]
-        self.active[tid] = Incoming(tid, sender, count, total, staging)
+        self.active[tid] = Incoming(tid, sender, count, total, staging, keep=keep)
         info = {"id": tid, "from": sender, "count": count, "total": total}
         if isinstance(msg.get("card"), dict):
             info["card"] = msg.get("card")
@@ -254,8 +278,8 @@ class FileReceiver:
             inc.tops.append(parts[0])
         target = inc.staging.joinpath(*parts)
         target.parent.mkdir(parents=True, exist_ok=True)
-        if target.exists():
-            raise TransferError(f"{'/'.join(parts)} sent twice")
+        if target.exists() and not (inc.keep and target.is_file() and target.stat().st_size == 0):
+            raise TransferError(f"{'/'.join(parts)} sent twice")  # (a native drop's empty placeholder is fine)
         inc.fh = open(target, "wb")
         inc.index, inc.size, inc.written = i, size, 0
 
@@ -276,18 +300,20 @@ class FileReceiver:
         self._close_current(inc)
         if inc.index != inc.count - 1 or inc.received != inc.total:
             raise TransferError("the transfer ended early")
-        saved = []
-        for top in inc.tops:
-            target = unique(self.folder, top)
-            os.replace(inc.staging / top, target)
-            saved.append(target)
-        shutil.rmtree(inc.staging, ignore_errors=True)
+        if inc.keep:
+            folder = inc.staging
+            saved = [inc.staging / top for top in inc.tops]
+            self.targets.pop(inc.id, None)
+        else:
+            folder = self.folder
+            saved = move_into(inc.staging, inc.tops, self.folder)
+            shutil.rmtree(inc.staging, ignore_errors=True)
         del self.active[inc.id]
-        log.info("saved %d file(s) from %s in %s", inc.count, inc.sender, self.folder)
+        log.info("received %d file(s) from %s into %s", inc.count, inc.sender, folder)
         self.on_event("done", {"id": inc.id, "from": inc.sender, "count": inc.count, "total": inc.total,
-                               "folder": str(self.folder), "saved": [str(p) for p in saved]})
+                               "folder": str(folder), "saved": [str(p) for p in saved]})
         return encode("file_result", id=inc.id, ok=True, saved=[p.name for p in saved][:50],
-                      folder=str(self.folder))
+                      folder=str(folder))
 
     # ------------------------------------------------------------- helpers
     def _close_current(self, inc: Incoming) -> None:
@@ -298,6 +324,7 @@ class FileReceiver:
                 raise TransferError("a file arrived incomplete")
 
     def _fail(self, tid: str, why: str, reply: bool = True) -> bytes | None:
+        self.targets.pop(tid, None)
         inc = self.active.pop(tid, None)
         if inc is not None:
             if inc.fh is not None:

@@ -389,3 +389,15 @@ def test_remembered_positions_ignore_screens_that_are_gone(parts):
     assert router._last_pos == {"desktop": (500.0, 400.0)}
     assert router._screen_pos == {("desktop", "right"): (3000.0, 100.0)}
     router.remember("not a dict")
+
+
+def test_keys_go_through_key_for_including_releases_on_switch(parts):
+    router, _, _, transport, _ = parts
+    router.key_for = lambda device, key: {"cmd": "ctrl"}.get(key, key)
+    router.on_pointer(3839, 500)
+    router.on_key("cmd", True)
+    router.on_key("c", True)
+    router.on_key("c", False)
+    router.go_home("test")
+    keys = [(d["key"], d["pressed"]) for _, t, d in transport.sent if t == "key"]
+    assert keys == [("ctrl", True), ("c", True), ("c", False), ("ctrl", False)]

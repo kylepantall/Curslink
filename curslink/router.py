@@ -73,6 +73,8 @@ class RouterSettings:
     gaze_jump_screens: frozenset[tuple[str, str]] = field(default_factory=frozenset)
     return_hotkey: str = "ctrl+alt+home"     # always brings input back home
     gaze_toggle_hotkey: str = "ctrl+alt+g"   # pause / resume gaze switching
+    # Mac <-> PC: Cmd on one is Ctrl on the other, so shortcuts stay put.
+    swap_cmd_ctrl: bool = True
 
 
 @dataclass(frozen=True)
@@ -108,6 +110,18 @@ class Router:
         # macOS without Accessibility/Input Monitoring nothing is captured,
         # so "switching" would only move the label, not the mouse.
         self.blocked: Callable[[], str] = lambda: ""
+        # The key name to send to a device: lets the app swap Cmd and Ctrl
+        # between a Mac and a PC (see inputs.keys.swap_for).
+        self.key_for: Callable[[str, str], str] = lambda device_id, key: key
+        # File drags leaving another device for this one (curslink.files.handoff):
+        # can_drag_out(device) says whether it can hand its drag over, and
+        # drag_out(device) asks it to, instead of letting go of its left button.
+        self.can_drag_out: Callable[[str], bool] = lambda device_id: False
+        self.drag_out: Callable[[str], None] = lambda device_id: None
+        # carries_drag(from, to): a drag held on device ``from`` can go on on
+        # ``to`` (an Isolink floating chat, see curslink.popups), so gaze may
+        # move input mid-drag.
+        self.carries_drag: Callable[[str, str], bool] = lambda from_device, to_device: False
         self._blocked_said = ""
         # While the Layout page calibrates an edge: left clicks (and Esc,
         # Backspace) on another computer come here instead of going to it.
@@ -277,6 +291,13 @@ class Router:
             self._remote_buttons.discard(button)
         self.transport.send(self.active_device, "button", button=button, pressed=pressed)
 
+    def hold_remote_button(self, button: str) -> None:
+        """The device input is on now pressed ``button`` itself (to carry on a
+        drag that came from elsewhere): let go of it there like a button
+        pressed from here, on the release or when input moves on."""
+        if not self.is_local:
+            self._remote_buttons.add(button)
+
     def on_scroll(self, dx: float, dy: float) -> None:
         if not self.is_local:
             self._moved_at = self.clock()  # so does scrolling: gaze waits
@@ -300,7 +321,7 @@ class Router:
             self._remote_keys.add(key)
         else:
             self._remote_keys.discard(key)
-        self.transport.send(self.active_device, "key", key=key, pressed=pressed)
+        self.transport.send(self.active_device, "key", key=self.key_for(self.active_device, key), pressed=pressed)
 
     # ------------------------------------------------------------------ gaze
     def set_gaze_paused(self, paused: bool) -> None:
@@ -313,8 +334,11 @@ class Router:
     def on_gaze(self, target: Target) -> None:
         if not self.settings.gaze_switching or self.gaze_paused:
             return
-        if self._remote_buttons:
-            return  # never yank the pointer away mid-drag
+        if self._remote_buttons and not (
+                self._remote_buttons == {"left"} and (
+                    (target.device_id == self.local_id and self.can_drag_out(self.active_device))
+                    or self.carries_drag(self.active_device, target.device_id))):
+            return  # never yank the pointer away mid-drag (unless it carries a file home, or a chat)
         if self.clock() - self._moved_at < GAZE_HOLD_S:
             return  # the mouse is moving: it decides (gaze is asked again shortly)
         try:
@@ -388,9 +412,16 @@ class Router:
                 self.overlay.show(effect, exit_x, exit_y)
             elif self.transport.is_connected(old):
                 for key in sorted(self._remote_keys):
-                    self.transport.send(old, "key", key=key, pressed=False)
+                    self.transport.send(old, "key", key=self.key_for(old, key), pressed=False)
+                # A drag leaving that device for this one may be a file: the
+                # device finds out and ends its drag itself, rather than let go
+                # of the button wherever its pointer stopped.
+                dragging_out = new == self.local_id and "left" in self._remote_buttons and self.can_drag_out(old)
                 for button in sorted(self._remote_buttons):
-                    self.transport.send(old, "button", button=button, pressed=False)
+                    if not (dragging_out and button == "left"):
+                        self.transport.send(old, "button", button=button, pressed=False)
+                if dragging_out:
+                    self.drag_out(old)
                 self.transport.send(old, "leave", effect=effect, x=exit_x, y=exit_y)
             self._remote_keys.clear()
             self._remote_buttons.clear()

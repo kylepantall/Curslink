@@ -16,6 +16,7 @@ from curslink import events
 from curslink.config import AgentConfig, HostConfig, PairingConfig
 from curslink.gaze.confirm import FacingDetector, GazeArbiter
 from curslink.gaze.zones import Calibration, GazeClassifier, Target
+from curslink.inputs.keys import swap_cmd_ctrl, swap_for
 from curslink.net.client import AgentClient, AgentSession, NotReady
 from curslink.net.client import Target as ConnectTarget
 from curslink.net.relay import HostRelayLink, RelayTarget, paired_room_id
@@ -268,6 +269,9 @@ async def run_host(cfg: HostConfig) -> None:
         overlay=overlay,
         settings=cfg.router,
     )
+    if cfg.router.swap_cmd_ctrl:
+        router.key_for = cmd_ctrl_swapper(server)
+
     def agent_connected(conn) -> None:
         events.emit("agent", device_id=conn.device_id, name=conn.name, platform=conn.platform,
                     connected=True, screens=conn.screens)
@@ -292,6 +296,7 @@ async def run_host(cfg: HostConfig) -> None:
         relay.start()
         log.info("waiting for agents via relay %s", cfg.relay.address)
     handoff = start_file_drags(cfg, router, server, overlay, capture, loop) if cfg.files else None
+    isolink = start_popups(router, server, capture) if cfg.isolink else None
     bridge = LoopBridge(loop, router, handoff)
     capture.start(bridge)
     reporter = loop.create_task(report_capture(bridge, capture, server, router))
@@ -357,11 +362,23 @@ async def run_host(cfg: HostConfig) -> None:
         reporter.cancel()
         camera.stop()
         capture.stop()
+        if isolink is not None:
+            await isolink.stop()
         overlay.close()
         await pairing.close()
         if relay:
             await relay.close()
         await server.close()
+
+
+def cmd_ctrl_swapper(server: HostServer, local_platform: str = sys.platform):
+    """Swap Cmd and Ctrl for keys going to a computer of the other kind (Mac vs PC)."""
+    def key_for(device_id: str, key: str) -> str:
+        conn = server.connections.get(device_id)
+        if conn is not None and swap_for(local_platform, conn.platform):
+            return swap_cmd_ctrl(key)
+        return key
+    return key_for
 
 
 class HostCamera:
@@ -405,15 +422,25 @@ class HostCamera:
 def start_file_drags(cfg: HostConfig, router: Router, server: HostServer, overlay, capture,
                      loop: asyncio.AbstractEventLoop):
     """Dragging files to another device (see curslink.files.handoff)."""
-    from curslink.files.handoff import DragHandoff
-
     from curslink.files import macdrag
+    from curslink.files.handoff import DragHandoff
 
     # macOS says what's being dragged on its drag pasteboard; elsewhere the
     # overlay helper's drop targets find out.
     drag_source = macdrag.drag_pasteboard if macdrag.available() else None
+    from curslink.files.native import clean_old
+
+    # A real drag of files arriving from an agent needs the real button-up
+    # held back until they're all here, which the Mac's event tap can do.
+    native_press = None
+    if sys.platform == "darwin":
+        from curslink.inputs.pynput_backend import press_left_here as native_press
     handoff = DragHandoff(router, server, overlay.command, capture.inject_drag_end, cfg.name, emit=events.emit,
-                          drag_source=drag_source)
+                          drag_source=drag_source, native_press=native_press,
+                          release_held=getattr(capture, "release_held", lambda: None))
+    if hasattr(capture, "hold_left_up"):
+        capture.hold_left_up = handoff.native.holding
+    clean_old()
     log.info("file drags: %s", "read from the drag pasteboard" if drag_source else "found by drop targets at the edges")
 
     def on_line(line: str) -> None:  # the helper's reader thread
@@ -424,7 +451,30 @@ def start_file_drags(cfg: HostConfig, router: Router, server: HostServer, overla
 
     overlay.on_line = on_line
     server.on_file_result = handoff.on_result
+    server.on_drag_out = handoff.on_drag_out
+    server.on_files = handoff.on_files
     return handoff
+
+
+def start_popups(router: Router, server: HostServer, capture):
+    """Carrying Isolink's floating chats to other devices (see curslink.popups)."""
+    from curslink.isolink import IsolinkLink, default_token_file
+    from curslink.popups import PopupHandoff
+
+    link = IsolinkLink(default_token_file())
+    popups = PopupHandoff(router, server, link, capture.inject_drag_end,
+                          lambda: router.local_sink.button("left", True), emit=events.emit)
+    server.on_isolink = popups.on_isolink
+    server.on_popup_result = popups.on_result
+    disconnected = server.on_disconnect
+
+    def on_disconnect(device_id: str) -> None:
+        popups.on_disconnect(device_id)
+        disconnected(device_id)
+
+    server.on_disconnect = on_disconnect
+    link.start()
+    return link
 
 
 def _ms(values: list[float], q: float) -> float:
@@ -754,8 +804,7 @@ async def run_agent(cfg: AgentConfig) -> None:
         overlay.show if overlay and cfg.animations else (lambda effect, x, y: None),
         smoother=smoother,
     )
-    if cfg.files.enabled and overlay is not None:
-        receive_files(cfg, session, overlay)
+    native = receive_files(cfg, session, overlay) if cfg.files.enabled and overlay is not None else None
     store = PairingStore(cfg.pairing.store)
     client = AgentClient(
         cfg.device_id, cfg.name, cfg.host, cfg.port, None, session,
@@ -763,6 +812,8 @@ async def run_agent(cfg: AgentConfig) -> None:
         udp=cfg.udp,
     )
     session.on_look = lambda data: events.emit("look", **data)
+    if native is not None:
+        send_files_home(cfg, session, client, overlay, native, asyncio.get_running_loop())
     session.on_hint = lambda data: events.emit("hint", **data)
 
     def on_state(state: str, detail: str) -> None:
@@ -776,6 +827,7 @@ async def run_agent(cfg: AgentConfig) -> None:
         events.emit("host", state=state, detail=detail)
 
     client.on_state = on_state
+    isolink = agent_popups(cfg, session, sink, client) if cfg.isolink else None
     camera = start_facing(cfg, client, asyncio.get_running_loop()) if cfg.gaze.enabled else None
     pairing = Pairing(cfg.pairing, DeviceInfo(cfg.device_id, cfg.name, "agent"), store)
     await pairing.start()
@@ -796,53 +848,103 @@ async def run_agent(cfg: AgentConfig) -> None:
             camera.stop()
         if smoother:
             smoother.close()
+        if isolink is not None:
+            await isolink.stop()
         await pairing.close()
         if overlay:
             overlay.close()
 
 
-def receive_files(cfg: AgentConfig, session: AgentSession, overlay) -> None:
+def agent_popups(cfg: AgentConfig, session: AgentSession, sink, client: AgentClient):
+    """Isolink's floating chats the host carries here (see curslink.popups)."""
+    from curslink.isolink import IsolinkLink, default_token_file
+    from curslink.popups import AgentPopups
+
+    link = IsolinkLink(default_token_file())
+
+    def send(t: str, **data) -> None:
+        if "popups" in client.host_features:  # an older host would drop the link on a frame it doesn't know
+            client.send(t, **data)
+
+    def press() -> None:
+        session.buttons.add("left")  # so the host's button-up lets go of it
+        sink.button("left", True)
+
+    popups = AgentPopups(link, send, press)
+    session.popups = popups
+    on_state = client.on_state
+
+    def state(state: str, detail: str) -> None:
+        on_state(state, detail)
+        if state == "connected":
+            popups.report()
+
+    client.on_state = state
+    link.start()
+    return link
+
+
+def receive_files(cfg: AgentConfig, session: AgentSession, overlay):
     """Files dragged here from the host: the placeholder while they're
     carried, then a popup while they arrive (see curslink.files)."""
     import json
 
+    from curslink.files.popups import ReceivePopups
     from curslink.files.transfer import FileReceiver
 
-    toasts: dict[str, dict] = {}
-    shown = {"at": 0.0}
+    from curslink.files.native import NativeDrop, clean_old
+
+    sink = session.sink
+    popups = ReceivePopups(overlay.command, events.emit)
+    receiver = FileReceiver(cfg.files.folder, popups)
+
+    def cancel_drag() -> None:  # Escape ends a drag without dropping; then let go
+        sink.key("esc", True)
+        sink.key("esc", False)
+        time.sleep(0.05)
+        sink.button("left", False)
+
+    # A real drag needs the injected button-down and moves to drive it, which
+    # Windows' drag and drop follows; elsewhere the files go to Downloads.
+    native = NativeDrop(overlay.command, receiver, popups,
+                        press=(lambda: sink.button("left", True)) if sys.platform == "win32" else None,
+                        release=lambda: sink.button("left", False), cancel=cancel_drag)
+    clean_old()
 
     def on_drag(data: dict) -> None:
-        if data.get("hide") or not isinstance(data.get("card"), dict):
-            overlay.command("card hide")
-        else:
-            overlay.command("card " + json.dumps(data["card"], separators=(",", ":")))
-
-    def on_event(kind: str, info: dict) -> None:
-        tid = info.get("id", "")
-        if kind == "start":
-            overlay.command("card hide")
-            toasts[tid] = {**info, "state": "receiving", "received": 0}
-        elif kind == "progress":
-            toast = toasts.get(tid)
-            if toast is None:
-                return
-            toast["received"] = info.get("received", 0)
-            now = time.monotonic()
-            if now - shown["at"] < 0.1:
-                return  # ten updates a second is plenty
-            shown["at"] = now
-        else:
-            toast = toasts.pop(tid, {})
-            toasts_info = {**toast, **info, "state": kind}
-            overlay.command("toast " + json.dumps(toasts_info, separators=(",", ":")))
-            events.emit("file", state=kind, **{k: v for k, v in info.items() if k != "card"})
-            return
-        overlay.command("toast " + json.dumps(toasts[tid], separators=(",", ":")))
-        if kind == "start":
-            events.emit("file", state="receiving", **{k: v for k, v in info.items() if k != "card"})
+        tid, info = data.get("id"), data.get("card")
+        if data.get("drop") and isinstance(tid, str):
+            native.let_go(tid, inject=True)
+        elif data.get("hide"):
+            native.cancel(tid if isinstance(tid, str) else None)
+            if not isinstance(tid, str):
+                overlay.command("card hide")
+        elif isinstance(info, dict) and isinstance(tid, str):
+            native.begin(tid, info)  # its bytes are on their way already
+        elif isinstance(info, dict):  # an older host: sent when it's dropped
+            overlay.command("card " + json.dumps(info, separators=(",", ":")))
 
     session.on_drag = on_drag
-    session.files = FileReceiver(cfg.files.folder, on_event)
+    session.files = receiver
+    return native
+
+
+def send_files_home(cfg: AgentConfig, session: AgentSession, client: AgentClient, overlay, native,
+                    loop: asyncio.AbstractEventLoop) -> None:
+    """A file dragged from here over the edge to the host (or carried there
+    by a look): see curslink.files.dragout."""
+    from curslink.files.dragout import AgentDragOut
+
+    drag_out = AgentDragOut(overlay.command, client.send, client.send_bulk, cfg.name)
+
+    def on_line(line: str) -> None:  # the helper's reader thread
+        try:
+            loop.call_soon_threadsafe(lambda: native.on_helper(line) or drag_out.on_helper(line))
+        except RuntimeError:  # the loop has closed
+            pass
+
+    overlay.on_line = on_line
+    session.drag_out = drag_out
 
 
 class FacingCamera:

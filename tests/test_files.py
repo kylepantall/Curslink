@@ -441,3 +441,340 @@ async def test_mac_gaze_needs_no_nudge(mac_drag, tmp_path):
     await settle()
     assert injected == []
     assert transport.of_type("drag")[0][2]["card"]["name"] == "a.txt"
+
+
+# ------------------------------------------- files the other way, and real drops
+
+from curslink.files.dragout import AgentDragOut  # noqa: E402
+from curslink.files.native import NativeDrop  # noqa: E402
+from curslink.files.popups import ReceivePopups  # noqa: E402
+from curslink.protocol import DROP_FEATURE, FILES_OUT_FEATURE  # noqa: E402
+
+
+class NewAgents(FilesTransport):
+    """Agents on this version: take prefetched drops and hand drags back."""
+
+    def supports(self, device_id, feature):
+        return device_id in self.connected and feature in (FILES_FEATURE, DROP_FEATURE, FILES_OUT_FEATURE)
+
+
+@pytest.fixture
+def new_drag(layout, tmp_path):
+    capture, transport = FakeCapture(), NewAgents({"laptop"})
+    router = Router(layout, "desktop", capture, FakeSink(), transport, FakeOverlay(),
+                    RouterSettings(gaze_switching=True))
+    helper, injected = [], []
+    handoff = DragHandoff(router, transport, helper.append, injected.append, "Desktop")
+    handoff.receiver.folder = tmp_path / "Downloads"
+    handoff.native.folder = tmp_path / "Downloads"
+    handoff.native.root = tmp_path / "drops"
+    return handoff, router, transport, helper, injected
+
+
+def test_router_hands_a_drag_back_instead_of_letting_go(layout):
+    transport = FakeTransport({"laptop"})
+    router = Router(layout, "desktop", FakeCapture(), FakeSink(), transport, FakeOverlay(),
+                    RouterSettings(gaze_switching=True))
+    asked = []
+    router.can_drag_out = lambda device_id: True
+    router.drag_out = asked.append
+    router.on_pointer(3839, 500)
+    router.on_button("left", True)
+    router.go_home("edge")
+    assert asked == ["laptop"]
+    assert not [s for s in transport.of_type("button") if s[2]["pressed"] is False]
+
+
+def test_router_still_lets_go_for_agents_that_cant(layout):
+    transport = FakeTransport({"laptop"})
+    router = Router(layout, "desktop", FakeCapture(), FakeSink(), transport, FakeOverlay())
+    router.on_pointer(3839, 500)
+    router.on_button("left", True)
+    router.go_home("edge")
+    assert transport.of_type("button")[-1][2] == {"button": "left", "pressed": False}
+
+
+async def test_files_start_sending_when_the_drag_crosses(new_drag, tmp_path):
+    handoff, router, transport, helper, injected = new_drag
+    f = tmp_path / "big.bin"
+    f.write_bytes(b"x" * 100)
+    handoff.on_button("left", True)
+    handoff.on_helper("drag " + json.dumps({"paths": [str(f)]}))
+    await settle()
+    router.on_pointer(3839, 500)
+    await settle()
+    (_, _, data), = transport.of_type("drag")
+    tid = data["id"]
+    assert data["card"]["items"] == [{"name": "big.bin", "dir": False}]
+    assert [t for _, t, _ in transport.bulk][0] == "file_begin"   # before any drop
+    assert handoff.on_button("left", False) is True
+    assert transport.of_type("drag")[-1][2] == {"drop": True, "id": tid}
+    await settle()
+    assert [t for _, t, _ in transport.bulk].count("file_begin") == 1  # not sent twice
+    assert injected == ["release"]
+
+
+async def test_carrying_it_home_stops_the_transfer(new_drag, tmp_path):
+    handoff, router, transport, helper, injected = new_drag
+    f = tmp_path / "a.txt"
+    f.write_text("hi")
+    handoff.on_button("left", True)
+    handoff.on_helper("drag " + json.dumps({"paths": [str(f)]}))
+    await settle()
+    router.on_pointer(3839, 500)
+    tid = transport.of_type("drag")[0][2]["id"]
+    router.go_home("hotkey")
+    assert transport.of_type("drag")[-1][2] == {"hide": True, "id": tid}
+    assert handoff.carry_out is None
+
+
+async def test_a_file_dragged_home_from_an_agent(new_drag, tmp_path):
+    handoff, router, transport, helper, injected = new_drag
+    router.on_pointer(3839, 500)
+    router.on_button("left", True)       # Explorer drag starts on the laptop
+    router.go_home("edge")               # ...and comes over the edge
+    assert transport.of_type("drag_out")
+    card = {"name": "photo.jpg", "kind": "JPG image", "size": 3, "count": 1, "ext": "JPG",
+            "items": [{"name": "photo.jpg", "dir": False}]}
+    handoff.on_drag_out("laptop", {"id": "t9", "card": card})
+    assert transport.of_type("fetch")[-1][2] == {"id": "t9"}          # fetched straight away
+    assert any(h.startswith("card ") for h in helper)                  # no real drags here: the card
+    assert handoff.on_button("left", False) is True                    # dropped here
+    send = lambda t, **d: handoff.on_files("laptop", decode(encode(t, **d)))  # noqa: E731
+    send("file_begin", id="t9", count=1, total=3, card=card, **{"from": "Laptop"})
+    send("file_item", id="t9", i=0, path="photo.jpg", size=3)
+    send("file_data", id="t9", i=0, data="YWJj")
+    reply = decode(send("file_end", id="t9"))
+    assert reply.get("ok") is True
+    assert (tmp_path / "Downloads" / "photo.jpg").read_bytes() == b"abc"
+    assert not (tmp_path / "drops" / "t9").exists()
+
+
+async def test_agent_frames_nobody_asked_for_are_ignored(new_drag):
+    handoff, *_ = new_drag
+    assert handoff.on_files("laptop", decode(encode("file_begin", id="zz", count=1, total=1, card={},
+                                                    **{"from": "x"}))) is None
+
+
+async def test_not_a_file_and_carrying_on_cancel(new_drag):
+    handoff, router, transport, helper, injected = new_drag
+    router.on_pointer(3839, 500)
+    router.on_button("left", True)
+    router.go_home("edge")
+    handoff.on_drag_out("laptop", {"none": True})
+    assert handoff.incoming is None and not transport.of_type("fetch")
+    assert handoff.on_button("left", False) is False
+
+
+# ---------------------------------------------------------- the real drop
+
+
+def native(tmp_path, press=True):
+    helper, calls = [], []
+    popups = ReceivePopups(helper.append)
+    receiver = FileReceiver(tmp_path / "Downloads", popups)
+    drop = NativeDrop(helper.append, receiver, popups,
+                      press=(lambda: calls.append("press")) if press else None,
+                      release=lambda: calls.append("release"), cancel=lambda: calls.append("cancel"),
+                      root=tmp_path / "drops")
+    return drop, receiver, helper, calls
+
+
+CARD = {"name": "movie.mp4", "size": 4, "count": 2, "items": [{"name": "movie.mp4", "dir": False},
+                                                              {"name": "pics", "dir": True}]}
+
+
+def feed(receiver, tid, done=True):
+    replies = []
+    for t, d in (("file_begin", dict(id=tid, count=2, total=4, card=CARD, **{"from": "Mac"})),
+                 ("file_item", dict(id=tid, i=0, path="movie.mp4", size=2)),
+                 ("file_data", dict(id=tid, i=0, data="aGk=")),
+                 ("file_item", dict(id=tid, i=1, path="pics/a.png", size=2)),
+                 ("file_data", dict(id=tid, i=1, data="b2s="))) + ((("file_end", dict(id=tid)),) if done else ()):
+        r = receiver.handle(decode(encode(t, **d)))
+        if r:
+            replies.append(decode(r))
+    return replies
+
+
+async def test_a_real_drag_waits_for_the_bytes(tmp_path):
+    drop, receiver, helper, calls = native(tmp_path)
+    drop.begin("d1", CARD)
+    staging = tmp_path / "drops" / "d1"
+    assert (staging / "movie.mp4").is_file() and (staging / "pics").is_dir()   # placeholders
+    line = helper[-1]
+    assert line.startswith("nativedrag ")
+    assert json.loads(line[11:])["paths"] == [str(staging / "movie.mp4"), str(staging / "pics")]
+    assert drop.on_helper("nativedrag-ready d1")
+    await settle()
+    assert calls == ["press"]
+    drop.on_helper("nativedrag-started d1")
+    assert drop.holding()
+    feed(receiver, "d1", done=False)
+    assert not any(h.startswith("toast") for h in helper)   # quiet while carried
+    drop.let_go("d1", inject=False)                          # let go too soon: wait
+    assert any(h.startswith("toast") for h in helper) and "release" not in calls
+    feed_end = receiver.handle(decode(encode("file_end", id="d1")))
+    assert decode(feed_end).get("ok") is True
+    await settle()
+    assert calls[-1] == "release" and not drop.holding()
+    assert (staging / "movie.mp4").read_bytes() == b"hi" and (staging / "pics" / "a.png").read_bytes() == b"ok"
+
+
+async def test_files_that_arrive_first_drop_at_once(tmp_path):
+    drop, receiver, helper, calls = native(tmp_path)
+    drop.begin("d2", CARD)
+    drop.on_helper("nativedrag-ready d2")
+    drop.on_helper("nativedrag-started d2")
+    feed(receiver, "d2")
+    assert not drop.holding()
+    drop.let_go("d2", inject=True)
+    await settle()
+    assert calls == ["press", "release"]
+
+
+async def test_no_real_drag_saves_to_downloads(tmp_path):
+    drop, receiver, helper, calls = native(tmp_path, press=False)
+    drop.begin("d3", CARD)
+    assert helper[-1].startswith("card ")
+    drop.let_go("d3")
+    feed(receiver, "d3")
+    assert (tmp_path / "Downloads" / "movie.mp4").read_bytes() == b"hi"
+    assert (tmp_path / "Downloads" / "pics" / "a.png").exists()
+    assert not (tmp_path / "drops" / "d3").exists()
+
+
+async def test_a_drag_that_never_starts_falls_back(tmp_path, monkeypatch):
+    monkeypatch.setattr("curslink.files.native.START_TIMEOUT_S", 0.05)
+    drop, receiver, helper, calls = native(tmp_path)
+    drop.begin("d4", CARD)
+    await asyncio.sleep(0.1)
+    assert "nativedrag cancel" in helper and helper[-1].startswith("card ")
+    feed(receiver, "d4")
+    drop.let_go("d4")
+    assert (tmp_path / "Downloads" / "movie.mp4").exists()
+
+
+async def test_cancel_ends_the_drag_without_dropping(tmp_path):
+    drop, receiver, helper, calls = native(tmp_path)
+    drop.begin("d5", CARD)
+    drop.on_helper("nativedrag-started d5")
+    drop.cancel()
+    await settle()
+    assert calls[-1] == "cancel" and not (tmp_path / "drops" / "d5").exists()
+
+
+# ------------------------------------------------- the agent handing a drag back
+
+
+async def test_agent_hands_its_drag_to_the_host(tmp_path):
+    f = tmp_path / "notes.txt"
+    f.write_text("hello")
+    helper, sent, bulk, nudges = [], [], [], []
+
+    async def send_bulk(t, **d):
+        bulk.append((t, d))
+
+    out = AgentDragOut(helper.append, lambda t, **d: sent.append((t, d)), send_bulk, "PC",
+                       nudge=nudges.append, explorer=lambda: [])
+    out.start()
+    await asyncio.sleep(0.1)
+    assert helper[0] == "shield on" and nudges == [False]
+    out.on_helper("drag " + json.dumps({"paths": [str(f)]}))
+    await asyncio.sleep(0.5)
+    assert nudges == [False, True]            # then Escape and let go here
+    assert helper[-1] == "shield off"
+    (t, d), = sent
+    assert t == "drag_out" and d["card"]["name"] == "notes.txt"
+    out.fetch({"id": d["id"]})
+    await settle()
+    assert [t for t, _ in bulk][0] == "file_begin" and bulk[-1][0] == "file_end"
+
+
+async def test_agent_falls_back_to_explorers_selection(tmp_path):
+    f = tmp_path / "x.pdf"
+    f.write_text("x")
+    sent = []
+
+    async def nothing(t, **d):
+        pass
+
+    out = AgentDragOut(lambda line: None, lambda t, **d: sent.append((t, d)), nothing, "PC",
+                       nudge=lambda release: None, explorer=lambda: [str(f)])
+    import curslink.files.dragout as dragout
+    old, dragout.PROBE_WAIT_S = dragout.PROBE_WAIT_S, 0.05
+    try:
+        out.start()
+        await asyncio.sleep(0.6)
+    finally:
+        dragout.PROBE_WAIT_S = old
+    assert sent[0][0] == "drag_out" and sent[0][1]["card"]["name"] == "x.pdf"
+
+
+async def test_agent_says_when_its_not_a_file():
+    sent = []
+
+    async def nothing(t, **d):
+        pass
+
+    import curslink.files.dragout as dragout
+    old, dragout.PROBE_WAIT_S = dragout.PROBE_WAIT_S, 0.05
+    try:
+        out = AgentDragOut(lambda line: None, lambda t, **d: sent.append((t, d)), nothing, "PC",
+                           nudge=lambda release: None, explorer=lambda: [])
+        out.start()
+        await asyncio.sleep(0.6)
+    finally:
+        dragout.PROBE_WAIT_S = old
+    assert sent == [("drag_out", {"none": True})]
+
+
+def test_helper_drag_source(capsys):
+    QtWidgets = pytest.importorskip("PySide6.QtWidgets")
+    from curslink.files.overlay import FilesOverlay, card_pixmap
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    assert not card_pixmap(CARD).isNull()
+    files = FilesOverlay(lambda x, y: (x, y))
+    files.handle("nativedrag " + json.dumps({"id": "n1", "paths": ["/tmp/a"], "card": CARD}))
+    assert files.source is not None and files.source.isVisible()
+    assert "nativedrag-ready n1" in capsys.readouterr().out
+    files.handle("nativedrag cancel")
+    assert files.source is None
+    app.processEvents()
+
+
+async def test_end_to_end_agent_to_host_over_tls(tmp_path):
+    host_in = FileReceiver(tmp_path / "host", lambda k, i: None)
+    server = HostServer({"laptop"}, server_context(SECRET), host="127.0.0.1", port=0)
+    server.on_drag_out = lambda device, data: server.send(device, "fetch", id=data["id"]) if data.get("id") else None
+    server.on_files = lambda device, msg: host_in.handle(msg)
+    await server.start()
+    f = tmp_path / "report.docx"
+    f.write_bytes(os.urandom(200_000))
+    session = AgentSession(FakeSink(), lambda e, x, y: None)
+    session.files = FileReceiver(tmp_path / "agent", lambda k, i: None)
+    client = AgentClient("laptop", "Laptop", "127.0.0.1", server.port, client_context(SECRET), session)
+    session.drag_out = AgentDragOut(lambda line: None, client.send, client.send_bulk, "Laptop",
+                                    nudge=lambda release: None, explorer=lambda: [str(f)])
+    import curslink.files.dragout as dragout
+    old, dragout.PROBE_WAIT_S = dragout.PROBE_WAIT_S, 0.05
+    task = asyncio.create_task(client.run_once())
+    try:
+        for _ in range(300):
+            if server.is_connected("laptop"):
+                break
+            await asyncio.sleep(0.01)
+        assert server.supports("laptop", FILES_OUT_FEATURE) and server.supports("laptop", DROP_FEATURE)
+        server.send("laptop", "button", button="left", pressed=True)
+        server.send("laptop", "drag_out")
+        for _ in range(300):
+            if (tmp_path / "host" / "report.docx").exists():
+                break
+            await asyncio.sleep(0.01)
+        assert (tmp_path / "host" / "report.docx").read_bytes() == f.read_bytes()
+        assert ("button", "left", False) not in session.sink.calls   # the agent never dropped it itself
+    finally:
+        dragout.PROBE_WAIT_S = old
+        await server.close()
+        await asyncio.wait_for(task, 3)

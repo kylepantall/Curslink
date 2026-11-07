@@ -121,6 +121,19 @@ class SettingsPage(Page):
         self.switching.body.addLayout(grid)
         self.add(self.switching)
 
+        # -- keyboard (host) ------------------------------------------------------
+        self.keyboard_card = Card("Keyboard", rows=True)
+        self.swap_keys = Toggle("Swap Cmd and Ctrl between Mac and PC")
+        self.swap_keys.clicked.connect(lambda on: self.set_config("host", "swap_cmd_ctrl", on))
+        if sys.platform == "darwin":
+            detail = ("On a Windows or Linux computer, Cmd works as Ctrl and Ctrl works as the Windows key, so "
+                      "Cmd+C copies and Cmd+V pastes the way they do here. Option is Alt.")
+        else:
+            detail = ("On a Mac, Ctrl works as Cmd and the Windows key works as Ctrl, so Ctrl+C copies and "
+                      "Ctrl+V pastes the way they do here. Alt is Option.")
+        self.keyboard_card.add_row(text_block("Swap Cmd and Ctrl between Mac and PC", detail), self.swap_keys)
+        self.add(self.keyboard_card)
+
         # -- per-monitor jumps (host) ---------------------------------------------
         self.jump_card = Card("Jump to the monitor you look at", rows=True)
         self.jump_all_on = button("Turn all on", None, lambda: self.set_all_jumps(True))
@@ -260,12 +273,14 @@ class SettingsPage(Page):
             self.start_linking.setChecked(self.app.prefs.start_linking)
             self.switching.setVisible(role == "host")
             self.jump_card.setVisible(role == "host")
+            self.keyboard_card.setVisible(role == "host")
             if role == "host":
                 self.load_jumps(raw)
             self.agent_card.setVisible(role == "agent")
             host = raw.get("host", {})
             gaze = raw.get("gaze", {})
             effect = host.get("effect", "pop")
+            self.swap_keys.setChecked(bool(host.get("swap_cmd_ctrl", True)))
             for b in self.effect_group.buttons():
                 b.setChecked(b.property("effect") == effect)
             self.camera.set_current(int(gaze.get("camera", 0) or 0), str(gaze.get("camera_name", "") or ""))

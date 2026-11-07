@@ -78,6 +78,8 @@ class HostConfig:
     pairing: PairingConfig = field(default_factory=PairingConfig)
     # Drag files over an edge (or look at a device while dragging) to send them.
     files: bool = True
+    # Carry Isolink's floating chats to other devices ([isolink] enabled; see curslink.popups).
+    isolink: bool = True
 
     @property
     def name(self) -> str:
@@ -110,6 +112,15 @@ class AgentConfig:
     pairing: PairingConfig = field(default_factory=PairingConfig)
     gaze: AgentGazeConfig = field(default_factory=AgentGazeConfig)
     files: AgentFilesConfig = field(default_factory=AgentFilesConfig)
+    # Open and close Isolink's floating chats the host carries here ([agent.isolink] enabled).
+    isolink: bool = True
+
+
+def _enabled(raw: Any, where: str) -> bool:
+    """A table's ``enabled`` (true when missing)."""
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{where} must be a table")
+    return bool(raw.get("enabled", True))
 
 
 def agent_files_config(raw: Any) -> AgentFilesConfig:
@@ -332,6 +343,7 @@ def host_config(raw: dict[str, Any], base_dir: Path = Path(".")) -> HostConfig:
         gaze_jump_screens=jump_screens(raw.get("gaze", {}), layout),
         return_hotkey=host.get("return_hotkey", "ctrl+alt+home"),
         gaze_toggle_hotkey=host.get("gaze_toggle_hotkey", "ctrl+alt+g"),
+        swap_cmd_ctrl=bool(host.get("swap_cmd_ctrl", True)),
     )
     if router.effect not in ("pop", "blink", "none"):
         raise ConfigError("[host].effect must be pop, blink or none")
@@ -370,6 +382,7 @@ def host_config(raw: dict[str, Any], base_dir: Path = Path(".")) -> HostConfig:
         gaze=gaze,
         pairing=pairing_config(raw, base_dir),
         files=bool(raw.get("files", {}).get("enabled", True)) if isinstance(raw.get("files", {}), dict) else True,
+        isolink=_enabled(raw.get("isolink", {}), "[isolink]"),
     )
 
 
@@ -394,6 +407,7 @@ def agent_config(raw: dict[str, Any], base_dir: Path = Path(".")) -> AgentConfig
         pairing=pairing_config(raw, base_dir),
         gaze=agent_gaze_config(agent.get("gaze", {})),
         files=agent_files_config(agent.get("files", {})),
+        isolink=_enabled(agent.get("isolink", {}), "[agent.isolink]"),
     )
     if not cfg.host and not cfg.relay and not cfg.pairing.enabled:
         raise ConfigError("set [agent].host (LAN), a [relay] (internet), or leave [pairing] enabled")

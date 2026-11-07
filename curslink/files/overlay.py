@@ -247,6 +247,8 @@ def toast_lines(info: dict) -> tuple[str, str, float | None]:
     what = (info.get("card") or {}).get("name") if count == 1 else f"{count} files"
     what = what or f"{count} file{'s' if count != 1 else ''}"
     total = int(info.get("total") or 0)
+    if state == "done" and info.get("dropped"):
+        return f"Dropped {what}", human_size(total), 1.0
     if state == "done":
         folder = info.get("folder") or ""
         name = folder.rstrip("/\\").replace("\\", "/").rsplit("/", 1)[-1] or folder
@@ -317,6 +319,74 @@ def make_toast(info: dict):
     return w
 
 
+def card_pixmap(info: dict):
+    """The file card as a drag image."""
+    w = make_card(info)
+    w.born -= 1.0  # fully popped in
+    w.hide()
+    pm = w.grab()
+    w.close()
+    return pm
+
+
+def make_drag_source(tid: str, paths: list[str], info: dict):
+    """A small invisible window that follows the pointer; when the left
+    button goes down on it (pressed for us by the host or agent), it starts
+    a real drag of ``paths`` with the card as the image. Reports
+    ``nativedrag-ready``, ``nativedrag-started`` and ``nativedrag-ended
+    <action>`` on stdout."""
+    from PySide6.QtCore import QMimeData, QPoint, Qt, QTimer, QUrl
+    from PySide6.QtGui import QColor, QCursor, QDrag, QPainter
+    from PySide6.QtWidgets import QWidget
+
+    size = 48
+
+    class Source(QWidget):
+        def __init__(self):
+            super().__init__(None, _flags(click_through=False))
+            _overlay_attrs(self, click_through=False)
+            self.resize(size, size)
+            self.dragging = False
+            self.timer = QTimer(self)
+            self.timer.timeout.connect(self.follow)
+            self.timer.start(8)
+            self.follow()
+
+        def follow(self) -> None:
+            pos = QCursor.pos()
+            self.move(pos.x() - size // 2, pos.y() - size // 2)
+
+        def paintEvent(self, _e) -> None:  # noqa: N802
+            p = QPainter(self)
+            p.fillRect(self.rect(), QColor(0, 0, 0, 2))
+            p.end()
+
+        def mousePressEvent(self, e) -> None:  # noqa: N802
+            if self.dragging or e.button() != Qt.MouseButton.LeftButton:
+                return
+            self.dragging = True
+            self.timer.stop()
+            mime = QMimeData()
+            mime.setUrls([QUrl.fromLocalFile(p) for p in paths])
+            drag = QDrag(self)
+            drag.setMimeData(mime)
+            pm = card_pixmap(info)
+            drag.setPixmap(pm)
+            drag.setHotSpot(QPoint(-14, -14))
+            _say(f"nativedrag-started {tid}")
+            action = drag.exec(Qt.DropAction.CopyAction | Qt.DropAction.MoveAction, Qt.DropAction.CopyAction)
+            name = {Qt.DropAction.CopyAction: "copy", Qt.DropAction.MoveAction: "move",
+                    Qt.DropAction.LinkAction: "link"}.get(action, "none")
+            _say(f"nativedrag-ended {tid} {name}")
+            self.close()
+
+    w = Source()
+    w.show()
+    w.raise_()
+    _say(f"nativedrag-ready {tid}")
+    return w
+
+
 class FilesOverlay:
     """Handles the helper's file commands; keeps its windows alive."""
 
@@ -326,6 +396,7 @@ class FilesOverlay:
         self.shield: list = []
         self.card = None
         self.toast = None
+        self.source = None
 
     def handle(self, line: str) -> bool:
         word, _, rest = line.strip().partition(" ")
@@ -362,6 +433,15 @@ class FilesOverlay:
                 info = _json(rest)
                 if info is not None:
                     self.card = make_card(info)
+        elif word == "nativedrag":
+            if self.source is not None and not self.source.dragging:
+                self.source.close()
+            self.source = None
+            if rest != "cancel":
+                info = _json(rest)
+                if info is not None and isinstance(info.get("paths"), list):
+                    self.source = make_drag_source(str(info.get("id")), [str(p) for p in info["paths"]],
+                                                   info.get("card") or {})
         elif word == "toast":
             info = _json(rest)
             if info is None:
