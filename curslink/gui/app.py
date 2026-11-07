@@ -391,7 +391,9 @@ def main(argv: list[str] | None = None) -> int:
         # The packaged macOS app has its bundle's icon, drawn to Apple's
         # icon shape; Qt's would replace it in the Dock once a window opens.
         qt.setWindowIcon(app_icon())
-    qt.setStyle("Fusion")
+    from curslink.gui import theme as _theme
+
+    _theme.install_style(qt)  # Windows 11 / macOS native controls, else Fusion
     qt.setQuitOnLastWindowClosed(False)
 
     name = instance_name()

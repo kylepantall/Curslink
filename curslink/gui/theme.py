@@ -134,6 +134,7 @@ class Theme:
     platform: str = field(default_factory=platform_key)
     dark: bool = False
     glass: bool = False  # the window has a native backdrop (Mica / vibrancy) behind it
+    native: bool = False  # Qt's own Windows 11 / macOS style draws the standard controls
 
     @property
     def mode(self) -> str:
@@ -223,6 +224,54 @@ def stylesheet(th: Theme) -> str:
         seg_track_border = f"1px solid {t['stroke']}" if plat == "win" else "0"
         seg_thumb = t["ctl"]
         seg_thumb_ink = f"color: {t['accent']};" if plat == "win" else ""
+    # Qt's native styles (windows11, macos) draw buttons, fields, menus,
+    # scroll bars and sliders themselves. Any style-sheet rule with a box
+    # property on those widgets makes Qt fall back to drawing them from the
+    # sheet, so in native mode they get no rules at all.
+    if th.native:
+        generic_buttons = fields = chrome = ""
+    else:
+        generic_buttons = f"""QPushButton {{
+    min-height: {s['btn_h'] - 2}px; padding: 0 14px; border-radius: {s['r_ctl']}px; border: {btn_border};
+    background: {t['ctl']}; color: {t['ink']}; font-weight: {700 if plat == 'linux' else 400};
+}}
+QPushButton:hover {{ border-color: {t['ink3']}; }}
+QPushButton:pressed {{ background: {t['card2']}; }}
+QPushButton:disabled {{ color: {t['ink3']}; }}
+QPushButton:focus {{ outline: none; }}
+"""
+        fields = f"""QLineEdit, QComboBox, QSpinBox {{
+    min-height: {s['field_h'] - 2}px; padding: 0 10px; border: {field_border}; {field_bottom}
+    border-radius: {s['r_ctl']}px; background: {t['ctl']}; color: {t['ink']};
+    selection-background-color: {t['accent']}; selection-color: {t['accent_ink']};
+}}
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus {{ {field_focus} }}
+QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled {{ color: {t['ink3']}; }}
+QComboBox::drop-down {{ border: 0; width: 24px; }}
+QComboBox QAbstractItemView {{
+    background: {t['card']}; color: {t['ink']}; border: 1px solid {t['stroke']}; padding: 4px; outline: 0;
+    selection-background-color: {t['accent_soft']}; selection-color: {t['ink']};
+}}
+"""
+        chrome = f"""QToolTip {{ background: {t['card']}; color: {t['ink']}; border: 1px solid {t['stroke']}; padding: 4px 8px; }}
+QMenu {{ background: {t['card']}; color: {t['ink']}; border: 1px solid {t['stroke']}; padding: 4px; }}
+QMenu::item {{ padding: 6px 18px; border-radius: {s['r_ctl']}px; }}
+QMenu::item:selected {{ background: {t['accent_soft']}; }}
+QMenu::item:disabled {{ color: {t['ink3']}; }}
+QMenu::separator {{ height: 1px; background: {t['stroke']}; margin: 4px 6px; }}
+
+QScrollBar:vertical {{ background: transparent; width: 10px; margin: 2px; }}
+QScrollBar::handle:vertical {{ background: {t['ink3']}; border-radius: 3px; min-height: 30px; margin: 0 2px; }}
+QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; width: 0; }}
+QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
+QScrollBar:horizontal {{ background: transparent; height: 10px; margin: 2px; }}
+QScrollBar::handle:horizontal {{ background: {t['ink3']}; border-radius: 3px; min-width: 30px; margin: 2px 0; }}
+
+QSlider::groove:horizontal {{ height: 4px; background: {t['ctl_stroke'] if plat != 'linux' else t['ctl']}; border-radius: 2px; }}
+QSlider::sub-page:horizontal {{ background: {t['accent']}; border-radius: 2px; }}
+QSlider::handle:horizontal {{ width: 18px; height: 18px; margin: -7px 0; border-radius: 9px;
+    background: {'#FFFFFF' if plat == 'mac' else t['accent']}; border: {('1px solid ' + t['ctl_stroke']) if plat == 'mac' else '0'}; }}
+"""
     return f"""
 * {{ font-size: {s['font_px']}px; }}
 QMainWindow, QWidget#root {{ background: {th.window_bg}; color: {t['ink']}; }}
@@ -259,15 +308,7 @@ QFrame#accentCard {{ background: {t['accent_soft']}; border: 0; border-radius: {
 QFrame#row {{ background: transparent; border: 0; border-top: 1px solid {t['stroke']}; }}
 QFrame#rowFirst {{ background: transparent; border: 0; }}
 
-QPushButton {{
-    min-height: {s['btn_h'] - 2}px; padding: 0 14px; border-radius: {s['r_ctl']}px; border: {btn_border};
-    background: {t['ctl']}; color: {t['ink']}; font-weight: {700 if plat == 'linux' else 400};
-}}
-QPushButton:hover {{ border-color: {t['ink3']}; }}
-QPushButton:pressed {{ background: {t['card2']}; }}
-QPushButton:disabled {{ color: {t['ink3']}; }}
-QPushButton:focus {{ outline: none; }}
-QPushButton#primary {{ background: {t['accent']}; color: {t['accent_ink']}; border: 0; font-weight: 600; }}
+{generic_buttons}QPushButton#primary {{ background: {t['accent']}; color: {t['accent_ink']}; border: 0; font-weight: 600; }}
 QPushButton#primary:disabled {{ background: {t['ctl']}; color: {t['ink3']}; }}
 QPushButton#danger {{ color: {t['bad']}; {'background: ' + t['bad_bg'] + ';' if plat == 'linux' else ''} }}
 QPushButton#choice {{ text-align: left; padding: 14px 16px; border: {'2px solid transparent' if plat == 'linux' else '1px solid ' + t['ctl_stroke']}; border-radius: {s['r_card']}px; }}
@@ -279,39 +320,9 @@ QPushButton#seg:hover {{ border-color: transparent; color: {t['ink']}; }}
 QPushButton#seg:checked {{ background: {seg_thumb}; border: 1px solid {t['ctl_stroke']}; font-weight: 600; {seg_thumb_ink} }}
 QPushButton#link {{ border: 0; background: transparent; color: {t['accent']}; padding: 0; min-height: 0; }}
 
-QLineEdit, QComboBox, QSpinBox {{
-    min-height: {s['field_h'] - 2}px; padding: 0 10px; border: {field_border}; {field_bottom}
-    border-radius: {s['r_ctl']}px; background: {t['ctl']}; color: {t['ink']};
-    selection-background-color: {t['accent']}; selection-color: {t['accent_ink']};
-}}
-QLineEdit:focus, QComboBox:focus, QSpinBox:focus {{ {field_focus} }}
-QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled {{ color: {t['ink3']}; }}
-QComboBox::drop-down {{ border: 0; width: 24px; }}
-QComboBox QAbstractItemView {{
-    background: {t['card']}; color: {t['ink']}; border: 1px solid {t['stroke']}; padding: 4px; outline: 0;
-    selection-background-color: {t['accent_soft']}; selection-color: {t['ink']};
-}}
-QPlainTextEdit {{ background: {t['card2']}; color: {t['ink2']}; border: 1px solid {t['stroke']};
+{fields}QPlainTextEdit {{ background: {t['card2']}; color: {t['ink2']}; border: 1px solid {t['stroke']};
     border-radius: {s['r_ctl']}px; font-family: {MONO}; font-size: 12px; padding: 6px; }}
-QToolTip {{ background: {t['card']}; color: {t['ink']}; border: 1px solid {t['stroke']}; padding: 4px 8px; }}
-QMenu {{ background: {t['card']}; color: {t['ink']}; border: 1px solid {t['stroke']}; padding: 4px; }}
-QMenu::item {{ padding: 6px 18px; border-radius: {s['r_ctl']}px; }}
-QMenu::item:selected {{ background: {t['accent_soft']}; }}
-QMenu::item:disabled {{ color: {t['ink3']}; }}
-QMenu::separator {{ height: 1px; background: {t['stroke']}; margin: 4px 6px; }}
-
-QScrollBar:vertical {{ background: transparent; width: 10px; margin: 2px; }}
-QScrollBar::handle:vertical {{ background: {t['ink3']}; border-radius: 3px; min-height: 30px; margin: 0 2px; }}
-QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; width: 0; }}
-QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
-QScrollBar:horizontal {{ background: transparent; height: 10px; margin: 2px; }}
-QScrollBar::handle:horizontal {{ background: {t['ink3']}; border-radius: 3px; min-width: 30px; margin: 2px 0; }}
-
-QSlider::groove:horizontal {{ height: 4px; background: {t['ctl_stroke'] if plat != 'linux' else t['ctl']}; border-radius: 2px; }}
-QSlider::sub-page:horizontal {{ background: {t['accent']}; border-radius: 2px; }}
-QSlider::handle:horizontal {{ width: 18px; height: 18px; margin: -7px 0; border-radius: 9px;
-    background: {'#FFFFFF' if plat == 'mac' else t['accent']}; border: {('1px solid ' + t['ctl_stroke']) if plat == 'mac' else '0'}; }}
-"""
+{chrome}"""
 
 
 def pill_style(kind: str) -> str:
@@ -357,6 +368,38 @@ def palette(th: Theme) -> QPalette:
     for role in (QPalette.ColorRole.Text, QPalette.ColorRole.WindowText, QPalette.ColorRole.ButtonText):
         p.setColor(QPalette.ColorGroup.Disabled, role, over(t["ink3"], card.name()))
     return p
+
+
+# ------------------------------------------------------------- Qt style
+
+NATIVE_STYLES = {"win": "windows11", "mac": "macos"}
+
+
+def install_style(app) -> str:
+    """Use Qt's own Windows 11 or macOS style where there is one, else Fusion.
+
+    ``CURSLINK_STYLE`` picks a style by name (``fusion`` goes back to the
+    fully custom look). Linux has no native Qt style for GNOME, so it keeps
+    Fusion and the style sheet. Returns the style's name, lower case.
+    """
+    from PySide6.QtWidgets import QStyleFactory
+
+    keys = {k.lower(): k for k in QStyleFactory.keys()}
+    wanted = (os.environ.get("CURSLINK_STYLE") or "").lower()
+    if wanted not in keys:
+        wanted = NATIVE_STYLES.get(platform_key(), "fusion")
+        if wanted not in keys:  # e.g. Windows 10, or a build without the plugin
+            wanted = "fusion"
+    if hasattr(app, "setStyle"):
+        app.setStyle(keys.get(wanted, "Fusion"))
+    log.info("Qt style: %s", wanted)
+    return wanted
+
+
+def native_style_active() -> bool:
+    app = QGuiApplication.instance()
+    style = app.style() if app is not None and hasattr(app, "style") else None
+    return style is not None and style.name().lower() in NATIVE_STYLES.values()
 
 
 # ---------------------------------------------------------------- manager
@@ -408,18 +451,21 @@ class ThemeManager(QObject):
             else:
                 hints.setColorScheme(Qt.ColorScheme.Dark if self.mode == "dark" else Qt.ColorScheme.Light)
         dark = self.system_dark() if self.mode == "system" else self.mode == "dark"
-        _current = Theme(platform_key(), dark, self.glass)
+        native = native_style_active()
+        _current = Theme(platform_key(), dark, self.glass, native)
         app = QGuiApplication.instance()
         if app is not None:
-            app.setPalette(palette(_current))
+            # A native style takes its colours (and the user's accent) from
+            # the system, following the colour scheme set above.
+            app.setPalette(QPalette() if native else palette(_current))
             if hasattr(app, "setStyleSheet"):
                 app.setStyleSheet(stylesheet(_current))
             if _current.platform == "win" and sys.platform == "win32":
                 f = app.font()
                 f.setFamilies(["Segoe UI Variable Text", "Segoe UI"])
                 app.setFont(f)
-        log.info("theme: %s %s%s (setting: %s)", _current.platform, _current.mode, " with glass" if self.glass else "",
-                 self.mode)
+        log.info("theme: %s %s%s%s (setting: %s)", _current.platform, _current.mode,
+                 " with glass" if self.glass else "", ", native controls" if native else "", self.mode)
         self.changed.emit()
 
 

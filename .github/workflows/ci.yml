@@ -25,3 +25,23 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
       - run: python -m curslink check -c examples/curslink.toml
+
+  # Pictures of the app in Qt's native styles (Windows 11, macOS), kept as
+  # an artifact so a restyle can be checked without each machine to hand.
+  screenshots:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install -e ".[gui]"
+      - run: python packaging/screenshots.py screenshots --print
+      - uses: actions/upload-artifact@v4
+        with:
+          name: screenshots-${{ matrix.os }}
+          path: screenshots/
