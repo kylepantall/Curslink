@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ctypes
 import logging
+import os
 import sys
 import threading
 import time
@@ -240,14 +241,14 @@ class PynputCapture:
             return event
         if self._pass_injected and _mac_injected(event):
             return event
-        if event_type in _MAC_OTHER_BUTTONS and self._handler is not None and not _mac_injected(event):
+        if event_type in _MAC_OTHER_BUTTONS and self._handler is not None and not _mac_ours(event):
             # pynput calls every button past left and right "middle"; the
             # button number says which (back and forward are 3 and 4).
             name = _MAC_BUTTON_NUMBERS.get(_mac_field(event, _MAC_BUTTON_NUMBER))
             if name:
                 self._handler.on_button(name, event_type == _MAC_OTHER_DOWN)
             return None
-        if event_type == _MAC_SCROLL and self._handler is not None and not _mac_injected(event):
+        if event_type == _MAC_SCROLL and self._handler is not None and not _mac_ours(event):
             # pynput reports whole lines only, so a smooth wheel, a Magic
             # Mouse or a trackpad mostly scrolled 0: send the fractional lines.
             dx, dy = _mac_scroll(event)
@@ -437,6 +438,17 @@ def _mac_injected(event) -> bool:
     import Quartz
 
     return Quartz.CGEventGetIntegerValueField(event, _MAC_SOURCE_PID) != 0
+
+
+def _mac_ours(event) -> bool:
+    """Did Curslink itself post this event? Scroll and extra-button events
+    from a mouse often come through another app that re-posts them (Logi
+    Options+, Mos, Mac Mouse Fix, LinearMouse...), so they carry that app's
+    process id rather than none: they're still the user's, and go to the
+    other computer like the trackpad's."""
+    import Quartz
+
+    return Quartz.CGEventGetIntegerValueField(event, _MAC_SOURCE_PID) == os.getpid()
 
 
 def _mac_attach_cursor(attached: bool) -> None:
