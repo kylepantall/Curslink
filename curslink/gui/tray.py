@@ -31,7 +31,7 @@ class Tray(QSystemTrayIcon):
         menu.addAction(self.heading)
         menu.addAction(self.detail)
         menu.addSeparator()
-        self.gaze = menu.addAction(_title("Pause gaze switching"), self.toggle_gaze)
+        self.gaze = menu.addAction(_title("Turn gaze off"), self.toggle_gaze)
         self.gaze.setShortcut(QKeySequence("Ctrl+Alt+G"))
         self.home = menu.addAction(_title("Bring input home"), lambda: app.service.send("home"))
         self.home.setShortcut(QKeySequence("Ctrl+Alt+Home"))
@@ -102,7 +102,7 @@ class Tray(QSystemTrayIcon):
             self.heading.setText(f"Curslink: linking as {role}")
             if role == "host":
                 where = names.get(status.active, status.active)
-                gaze = "gaze paused" if status.gaze_paused else ("gaze on" if status.gaze else "gaze off")
+                gaze = "gaze off" if status.gaze_paused else ("gaze on" if status.gaze else "gaze off")
                 self.detail.setText(f"Input is on {where} · {gaze}")
             else:
                 self.detail.setText("Connected to the host" if status.host_state == "connected"
@@ -119,7 +119,7 @@ class Tray(QSystemTrayIcon):
         is_host_running = state == RUNNING and role == "host"
         self.gaze.setVisible(role == "host")
         self.gaze.setEnabled(is_host_running and status.gaze)
-        self.gaze.setText(_title("Resume gaze switching" if status.gaze_paused else "Pause gaze switching"))
+        self.gaze.setText(_title("Turn gaze on" if status.gaze_paused else "Turn gaze off"))
         self.home.setVisible(role == "host")
         self.home.setEnabled(is_host_running and status.active != status.device_id)
         self.run.setText(_title("Stop linking" if app.linking else "Start linking"))

@@ -59,3 +59,15 @@ def test_resume_does_nothing_while_still_paused_or_calibrating():
         assert started == [] and camera.tracker is None
 
     asyncio.run(go())
+
+
+def test_gaze_off_is_remembered_across_restarts(tmp_path):
+    from curslink.app import gaze_off_saved, save_gaze_off
+
+    flag = tmp_path / "state" / "gaze-off"
+    assert not gaze_off_saved(flag)
+    save_gaze_off(True, flag)
+    assert gaze_off_saved(flag)
+    save_gaze_off(False, flag)
+    save_gaze_off(False, flag)  # already on: fine
+    assert not gaze_off_saved(flag)

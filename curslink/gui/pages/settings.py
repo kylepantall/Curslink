@@ -289,7 +289,7 @@ class SettingsPage(Page):
             self.dwell.setValue(int(gaze.get("dwell_ms", 250)))
             self.dwell_label.setText(f"Look for {self.dwell.value()} ms before switching")
             self.hotkeys.setText(f"Bring input home: {host.get('return_hotkey', 'ctrl+alt+home')}\n"
-                                 f"Pause gaze: {host.get('gaze_toggle_hotkey', 'ctrl+alt+g')}")
+                                 f"Gaze on/off: {host.get('gaze_toggle_hotkey', 'ctrl+alt+g')}")
             self.animations.setChecked(bool(raw.get("agent", {}).get("animations", True)))
             agent_gaze = raw.get("agent", {}).get("gaze", {})
             agent_gaze = agent_gaze if isinstance(agent_gaze, dict) else {}

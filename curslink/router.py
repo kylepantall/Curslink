@@ -305,7 +305,7 @@ class Router:
         if paused == self.gaze_paused:
             return
         self.gaze_paused = paused
-        log.info("gaze switching %s", "paused" if paused else "resumed")
+        log.info("gaze switching %s", "off" if paused else "on")
         self.on_gaze_paused(paused)
 
     def on_gaze(self, target: Target) -> None:

@@ -305,7 +305,9 @@ async def run_host(cfg: HostConfig) -> None:
     # or both, so the arbiter runs even when this camera is off.
     arbiter = make_arbiter(cfg, router)
     wire_agent_cameras(server, arbiter)
-    tracker = start_gaze(cfg, arbiter, loop) if cfg.gaze.enabled else None
+    # Gaze turned off stays off when the host restarts (every settings change).
+    router.gaze_paused = gaze_off_saved()
+    tracker = start_gaze(cfg, arbiter, loop) if cfg.gaze.enabled and not router.gaze_paused else None
 
     log.info(
         "Curslink host running as %r. Return hotkey: %s, gaze toggle: %s",
@@ -317,12 +319,13 @@ async def run_host(cfg: HostConfig) -> None:
     events.emit(
         "running", role="host", device_id=cfg.device_id, name=cfg.name,
         active=router.active_device, screen=router.screen.id,
-        gaze=tracker is not None, gaze_paused=router.gaze_paused,
+        gaze=tracker is not None or (cfg.gaze.enabled and router.gaze_paused), gaze_paused=router.gaze_paused,
     )
     camera = HostCamera(tracker, lambda: start_gaze(cfg, arbiter, loop) if cfg.gaze.enabled else None,
                         lambda: arbiter.set_camera(cfg.device_id, False), loop)
 
     def gaze_paused(paused: bool) -> None:
+        save_gaze_off(paused)
         events.emit("gaze", paused=paused)
         loop.create_task(camera.pause() if paused else camera.resume(router))
 
@@ -395,7 +398,7 @@ class HostCamera:
                 return
             await self._loop.run_in_executor(None, running.stop)
             self._released()
-            log.info("camera released (%s)", "calibrating" if for_good else "gaze paused")
+            log.info("camera released (%s)", "calibrating" if for_good else "gaze off")
 
     async def resume(self, router: Router) -> None:
         async with self._lock:
@@ -725,6 +728,29 @@ def positions_path():
     from curslink.pairing.store import default_dir
 
     return default_dir() / "pointer-positions.json"
+
+
+def gaze_off_path():
+    from curslink.pairing.store import default_dir
+
+    return default_dir() / "gaze-off"
+
+
+def gaze_off_saved(path=None) -> bool:
+    """Was gaze turned off (the toggle, tray or hotkey) when the host last ran?"""
+    return (path or gaze_off_path()).exists()
+
+
+def save_gaze_off(off: bool, path=None) -> None:
+    path = path or gaze_off_path()
+    try:
+        if off:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("gaze switching was turned off\n")
+        else:
+            path.unlink(missing_ok=True)
+    except OSError:
+        log.debug("couldn't save whether gaze is off", exc_info=True)
 
 
 def remember_positions(router: Router, path=None) -> None:
