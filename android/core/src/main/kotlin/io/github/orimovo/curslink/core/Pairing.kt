@@ -32,7 +32,7 @@ object Pairing {
             "3995497CEA956AE515D2261898FA051015728E5A8AACAA68FFFFFFFFFFFFFFFF",
         16,
     )
-    private val G = BigInteger.TWO
+    private val G = BigInteger.valueOf(2)
     private val Q = P.subtract(BigInteger.ONE).shiftRight(1)
 
     private class KeyPair(val x: BigInteger, val pub: ByteArray)

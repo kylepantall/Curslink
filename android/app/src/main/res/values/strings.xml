@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Curslink</string>
+    <string name="input_service_label">Curslink mouse and keyboard</string>
+    <string name="input_service_description">Lets the mouse and keyboard of your computer control this phone when you move the pointer over to it. Curslink draws its own pointer, turns clicks, drags and scrolls into touches, and types into the text field you\'re in. It reads what\'s under the pointer only to show the right pointer shape, and nothing leaves the phone.</string>
+</resources>
