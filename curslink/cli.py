@@ -547,6 +547,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if wants_gui(argv):
         argv = ["gui"]
+    elif argv[:1] == ["--minimized"]:
+        # Start-at-sign-in entries written by 0.4.13 and earlier.
+        argv = ["gui", *argv]
     args = build_parser().parse_args(argv)
     args.argv = argv
     from curslink import diagnostics

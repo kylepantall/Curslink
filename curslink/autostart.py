@@ -33,10 +33,13 @@ def launch_command(minimized: bool = True) -> list[str]:
     if getattr(sys, "frozen", False):
         exe = Path(sys.executable)
         if sys.platform == "win32":
-            # The windowed build has no console window to flash up at sign-in.
-            gui = exe.with_name("Curslink.exe")
-            if gui.exists() and gui.name.lower() != exe.name.lower():
-                return [str(gui), *(["--minimized"] if minimized else [])]
+            # The windowed build (curslinkw.exe) has no console window to
+            # flash up at sign-in. Windows names are case-insensitive, so this
+            # used to look for "Curslink.exe", find the console curslink.exe,
+            # and flash a console that exited with a usage error.
+            gui = exe.with_name("curslinkw.exe")
+            if gui.exists():
+                exe = gui
         return [str(exe), *args]
     python = Path(sys.executable)
     if sys.platform == "win32":

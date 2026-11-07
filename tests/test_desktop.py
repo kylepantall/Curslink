@@ -460,3 +460,24 @@ def test_mac_input_coming_home_lands_on_the_edge_it_crossed(monkeypatch):
     del calls[:]
     capture._mac_mouse_tap(5, object())
     assert ("warp", 756, 491) not in calls  # not dragged back to the park point
+
+
+def test_sign_in_on_windows_opens_the_windowed_build(monkeypatch, tmp_path):
+    # Windows names are case-insensitive: the console curslink.exe must not
+    # be mistaken for the app, or a console flashes up at sign-in.
+    (tmp_path / "curslink.exe").write_text("")
+    (tmp_path / "curslinkw.exe").write_text("")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "platform", "win32")
+    for running in ("curslink.exe", "curslinkw.exe"):
+        monkeypatch.setattr(sys, "executable", str(tmp_path / running))
+        assert autostart.launch_command() == [str(tmp_path / "curslinkw.exe"), "gui", "--minimized"]
+
+
+def test_old_sign_in_entries_still_open_the_app(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(cli, "wants_gui", lambda argv: False)
+    import curslink.gui.app as gui_app
+    monkeypatch.setattr(gui_app, "main", lambda argv: seen.setdefault("argv", argv) and 0)
+    cli.main(["--minimized"])
+    assert "--minimized" in seen["argv"]
