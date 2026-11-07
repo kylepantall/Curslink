@@ -142,6 +142,39 @@ class Router:
     def available(self, device_id: str) -> bool:
         return device_id == self.local_id or self.transport.is_connected(device_id)
 
+    # Where the pointer was, kept across restarts (the app restarts the host
+    # whenever a setting changes), so gaze brings it back there rather than
+    # to the middle of the screen.
+    def remembered(self) -> dict:
+        self._screen_pos[(self.screen.device_id, self.screen.id)] = (self.x, self.y)
+        self._last_pos[self.active_device] = (self.x, self.y)
+        return {
+            "devices": {d: [round(x, 1), round(y, 1)] for d, (x, y) in self._last_pos.items()},
+            "screens": {f"{d}\t{s}": [round(x, 1), round(y, 1)] for (d, s), (x, y) in self._screen_pos.items()},
+        }
+
+    def remember(self, data: dict) -> None:
+        """Take back what :meth:`remembered` gave, for screens still in the layout."""
+        def point(v):
+            ok = isinstance(v, list) and len(v) == 2 and all(isinstance(n, (int, float)) for n in v)
+            return (float(v[0]), float(v[1])) if ok else None
+
+        devices = data.get("devices") if isinstance(data, dict) else None
+        for device, v in (devices or {}).items():
+            p = point(v)
+            if p is not None and self.layout.screen_at(*p, device) is not None:
+                self._last_pos[device] = p
+        screens = data.get("screens") if isinstance(data, dict) else None
+        for key, v in (screens or {}).items():
+            device, _, screen_id = str(key).partition("\t")
+            p = point(v)
+            try:
+                screen = self.layout.screen(device, screen_id)
+            except KeyError:
+                continue
+            if p is not None and screen.contains(*p):
+                self._screen_pos[(device, screen_id)] = p
+
     def jumps_to(self, screen: Screen) -> bool:
         """Does looking at ``screen`` put the pointer on it (not just its device)?"""
         return self.settings.gaze_within_device or (screen.device_id, screen.id) in self.settings.gaze_jump_screens

@@ -357,3 +357,35 @@ def test_the_animation_plays_where_the_pointer_leaves_and_where_it_lands(parts):
     leave = transport.of_type("leave")[-1][2]
     assert leave["x"] <= 2 and leave["effect"] == "pop"
     assert overlay.shown[-1][1] > 3700          # and home shows where it came in
+
+
+def test_where_the_pointer_was_survives_a_restart(parts, layout, tmp_path):
+    """The app restarts the host on every settings change; gaze still brings
+    the pointer back where it was, not to the middle of the screen."""
+    from curslink.app import remember_positions
+
+    router, _, sink, transport, overlay = parts
+    path = tmp_path / "pointer-positions.json"
+    remember_positions(router, path)
+    router.settings.gaze_jump_screens = frozenset({("desktop", "right")})
+    router.on_pointer(3000, 100)                # on the right monitor
+    router.on_gaze(Target("laptop", "main"))    # saved as it switches
+    assert path.exists()
+
+    again = Router(layout, "desktop", FakeCapture(), FakeSink(), transport, FakeOverlay(),
+                   RouterSettings(gaze_switching=True, gaze_jump_screens=frozenset({("desktop", "right")})))
+    ticks = iter(range(1000, 10**6))
+    again.clock = lambda: float(next(ticks))
+    remember_positions(again, path)
+    again.on_gaze(Target("laptop", "main"))
+    again.on_gaze(Target("desktop", "right"))
+    assert again.local_sink.calls[-1] == ("move", 3000, 100)
+
+
+def test_remembered_positions_ignore_screens_that_are_gone(parts):
+    router, *_ = parts
+    router.remember({"devices": {"desktop": [500, 400], "ghost": [1, 1], "laptop": "x"},
+                     "screens": {"desktop\tright": [3000, 100], "desktop\tleft": [5000, 5000], "nope": [1, 2]}})
+    assert router._last_pos == {"desktop": (500.0, 400.0)}
+    assert router._screen_pos == {("desktop", "right"): (3000.0, 100.0)}
+    router.remember("not a dict")
