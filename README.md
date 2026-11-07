@@ -25,7 +25,9 @@ next computer, with a quick "pop" or "blink" so you always see where it went.
 * **Pair with a code.** Devices find each other on your network. Type a
   6-digit code once and they're linked, with their own encryption key.
 * **Works across the internet too**, through a small relay you host yourself.
-* **Windows, macOS and Linux.** Android is on the roadmap.
+* **Windows, macOS and Linux, and Android phones.** Push the pointer off
+  the edge you picked for your phone and it wakes up, even locked, with
+  your mouse and keyboard on it.
 * **Keeps itself up to date**, with every download checked before it installs.
 
 > Curslink is young (0.x). It works day to day, but expect rough edges, and
@@ -199,6 +201,18 @@ session for now.
   and injection; a uinput backend is planned.
 * **Windows**: input can't be injected into apps running as administrator
   unless the agent runs elevated too.
+* **Android** (8 or later; `curslink-X.Y.Z-android.apk` from the release):
+  install it, turn on *Curslink mouse and keyboard* in Settings →
+  Accessibility, and allow it to run in the background. Then pair: on the
+  computer, open **Devices → Pair a phone** and scan the code with the app
+  (or pick the phone under Nearby and type the code on the phone). Choose
+  which edge of your screens leads to it next to it under *Paired*.
+  Android has no way for an app to move a real mouse pointer, so Curslink
+  draws its own and turns clicks, drags and scrolls into touches;
+  right-click is Back, middle-click is Home, Esc is Back. Typing goes
+  straight into the text field on Android 13 and later (basic typing
+  before that). A PIN or fingerprint lock still asks to be unlocked when
+  the phone wakes; you can click the PIN in with the mouse.
 
 ## Security
 

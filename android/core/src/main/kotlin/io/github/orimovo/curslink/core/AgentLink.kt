@@ -127,6 +127,8 @@ class AgentLink(
     private val discover: (HostPairing) -> List<Pair<String, Int>> = { emptyList() },
     private val onState: (LinkState, String) -> Unit = { _, _ -> },
     private val log: (String) -> Unit = {},
+    /** How often the host should check we're there (hello.ping_s): seldom, to save battery. */
+    private val pingSeconds: Double = 5.0,
 ) {
     val session = AgentSession(handler)
     @Volatile private var running = false
@@ -221,7 +223,7 @@ class AgentLink(
         if (!running) { s.close(); return }
         session.newConnection()
         try {
-            s.soTimeout = 10_000
+            s.soTimeout = (pingSeconds * 4 * 1000).toInt().coerceAtLeast(10_000)
             val tls = Tls.connect(s.getInputStream(), s.getOutputStream(), p.myId, p.key)
             val io = FrameIO(tls.input, tls.output)
             val me = hello()
@@ -234,6 +236,7 @@ class AgentLink(
                 "screens" to me.screens,
                 "features" to features,
                 "auth" to Tls.helloAuth(p.key, tls.binding, p.myId),
+                "ping_s" to pingSeconds,
             ))
             val welcome = io.read() ?: throw ProtocolException("the host closed the connection")
             if (welcome.t != "welcome") throw ProtocolException("host did not welcome us")

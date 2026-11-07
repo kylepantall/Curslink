@@ -92,3 +92,13 @@ def test_agent_ignores_release_without_press():
     session.handle(Message("key", {"key": "ctrl_l", "pressed": False}))
     assert sink.calls == []
     assert session.handle(Message("ping", {"n": 3})) == encode("pong", n=3)
+
+
+def test_an_agent_can_ask_for_slower_pings():
+    from curslink.net.server import _ping_interval
+
+    assert _ping_interval(None) == 0.5
+    assert _ping_interval(5) == 5.0
+    assert _ping_interval(0.01) == 0.5
+    assert _ping_interval(3600) == 15.0
+    assert _ping_interval(True) == 0.5
