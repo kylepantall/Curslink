@@ -586,6 +586,13 @@ def make_arbiter(cfg: HostConfig, router: Router) -> GazeArbiter:
 
     if classifier is not None:
         def on_switch(event: SwitchEvent) -> None:
+            if event.reason in ("edge", "hotkey"):
+                # You moved it by hand: gaze keeps what it sees and only acts
+                # when you look somewhere else. Forcing it to the new screen
+                # made it "see" you look back at the screen you're still
+                # facing 250 ms later, and the pointer ping-ponged across
+                # the edge (Kyle's 0.4.16 logs: edge, gaze, edge, gaze...).
+                return
             classifier.force(Target(event.to_device, event.screen.id))
 
         router.listeners.append(on_switch)

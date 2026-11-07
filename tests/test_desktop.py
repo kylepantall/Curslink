@@ -520,3 +520,37 @@ def test_hint_frames_validate():
     assert decode(encode("hint", screens=[])).t == "hint"
     with pytest.raises(ProtocolError):
         decode(json.dumps({"t": "hint", "screens": "main"}).encode() + b"\n")
+
+
+def test_mac_back_forward_and_smooth_scroll_reach_the_other_computer(monkeypatch):
+    import curslink.inputs.pynput_backend as pb
+
+    monkeypatch.setattr(pb, "_mac_attach_cursor", lambda attached: None)
+    monkeypatch.setattr(pb, "_mac_warp", lambda x, y: None)
+    monkeypatch.setattr(pb, "_mac_cursor_visible", lambda visible: None)
+    monkeypatch.setattr(pb, "_mac_injected", lambda event: False)
+    monkeypatch.setattr(pb, "_mac_field", lambda event, field: event["button"])
+    monkeypatch.setattr(pb, "_mac_scroll", lambda event: event["scroll"])
+    got = []
+
+    class Handler:
+        def on_button(self, name, pressed):
+            got.append(("button", name, pressed))
+
+        def on_scroll(self, dx, dy):
+            got.append(("scroll", dx, dy))
+
+    capture = pb.PynputCapture(park_at=(756, 491))
+    capture._mac = True
+    capture._handler = Handler()
+    capture.set_grab(True)
+    capture._on_click(0, 0, type("B", (), {"name": "middle"})(), True)  # pynput's "middle" for any of them
+    assert got == []
+    assert capture._mac_mouse_tap(pb._MAC_OTHER_DOWN, {"button": 3}) is None
+    assert capture._mac_mouse_tap(pb._MAC_OTHER_UP, {"button": 3}) is None
+    capture._mac_mouse_tap(pb._MAC_OTHER_DOWN, {"button": 4})
+    capture._mac_mouse_tap(pb._MAC_OTHER_DOWN, {"button": 2})
+    capture._on_scroll(0, 0, 0, 0)                                    # pynput's whole lines: ignored
+    capture._mac_mouse_tap(pb._MAC_SCROLL, {"scroll": (0.0, 0.25)})  # a smooth wheel's quarter line
+    assert got == [("button", "x1", True), ("button", "x1", False), ("button", "x2", True),
+                   ("button", "middle", True), ("scroll", 0.0, 0.25)]

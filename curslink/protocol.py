@@ -8,7 +8,8 @@ future Android agent (Kotlin) can speak it without any Python code.
 Host -> agent
     welcome      {device_id, features}  features: optional list, e.g. ["facing"]
     enter        {x, y, effect}        agent now owns the pointer; warp to x, y
-    leave        {}                    host took control back
+    leave        {effect, x, y}        host took control back; x, y (optional):
+                                       where the pointer left, for the animation
     move         {x, y, ts}            absolute position in the agent's OS coords;
                                        ts (optional): when the host captured it,
                                        host monotonic ms (see curslink.smoothing)
