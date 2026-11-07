@@ -489,3 +489,61 @@ def test_overlap_shows_on_the_real_monitor_while_editing(desktop, qapp):
     assert hint.showing
     hint.show({"hide": True})
     assert not hint.showing
+
+
+def test_no_widget_opens_as_a_stray_window(desktop, qapp):
+    # A widget shown before it has a parent opens as a window of its own:
+    # on Windows that flashed up and vanished, on macOS it left rows piled up.
+    from PySide6.QtCore import QEvent, QObject
+    from PySide6.QtWidgets import QWidget
+
+    shown = []
+
+    class Watch(QObject):
+        def eventFilter(self, obj, event):  # noqa: N802
+            if event.type() == QEvent.Type.Show and isinstance(obj, QWidget) and obj.isWindow():
+                shown.append(type(obj).__name__)
+            return False
+
+    watch = Watch()
+    qapp.installEventFilter(watch)
+    try:
+        from curslink.gui.widgets import Card, label, text_block
+
+        card = Card("Rows", rows=True)
+        card.add_row(text_block("Title", "Detail"), label("x"))
+        plain = Card("Plain")
+        plain.body.addWidget(text_block("Title", "Detail"))
+        w = desktop.window
+        w.pages["setup"].create()
+        for page in ("status", "devices", "layout", "calibrate", "settings"):
+            w.show_page(page)
+            qapp.processEvents()
+        assert shown == []
+    finally:
+        qapp.removeEventFilter(watch)
+
+
+def test_layout_page_fits_the_window_with_an_overlap(desktop, qapp, monkeypatch):
+    # The page wanted ~800 px (four wide number fields beside the Edges card,
+    # and an "in front of" line that didn't wrap), so on a normal Mac window
+    # it ran off the right edge.
+    from curslink.gui import theme
+
+    monkeypatch.setenv("CURSLINK_LOOK", "mac")
+    theme.manager().set_mode("dark")
+    page, home, laptop = _host_with_laptop(desktop)
+    hx, hy, hw, hh = home.layout_rect()
+    page.scene.clearSelection()
+    laptop.setSelected(True)
+    page.spins["x"].setValue(hx + hw - 200)
+    page.spins["y"].setValue(hy + hh - 200)
+    page.overlap_toggle.setChecked(True)
+    page.bring_to_front(laptop)
+    page.overlaps_changed()
+    page.refresh_edges()
+    qapp.processEvents()
+    wanted = page.widget().minimumSizeHint().width()
+    theme.manager().set_mode("system")
+    # Kyle's Mac window leaves about 640 px for the page.
+    assert wanted <= 640

@@ -267,12 +267,16 @@ class Card(QFrame):
         # The rows' holder sits first in the body. Hidden until it has a row:
         # empty and visible, it still took the body's spacing, which left a
         # gap above the content of every card without rows.
-        self._holder = QWidget()
-        self._holder.setVisible(rows)
+        # Parent it before touching its visibility: showing a widget with
+        # no parent opens it as a window of its own (a flash on screen), and
+        # one shown that way kept its rows piled on top of each other on
+        # macOS until the window was resized (0.4.16 and 0.4.17).
+        self._holder = QWidget(self)
         self.rows = QVBoxLayout(self._holder)
         self.rows.setContentsMargins(0, 0, 0, 0)
         self.rows.setSpacing(0)
         outer.addWidget(self._holder)
+        self._holder.setVisible(rows)
 
     def add_row(self, *widgets: QWidget, stretch_first: bool = True) -> QFrame:
         """A row with a line above it (for list-style cards)."""
@@ -330,8 +334,10 @@ def text_block(title: str, detail: str) -> QWidget:
     t = label(title)
     v.addWidget(t)
     d = label(detail, "small", wrap=True)
-    d.setVisible(bool(detail))
     v.addWidget(d)
+    # Only after it has a parent: shown without one, a label opens as a
+    # window of its own, which flashed up on Windows each time a row was built.
+    d.setVisible(bool(detail))
     w.title_label = t  # type: ignore[attr-defined]
     w.detail_label = d  # type: ignore[attr-defined]
     return w

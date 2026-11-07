@@ -302,6 +302,9 @@ class LayoutPage(Page):
             spin = QSpinBox()
             spin.setRange(-100000 if key in "xy" else 100, 100000)
             spin.setAccessibleName(text)
+            # Sized for its range (-100000) it wanted 110 px each, which with
+            # the Edges card beside it made the page wider than the window.
+            spin.setMinimumWidth(64)
             spin.valueChanged.connect(lambda v, k=key: self.spin_changed(k, v))
             self.spins[key] = spin
             fields.addWidget(label(text, "small"), 0, i)
@@ -669,13 +672,13 @@ class LayoutPage(Page):
             ad, ascreen = a.split("/", 1)
             bd, bscreen = b.split("/", 1)
             self.edges_box.addWidget(label(f"{names.get(ad, ad)} / {ascreen}  {edge} edge  →  "
-                                           f"{names.get(bd, bd)} / {bscreen}"))
+                                           f"{names.get(bd, bd)} / {bscreen}", wrap=True))
         if self.allow_overlap:
             for behind, front, _shared in self.overlap_pairs():
                 if behind.device_id != front.device_id:
                     seen.add((front.key, behind.key))
                     self.edges_box.addWidget(label(f"{front.device_name} / {front.screen['id']}  in front of  "
-                                                   f"{behind.device_name} / {behind.screen['id']}"))
+                                                   f"{behind.device_name} / {behind.screen['id']}", wrap=True))
         if not seen:
             w = label("No screens of different devices touch, so the pointer can't cross by the edges. "
                       "Move a screen next to another device's.", "warn", wrap=True)
