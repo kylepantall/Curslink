@@ -308,7 +308,8 @@ QFrame#accentCard {{ background: {t['accent_soft']}; border: 0; border-radius: {
 QFrame#row {{ background: transparent; border: 0; border-top: 1px solid {t['stroke']}; }}
 QFrame#rowFirst {{ background: transparent; border: 0; }}
 
-{generic_buttons}QPushButton#primary {{ background: {t['accent']}; color: {t['accent_ink']}; border: 0; font-weight: 600; }}
+{generic_buttons}QPushButton#primary {{ min-height: {s['btn_h'] - 2}px; padding: 0 14px; border-radius: {s['r_ctl']}px;
+    background: {t['accent']}; color: {t['accent_ink']}; border: 0; font-weight: 600; }}
 QPushButton#primary:disabled {{ background: {t['ctl']}; color: {t['ink3']}; }}
 QPushButton#danger {{ color: {t['bad']}; {'background: ' + t['bad_bg'] + ';' if plat == 'linux' else ''} }}
 QPushButton#choice {{ text-align: left; padding: 14px 16px; border: {'2px solid transparent' if plat == 'linux' else '1px solid ' + t['ctl_stroke']}; border-radius: {s['r_card']}px; }}
