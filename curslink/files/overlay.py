@@ -19,6 +19,7 @@ from does nothing with it.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 
@@ -62,7 +63,8 @@ def _overlay_attrs(w, click_through: bool) -> None:
 def local_paths(mime) -> list[str]:
     if mime is None or not mime.hasUrls():
         return []
-    return [u.toLocalFile() for u in mime.urls() if u.isLocalFile() and u.toLocalFile()]
+    # Qt writes Windows paths with forward slashes; hand on the OS's own form.
+    return [os.path.normpath(u.toLocalFile()) for u in mime.urls() if u.isLocalFile() and u.toLocalFile()]
 
 
 def make_catcher(rect):
