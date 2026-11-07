@@ -23,6 +23,10 @@ log = logging.getLogger(__name__)
 
 # With a relay configured too, give up on the LAN address this quickly.
 LAN_ATTEMPT_TIMEOUT_S = 2.0
+# Without a relay to fall back to, still give up on an address that doesn't
+# answer well before the OS does (about 21 s on Windows): the next attempt
+# looks the host up again and may pick an address that works.
+LAN_ONLY_TIMEOUT_S = 6.0
 # Resend our camera's facing state this often, so the host can tell a
 # fresh report from a stale one.
 FACING_REFRESH_S = 1.0
@@ -238,13 +242,15 @@ class AgentClient:
             try:
                 streams = await asyncio.wait_for(
                     asyncio.open_connection(self.host, self.port, ssl=self.ssl_context, limit=STREAM_LIMIT),
-                    LAN_ATTEMPT_TIMEOUT_S if self.relay else None,
+                    LAN_ATTEMPT_TIMEOUT_S if self.relay else LAN_ONLY_TIMEOUT_S,
                 )
                 self.via = f"{self.host}:{self.port}"
                 self._direct = True
                 return streams
             except (OSError, asyncio.TimeoutError) as exc:
                 if self.relay is None:
+                    if isinstance(exc, asyncio.TimeoutError):
+                        raise OSError(f"{self.host}:{self.port} didn't answer in {LAN_ONLY_TIMEOUT_S:.0f}s") from exc
                     raise
                 log.debug("host not reachable on the LAN (%s); trying the relay", exc)
         assert self.relay is not None
