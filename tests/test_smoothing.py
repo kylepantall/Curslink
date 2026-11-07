@@ -121,3 +121,41 @@ def test_host_logs_where_pointer_time_goes():
     line = capture_report(bridge, capture, server, "pc", 10.0)
     assert "500 mouse reports" in line and "50/s" in line and "round trip" in line
     assert bridge.stats.reports == 0 and capture.tap_times == [] and conn.rtts == []
+
+
+def _drive(s, clock, start, seconds, late_of):
+    """Reports every 8 ms for `seconds`, each arriving late_of(i) late."""
+    events, arrival = [], 0.0
+    n = int(seconds / 0.008)
+    for i in range(n):
+        ts = start + i * 0.008
+        arrival = max(arrival, ts + late_of(i))  # in order, like TCP: a late one holds up the rest
+        events.append((arrival, ts, i))
+    t, k, delays = start, 0, []
+    while t < start + seconds:
+        clock.t = 100.0 + t
+        while k < len(events) and events[k][0] <= t:
+            a, ts, i = events[k]
+            s.add(i, 0, (100.0 + ts) * 1000)
+            k += 1
+        s.step()
+        delays.append(s.delay_s)
+        t += 0.004
+    return delays
+
+
+def test_delay_adapts_to_the_link_and_never_jumps():
+    """A clean link, then three seconds of bad Wi-Fi (every 10th report 80 ms
+    late), then clean again: the delay grows to cover the bad spell and
+    shrinks back after it, a little at a time rather than in jumps."""
+    s, clock, moves = make()
+    s.reset(0, 0)
+    clean = _drive(s, clock, 0.0, 2.0, lambda i: 0.001)
+    assert clean[-1] < 0.015
+    bad = _drive(s, clock, 2.0, 3.0, lambda i: 0.08 if i % 10 == 0 else 0.001)
+    assert 0.07 <= bad[-1] <= MAX_DELAY_S
+    after = _drive(s, clock, 5.0, 6.0, lambda i: 0.001)
+    assert after[-1] < 0.02
+    delays = clean + bad + after
+    steps = [abs(b - a) for a, b in zip(delays, delays[1:])]
+    assert max(steps) <= 0.4 * 0.004 + 1e-9   # at most 1.6 ms per 4 ms tick

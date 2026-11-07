@@ -196,10 +196,13 @@ Real links aren't that even: Wi-Fi in particular holds packets for tens of
 milliseconds and then delivers them together. The agent therefore plays
 moves back on the host's timeline (`curslink/smoothing.py`), a few
 milliseconds behind it, and moves the pointer between reports at 250 Hz.
-How far behind adapts: the 99th percentile of how late reports have
-arrived over the last two seconds, plus one gap between reports (needed to
-have the next point to move towards), capped at 60 ms. On a clean link
-with a fast mouse that's about 2 ms. Clicks, scrolls and keys don't wait;
+How far behind adapts to the link as it goes: the target is the 98th
+percentile of how late reports have arrived over the last three seconds,
+plus one gap between reports (needed to have the next point to move
+towards), capped at 120 ms. On a clean link with a fast mouse that's about
+2 ms. The delay glides towards its target rather than jumping, since a
+jump in the delay is a jump or freeze of the pointer: playback runs
+slightly slow while it builds slack and slightly fast while it catches up. Clicks, scrolls and keys don't wait;
 the pointer snaps to the newest position first, so they land where the
 host saw them.
 
