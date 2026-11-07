@@ -59,7 +59,7 @@ class FacingSettings:
     # Pitch is noisier than yaw on most webcams; weight it down a little.
     pitch_weight: float = 0.8
     # How long the new state must hold before it is reported.
-    dwell_s: float = 0.15
+    dwell_s: float = 0.1
     # No face for this long = not facing.
     lost_after_s: float = 0.4
 
@@ -275,9 +275,9 @@ class GazeArbiter:
         targets = self.classifier.targets if self.classifier is not None else []
         calibrated = [t for t in targets if t.device_id == device_id]
         if calibrated:
-            return calibrated[0]
+            return Target(device_id, calibrated[0].screen_id, guess=True)
         screens = self._screens_of(device_id)
-        return Target(device_id, screens[0]) if screens else None
+        return Target(device_id, screens[0], guess=True) if screens else None
 
     def _do_switch(self, target: Target | None) -> None:
         if target is None:

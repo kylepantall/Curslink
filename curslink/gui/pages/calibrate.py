@@ -191,6 +191,7 @@ class CalibratePage(Page):
             cfg.save()
         self.step = 0
         self.results = {}
+        self.retry = None
         self.state = "warming"
         self.show_state()
 
@@ -273,6 +274,14 @@ class CalibratePage(Page):
     def recorded(self, name: str, centre) -> None:
         if self.state != "recording":  # cancelled meanwhile
             return
+        if centre is None:
+            # The camera barely saw the face (usually a screen far off to the
+            # side): stay on this screen so it can be tried again, rather than
+            # quietly marking it skipped.
+            self.state = "ready"
+            self.retry = name
+            self.show_state()
+            return
         self.results[name] = centre
         self.next_step()
 
@@ -282,6 +291,7 @@ class CalibratePage(Page):
             self.next_step()
 
     def next_step(self) -> None:
+        self.retry = None
         self.step += 1
         if self.step < len(self.targets):
             self.state = "ready"
@@ -502,8 +512,14 @@ class CalibratePage(Page):
             name = self.targets[self.step][1]
             self.step_title.setText(f"STEP {self.step + 1} OF {n}")
             self.prompt.setText(f"Look at {name}")
-            self.prompt_detail.setText("Keep looking for a moment…" if s == "recording"
-                                       else "Then press Record (or Space on the Look here card).")
+            if s == "recording":
+                detail = "Keep looking for a moment…"
+            elif getattr(self, "retry", None) == name:
+                detail = ("The camera couldn't see your face while you looked there. Turn your head a little "
+                          "less (move your eyes the rest of the way) and press Record again, or Skip it.")
+            else:
+                detail = "Then press Record (or Space on the Look here card)."
+            self.prompt_detail.setText(detail)
             self.primary.setText("Recording…" if s == "recording" else "Record")
         elif s == "done":
             art = "calibrated"

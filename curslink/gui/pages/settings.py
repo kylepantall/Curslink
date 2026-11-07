@@ -121,6 +121,19 @@ class SettingsPage(Page):
         self.switching.body.addLayout(grid)
         self.add(self.switching)
 
+        # -- per-monitor jumps (host) ---------------------------------------------
+        self.jump_card = Card("Jump to the monitor you look at", rows=True)
+        self.jump_all_on = button("Turn all on", None, lambda: self.set_all_jumps(True))
+        self.jump_all_off = button("Turn all off", None, lambda: self.set_all_jumps(False))
+        self.jump_card.add_row(
+            text_block("Monitors", "On: looking at that monitor puts the pointer on it, even one of the "
+                       "computer you're already using. Off: looking at it only picks its computer, and the "
+                       "pointer comes back where you left it there."),
+            self.jump_all_on, self.jump_all_off)
+        self.jump_toggles: dict[str, Toggle] = {}
+        self.jump_rows = []
+        self.add(self.jump_card)
+
         # -- agent ----------------------------------------------------------------
         self.agent_card = Card("Switching", rows=True)
         self.animations = Toggle("Play the switch animation here")
@@ -233,6 +246,9 @@ class SettingsPage(Page):
             self.minimized.setChecked(self.app.prefs.start_minimized)
             self.start_linking.setChecked(self.app.prefs.start_linking)
             self.switching.setVisible(role == "host")
+            self.jump_card.setVisible(role == "host")
+            if role == "host":
+                self.load_jumps(raw)
             self.agent_card.setVisible(role == "agent")
             host = raw.get("host", {})
             gaze = raw.get("gaze", {})
@@ -242,7 +258,7 @@ class SettingsPage(Page):
             self.camera.set_current(int(gaze.get("camera", 0) or 0), str(gaze.get("camera_name", "") or ""))
             self.theme_choice.set_value(self.app.prefs.theme)
             self.glass.setChecked(self.app.prefs.glass)
-            self.dwell.setValue(int(gaze.get("dwell_ms", 350)))
+            self.dwell.setValue(int(gaze.get("dwell_ms", 250)))
             self.dwell_label.setText(f"Look for {self.dwell.value()} ms before switching")
             self.hotkeys.setText(f"Bring input home: {host.get('return_hotkey', 'ctrl+alt+home')}\n"
                                  f"Pause gaze: {host.get('gaze_toggle_hotkey', 'ctrl+alt+g')}")
@@ -260,6 +276,65 @@ class SettingsPage(Page):
             self.config_text.setText(str(self.app.config_path))
         finally:
             self._loading = False
+
+    # -- per-monitor jumps -------------------------------------------------------
+    @staticmethod
+    def monitors(raw: dict) -> list[tuple[str, str]]:
+        """Every monitor in the layout: ``("device/screen", "Name / screen · WxH")``."""
+        out = []
+        for d in raw.get("devices", []):
+            name = d.get("name", d.get("id"))
+            for i, sc in enumerate(d.get("screens", [])):
+                sid = str(sc.get("id", f"screen{i}"))
+                size = f" · {sc.get('width')}×{sc.get('height')}" if "width" in sc and "height" in sc else ""
+                out.append((f"{d.get('id')}/{sid}", f"{name} / {sid}{size}"))
+        return out
+
+    @staticmethod
+    def jumps_on(raw: dict) -> set[str]:
+        gaze = raw.get("gaze", {})
+        everything = {key for key, _ in SettingsPage.monitors(raw)}
+        if gaze.get("within_device", False):
+            return everything  # the older all-or-nothing switch
+        listed = gaze.get("jump_screens", [])
+        return {k for k in listed if isinstance(k, str)} & everything if isinstance(listed, list) else set()
+
+    def load_jumps(self, raw: dict) -> None:
+        monitors = self.monitors(raw)
+        on = self.jumps_on(raw)
+        if [k for k, _ in monitors] != list(self.jump_toggles):
+            for row in self.jump_rows:
+                row.setParent(None)
+                row.deleteLater()
+            self.jump_rows, self.jump_toggles = [], {}
+            for key, text in monitors:
+                toggle = Toggle(f"Jump to {text}")
+                toggle.clicked.connect(lambda checked, k=key: self.set_jump(k, checked))
+                self.jump_toggles[key] = toggle
+                self.jump_rows.append(self.jump_card.add_row(label(text), toggle))
+        for key, toggle in self.jump_toggles.items():
+            toggle.setChecked(key in on)
+        self.jump_all_on.setEnabled(len(on) < len(monitors))
+        self.jump_all_off.setEnabled(bool(on))
+
+    def set_jump(self, key: str, on: bool) -> None:
+        cfg = self.app.config()
+        keys = self.jumps_on(cfg.raw())
+        (keys.add if on else keys.discard)(key)
+        self.save_jumps(keys)
+
+    def set_all_jumps(self, on: bool) -> None:
+        self.save_jumps({k for k, _ in self.monitors(self.app.config().raw())} if on else set())
+
+    def save_jumps(self, keys: set[str]) -> None:
+        if self._loading:
+            return
+        cfg = self.app.config()
+        order = [k for k, _ in self.monitors(cfg.raw())]
+        cfg.set("gaze", "jump_screens", [k for k in order if k in keys])
+        cfg.remove("gaze", "within_device")  # jump_screens says it all now
+        cfg.save()
+        self.app.config_saved()
 
     # -- saving -----------------------------------------------------------------
     def set_pref(self, key: str, value) -> None:

@@ -827,6 +827,10 @@ async def resolve_host(cfg: AgentConfig, store: PairingStore) -> ConnectTarget:
     raise NotReady(f"looking for {peer.name} on the LAN...")
 
 
+MIN_SAMPLES = 5    # fewer than this and a screen's centre isn't trusted
+GOOD_SAMPLES = 15  # stop waiting once this many are in
+
+
 class Calibrator:
     """Records head angles while the user looks at each screen in turn.
 
@@ -869,17 +873,29 @@ class Calibrator:
             log.warning("calibration: no face within %.0fs", timeout)
         return self.latest is not None
 
-    def record(self, target: Target, seconds: float = 1.5, settle: float = 0.2) -> tuple[float, float] | None:
+    def record(self, target: Target, seconds: float = 1.5, settle: float = 0.2,
+               patience: float = 3.0) -> tuple[float, float] | None:
         """Sample for ``seconds`` while the user looks at ``target``; returns
-        its (yaw, pitch) centre, or None if too few samples came in."""
+        its (yaw, pitch) centre, or None if too few samples came in.
+
+        A screen well off to the side (another computer beside this one) has
+        the head turned far enough that the camera only sees the face now and
+        then, so if too few samples are in after ``seconds`` it keeps going
+        for up to ``patience`` more before giving up."""
         start = time.monotonic()
         with self._lock:
             self._samples.clear()
         time.sleep(seconds)
-        with self._lock:
-            samples = [(y, p) for t, y, p in self._samples if t >= start + settle]
-        if len(samples) < 5:
-            log.warning("calibration: only %d samples for %s, skipped", len(samples), target)
+        deadline = start + seconds + patience
+        while True:
+            with self._lock:
+                samples = [(y, p) for t, y, p in self._samples if t >= start + settle]
+            if len(samples) >= GOOD_SAMPLES or time.monotonic() >= deadline:
+                break
+            time.sleep(0.1)
+        if len(samples) < MIN_SAMPLES:
+            log.warning("calibration: only %d samples for %s in %.1fs, not recorded", len(samples), target,
+                        time.monotonic() - start)
             return None
         for yaw, pitch in samples:
             self.calibration.add(target, yaw, pitch)

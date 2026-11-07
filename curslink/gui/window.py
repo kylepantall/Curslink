@@ -10,6 +10,7 @@ shows just the app's name and version.
 from __future__ import annotations
 
 import logging
+import sys
 
 from PySide6.QtCore import QEvent, QRectF, QSize, Qt, QTimer
 from PySide6.QtGui import QCloseEvent, QColor, QPainter, QPixmap
@@ -357,7 +358,13 @@ class MainWindow(QMainWindow):
         super().showEvent(event)
         native.set_dock_icon(True)
         if self._glass_wanted and not self.glass:
-            QTimer.singleShot(0, self._apply_glass)
+            if sys.platform == "win32":
+                # Qt sends this before the window reaches the screen, so Mica
+                # and the title bar colour are in place for the first frame
+                # (applied later, the window flashed black and light first).
+                self._apply_glass()
+            else:
+                QTimer.singleShot(0, self._apply_glass)
         else:
             native.set_dark_title_bar(self, theme.current().dark)
 
