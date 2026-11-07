@@ -622,3 +622,36 @@ def test_clicking_a_screen_doesnt_move_it(desktop, qapp):
     laptop.mouseReleaseEvent(event(QEvent.Type.GraphicsSceneMouseRelease, QPoint(101, 100)))
     assert laptop.layout_rect() == before  # no snapping, no jump
     assert page.in_front(laptop, home)  # the click brought it forward
+
+
+def test_dragged_screen_stays_where_it_is_let_go(desktop, qapp):
+    from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+    from PySide6.QtWidgets import QGraphicsSceneMouseEvent
+
+    from curslink.gui.pages.layout import SCALE
+
+    page, home, laptop = _host_with_laptop(desktop)
+    page.overlap_toggle.setChecked(True)
+    hx, hy, hw, hh = home.layout_rect()
+    page.view.resize(1000, 420)  # about the size it is in the window
+    page.view.fit()
+    zoom = page.view.transform().m11()
+    near = max(1, int(2 / (zoom * SCALE)))  # 2 on-screen px from the monitor's right edge
+    laptop.dragging = lambda: True  # as while the mouse holds it
+    laptop.setPos((hx + hw + near) * SCALE, (hy + 333) * SCALE)
+    assert laptop.layout_rect()[0] == hx + hw  # snapped live, while dragging
+    # 12 on-screen px from the edge: too far to snap while dragging (but the
+    # old snap on release, 80 layout px, would have pulled it over)
+    away = int(12 / (zoom * SCALE))
+    assert 0 < away < 80, away
+    laptop.setPos((hx + hw - away) * SCALE, (hy + 333) * SCALE)
+    shown = laptop.layout_rect()
+    laptop.dragging = lambda: False
+
+    e = QGraphicsSceneMouseEvent(QEvent.Type.GraphicsSceneMouseRelease)
+    e.setButton(Qt.MouseButton.LeftButton)
+    e.setScreenPos(QPoint(300, 100))
+    e.setButtonDownScreenPos(Qt.MouseButton.LeftButton, QPoint(100, 100))
+    e.setScenePos(QPointF(laptop.scenePos()))
+    laptop.mouseReleaseEvent(e)
+    assert laptop.layout_rect() == shown  # no jump on release

@@ -34,6 +34,7 @@ from curslink.gui import theme
 from curslink.gui.widgets import Card, Page, Toggle, button, label
 
 SCALE = 0.1  # scene units per layout pixel
+SNAP_VIEW_PX = 8  # a dragged screen snaps to edges this close, in on-screen pixels
 
 
 def overlap_of(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> tuple[int, int, int, int] | None:
@@ -159,6 +160,8 @@ class ScreenItem(QGraphicsRectItem):
             painter.restore()
 
     def itemChange(self, change, value):  # noqa: N802
+        if change == QGraphicsItem.GraphicsItemChange.ItemPositionChange and self.dragging():
+            return self.snapped(value)
         if change == QGraphicsItem.GraphicsItemChange.ItemSelectedHasChanged:
             self.refresh()
             self.page.selection_changed()
@@ -167,6 +170,27 @@ class ScreenItem(QGraphicsRectItem):
                 self.page.set_dirty(True)
             self.page.overlaps_changed(dragging=self)
         return super().itemChange(change, value)
+
+    def dragging(self) -> bool:
+        scene = self.scene()
+        return scene is not None and scene.mouseGrabberItem() is self
+
+    def snapped(self, pos: QPointF) -> QPointF:
+        """Snap to nearby screens' edges *while* dragging, so the screen
+        stays exactly where you let go. Within a few pixels on screen,
+        whatever the zoom; hold Alt (Option) to place it freely."""
+        if QApplication.keyboardModifiers() & Qt.KeyboardModifier.AltModifier:
+            return pos
+        views = self.scene().views()
+        zoom = views[0].transform().m11() if views else 1.0
+        distance = max(1, round(SNAP_VIEW_PX / max(zoom * SCALE, 1e-6)))
+        w, h = int(self.screen["width"]), int(self.screen["height"])
+        x, y = round(pos.x() / SCALE), round(pos.y() / SCALE)
+        others = [i.layout_rect() for i in self.page.items if i is not self]
+        sx, sy = snap((x, y, w, h), others, distance)
+        if (sx, sy) == (x, y):
+            return pos
+        return QPointF(sx * SCALE if sx != x else pos.x(), sy * SCALE if sy != y else pos.y())
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         self._press = (self.pos(), self.page.dirty, self.zValue())
@@ -194,10 +218,11 @@ class ScreenItem(QGraphicsRectItem):
                 self.page.overlaps_changed()
             return
         others = [i.layout_rect() for i in self.page.items if i is not self]
-        x, y = snap(self.layout_rect(), others)
-        if not self.page.allow_overlap:
-            x, y = push_apart((x, y, *self.layout_rect()[2:]), others)
-        self.setPos(x * SCALE, y * SCALE)
+        # Snapping already happened during the drag; it stays where you let go.
+        # Only an overlap that isn't allowed is undone (it showed red).
+        if not self.page.allow_overlap and any(overlap_of(self.layout_rect(), o) for o in others):
+            x, y = push_apart(self.layout_rect(), others)
+            self.setPos(x * SCALE, y * SCALE)
         if self.page.allow_overlap and any(overlap_of(self.layout_rect(), o) for o in others):
             self.page.bring_to_front(self)  # the screen you drop goes in front
         self.page.moved(self)
@@ -340,7 +365,8 @@ class LayoutPage(Page):
         self.inspector.body.addLayout(fields)
         self.reported = button("Use the size it reports", None, self.use_reported)
         self.inspector.body.addWidget(self.reported)
-        self.inspector.body.addWidget(label("Drag screens on the canvas; they snap to each other's edges.", "small",
+        self.inspector.body.addWidget(label("Drag screens on the canvas; they snap to each other's edges "
+                                            "(hold Alt or Option to place freely).", "small",
                                             wrap=True))
         grid.addWidget(self.inspector, 3)
 
