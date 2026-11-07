@@ -557,3 +557,40 @@ def test_layout_page_fits_the_window_with_an_overlap(desktop, qapp, monkeypatch)
         assert page.bottom_row.direction() == page.bottom_row.Direction.TopToBottom
     finally:
         theme.manager().set_mode("system")
+
+
+def test_clicking_a_screen_doesnt_move_it(desktop, qapp):
+    from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+    from PySide6.QtWidgets import QGraphicsSceneMouseEvent
+
+    page, home, laptop = _host_with_laptop(desktop)
+    hx, hy, hw, hh = home.layout_rect()
+    page.overlap_toggle.setChecked(True)
+    page.scene.clearSelection()
+    laptop.setSelected(True)
+    # near another screen's edge, where a drop would snap to it, and over the monitor's corner
+    page.spins["x"].setValue(hx + hw - 237)
+    page.spins["y"].setValue(hy + hh - 113)
+    page.save()
+    page.load()
+    laptop = next(i for i in page.items if i.device_id == "laptop")
+    home = next(i for i in page.items if i.device_id != "laptop")
+    home.setZValue(5)  # the monitor is in front for now
+    before = laptop.layout_rect()
+
+    def event(kind, screen_pos):
+        e = QGraphicsSceneMouseEvent(kind)
+        e.setButton(Qt.MouseButton.LeftButton)
+        e.setButtons(Qt.MouseButton.LeftButton if kind == QEvent.Type.GraphicsSceneMousePress
+                     else Qt.MouseButton.NoButton)
+        e.setScreenPos(screen_pos)
+        e.setButtonDownScreenPos(Qt.MouseButton.LeftButton, QPoint(100, 100))
+        e.setScenePos(QPointF(laptop.scenePos()))
+        e.setButtonDownScenePos(Qt.MouseButton.LeftButton, QPointF(laptop.scenePos()))
+        return e
+
+    laptop.mousePressEvent(event(QEvent.Type.GraphicsSceneMousePress, QPoint(100, 100)))
+    laptop.setPos(laptop.pos() + QPointF(0.3, 0.2))  # a hand shakes a pixel
+    laptop.mouseReleaseEvent(event(QEvent.Type.GraphicsSceneMouseRelease, QPoint(101, 100)))
+    assert laptop.layout_rect() == before  # no snapping, no jump
+    assert page.in_front(laptop, home)  # the click brought it forward
