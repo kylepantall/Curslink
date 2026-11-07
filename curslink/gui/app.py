@@ -254,7 +254,14 @@ class Curslink(QObject):
             return False
         # macOS reports where the menu bar item is; some Linux trays report
         # nothing even though the icon is there, so only trust it on macOS.
-        return sys.platform != "darwin" or not tray.geometry().isEmpty()
+        # macOS 26 reports a placed item with no height (e.g. 38 x 0), which
+        # isEmpty() counts as empty: that kept the Dock icon after closing the
+        # window and reopened the window when starting hidden. An item that
+        # was never placed has no size at all.
+        if sys.platform != "darwin":
+            return True
+        g = tray.geometry()
+        return g.width() > 0 or g.height() > 0
 
     def check_tray_placed(self) -> None:
         if self.window is not None and not self.window.isVisible() and not self.tray_placed():

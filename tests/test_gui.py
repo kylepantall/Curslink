@@ -331,3 +331,20 @@ def test_switch_animation_never_takes_focus_or_clicks(qapp):
     assert w.testAttribute(Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow)  # else hidden on the Mac
     assert not w.isActiveWindow()
     w.close()
+
+
+def test_menu_bar_item_with_no_height_counts_as_placed(desktop, monkeypatch):
+    # macOS 26 reports the placed menu bar item as 38 x 0; closing the
+    # window must still hide Curslink to the menu bar.
+    import sys
+
+    from PySide6.QtCore import QRect
+
+    tray = desktop.tray
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(tray, "available", lambda: True)
+    monkeypatch.setattr(tray, "isVisible", lambda: True)
+    monkeypatch.setattr(tray, "geometry", lambda: QRect(0, 982, 38, 0))
+    assert desktop.tray_placed()
+    monkeypatch.setattr(tray, "geometry", lambda: QRect())
+    assert not desktop.tray_placed()
