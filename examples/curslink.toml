@@ -32,6 +32,8 @@ return_hotkey = "ctrl+alt+home"
 gaze_toggle_hotkey = "ctrl+alt+g"
 
 lan = true                   # accept agents on the LAN; false = relay only
+udp = true                   # send pointer moves by UDP to agents that take them
+                             # (same port number as above; falls back to TCP)
 
 # --- Over the internet ----------------------------------------------------
 # Meet through your own `curslink relay` server (same values on the host and
@@ -126,6 +128,8 @@ name = "Work laptop"
 # host_id = "desktop"        # only if this agent is paired with several hosts
 port = 24850
 animations = true
+udp = true                   # take pointer moves by UDP when the host is reached
+                             # directly (never through a relay)
 # Remap modifiers when the host and agent use different OSes, e.g. a
 # Windows keyboard driving a Mac:
 # modifier_map = { ctrl_l = "cmd", ctrl_r = "cmd_r" }

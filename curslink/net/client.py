@@ -13,7 +13,9 @@ from typing import Awaitable, Callable
 from curslink.inputs.base import InputSink
 from curslink.net.framing import STREAM_LIMIT, read_message
 from curslink.net.relay import RelayError, RelayTarget, agent_connect
-from curslink.protocol import AGENT_FEATURES, FILES_FEATURE, PROTOCOL_VERSION, Message, ProtocolError, encode
+from curslink.net.udp import AgentUdp
+from curslink.protocol import (AGENT_FEATURES, FILES_FEATURE, PROTOCOL_VERSION, UDP_FEATURE, Message, ProtocolError,
+                               encode)
 from curslink.security import channel_binding, hello_auth
 from curslink.tally import Tally
 
@@ -51,6 +53,27 @@ class AgentSession:
         self.active = False
         self.keys: set[str] = set()
         self.buttons: set[str] = set()
+        # The newest move's ts (either channel): UDP can deliver one late, and
+        # an older position than one already shown would step the pointer back.
+        self._move_ts: float | None = None
+
+    def new_connection(self) -> None:
+        """A fresh connection (maybe to a restarted host, with a new clock)."""
+        self._move_ts = None
+
+    def _fresh(self, ts) -> bool:
+        if not isinstance(ts, (int, float)) or isinstance(ts, bool):
+            return True
+        if self._move_ts is not None and ts < self._move_ts:
+            return False
+        self._move_ts = ts
+        return True
+
+    def udp_move(self, x: float, y: float, ts: float) -> None:
+        """A move that came by UDP (see curslink.net.udp)."""
+        if not self.active:
+            return  # sent before a leave that TCP brought first, or before our enter
+        self.handle(Message("move", {"x": x, "y": y, "ts": ts}))
 
     def handle(self, msg: Message) -> bytes | None:
         t = msg.t
@@ -61,6 +84,8 @@ class AgentSession:
             return encode("pong", **reply)
         if t == "move":
             ts = msg.data.get("ts")
+            if not self._fresh(ts):
+                return None
             if self.smoother is not None and isinstance(ts, (int, float)) and not isinstance(ts, bool):
                 self.smoother.add(msg.data["x"], msg.data["y"], ts)
             else:
@@ -164,6 +189,7 @@ class AgentClient:
         auth_key: bytes | None = None,
         resolve: Callable[[], Awaitable[Target]] | None = None,
         relay: RelayTarget | None = None,
+        udp: bool = True,
     ):
         if not host and relay is None and resolve is None:
             raise ValueError("an agent needs a host address, a relay, or both")
@@ -179,7 +205,10 @@ class AgentClient:
         # moved to a new address is picked up without a restart.
         self.resolve = resolve
         self.relay = relay
+        self.udp_enabled = udp  # take moves by UDP when the host is reached directly
+        self.udp: AgentUdp | None = None
         self.via = ""
+        self._direct = False
         self.connected = asyncio.Event()
         # ("connected", via) / ("disconnected", reason) / ("waiting", why), for the desktop app.
         self.on_state: Callable[[str, str], None] = lambda state, detail: None
@@ -204,6 +233,7 @@ class AgentClient:
 
     async def _open(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         """LAN first (fast, direct); fall back to the relay when there is one."""
+        self._direct = False
         if self.host:
             try:
                 streams = await asyncio.wait_for(
@@ -211,6 +241,7 @@ class AgentClient:
                     LAN_ATTEMPT_TIMEOUT_S if self.relay else None,
                 )
                 self.via = f"{self.host}:{self.port}"
+                self._direct = True
                 return streams
             except (OSError, asyncio.TimeoutError) as exc:
                 if self.relay is None:
@@ -229,14 +260,18 @@ class AgentClient:
             self.host, self.port, self.relay = target.host, target.port, target.relay
             self.ssl_context, self.auth_key = target.ssl_context, target.auth_key
         reader, writer = await self._open()
+        self.session.new_connection()
         try:
+            features = list(AGENT_FEATURES) + ([FILES_FEATURE] if self.session.files is not None else [])
+            if self.udp_enabled and self._direct:
+                features.append(UDP_FEATURE)
             hello = dict(
                 v=PROTOCOL_VERSION,
                 device_id=self.device_id,
                 name=self.name,
                 platform=f"{platform.system()} {platform.release()}",
                 screens=detect_screens(),
-                features=list(AGENT_FEATURES) + ([FILES_FEATURE] if self.session.files is not None else []),
+                features=features,
             )
             if self.facing_source is not None:
                 hello["camera"] = True
@@ -252,6 +287,9 @@ class AgentClient:
             self._host_takes_facing = isinstance(features, list) and "facing" in features
             if self.facing_source is not None and not self._host_takes_facing:
                 log.info("the host is too old to use this device's camera for gaze confirmation")
+            offer = welcome.get("udp")
+            if isinstance(offer, dict) and self._direct and self.udp_enabled:
+                await self._start_udp(offer, writer)
             self._writer = writer
             self.connected.set()
             self.on_state("connected", self.via)
@@ -270,6 +308,9 @@ class AgentClient:
                 if refresher is not None:
                     refresher.cancel()
         finally:
+            if self.udp is not None:
+                self.udp.close()
+                self.udp = None
             self._writer = None
             self._host_takes_facing = False
             if self.connected.is_set():
@@ -281,6 +322,17 @@ class AgentClient:
             writer.close()
             with contextlib.suppress(Exception):
                 await writer.wait_closed()
+
+    async def _start_udp(self, offer: dict, writer: asyncio.StreamWriter) -> None:
+        peer = writer.get_extra_info("peername")
+        if not peer:
+            return
+        try:
+            self.udp = AgentUdp(offer, self.session.udp_move)
+            await self.udp.start(peer[0])
+        except (ValueError, OSError) as exc:
+            log.info("pointer moves will come over TCP: can't use UDP (%s)", exc)
+            self.udp = None
 
     async def run_forever(self) -> None:
         backoff = 0.5

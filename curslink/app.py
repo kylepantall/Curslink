@@ -251,6 +251,7 @@ async def run_host(cfg: HostConfig) -> None:
         host=cfg.listen,
         port=cfg.port,
         verify_hello=HelloVerifier(cfg.secret, store.key),
+        udp=cfg.udp,
     )
     if not cfg.secret and not store.peers("agent"):
         log.info("no devices paired yet: run `curslink pair` here or on an agent")
@@ -406,6 +407,10 @@ def capture_report(bridge: LoopBridge, capture, server: HostServer, device_id: s
             f"p99 {_ms(waits, 0.99):.2f} / max {_ms(waits, 1.0):.2f} ms")
     if tap_times:
         line += f"; event tap took p50 {_ms(tap_times, 0.5):.2f} / max {_ms(tap_times, 1.0):.2f} ms"
+    path = getattr(conn, "udp", None)
+    if path is not None:
+        line += f"; {path.sent} by UDP" if path.up else "; UDP path down, all by TCP"
+        path.sent = 0
     if rtts:
         line += (f"; network round trip p50 {_ms(rtts, 0.5):.1f} / p95 {_ms(rtts, 0.95):.1f} / "
                  f"max {_ms(rtts, 1.0):.1f} ms")
@@ -679,6 +684,7 @@ async def run_agent(cfg: AgentConfig) -> None:
     client = AgentClient(
         cfg.device_id, cfg.name, cfg.host, cfg.port, None, session,
         resolve=lambda: resolve_host(cfg, store),
+        udp=cfg.udp,
     )
     session.on_look = lambda data: events.emit("look", **data)
     session.on_hint = lambda data: events.emit("hint", **data)

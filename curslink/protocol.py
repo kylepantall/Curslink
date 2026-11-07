@@ -6,7 +6,11 @@ field. The format is intentionally tiny and language-neutral so that a
 future Android agent (Kotlin) can speak it without any Python code.
 
 Host -> agent
-    welcome      {device_id, features}  features: optional list, e.g. ["facing"]
+    welcome      {device_id, features, udp}
+                                       features: optional list, e.g. ["facing"]
+                                       udp (optional): {port, id, key} for moves
+                                       by UDP, see curslink.net.udp; only to an
+                                       agent whose hello.features has "udp"
     enter        {x, y, effect}        agent now owns the pointer; warp to x, y
     leave        {effect, x, y}        host took control back; x, y (optional):
                                        where the pointer left, for the animation
@@ -95,6 +99,9 @@ AGENT_FEATURES = ("look", "hint")
 # Added to hello.features by an agent that takes dragged files (drag and
 # file_* frames); it's optional ([agent.files] enabled = false leaves it out).
 FILES_FEATURE = "files"
+# Added by an agent that reached the host directly and takes moves by UDP
+# (see curslink.net.udp); [agent].udp = false leaves it out.
+UDP_FEATURE = "udp"
 FILE_FRAMES = frozenset({"file_begin", "file_item", "file_data", "file_end", "file_cancel", "file_result"})
 
 

@@ -206,6 +206,36 @@ slightly slow while it builds slack and slightly fast while it catches up. Click
 the pointer snaps to the newest position first, so they land where the
 host saw them.
 
+### Pointer moves by UDP
+
+Over TCP a lost packet holds up every frame behind it until it's resent,
+and the retransmission timeout is 200 ms or more: on Wi-Fi that was most
+of the p95 round trip. A move is an absolute position, so a lost one only
+matters until the next one arrives a few ms later. So when the agent
+reached the host directly (not through a relay), moves go as UDP datagrams
+to the same port number as the TCP listener (`curslink/net/udp.py`), and
+everything else stays on TLS.
+
+The host hands the agent a fresh random key and connection id inside the
+TLS session (`welcome.udp`), only if `hello.features` lists `"udp"`. The
+agent probes the host twice a second from its own socket, which also lets
+the replies through its firewall; the host acknowledges each probe and
+sends moves by UDP only while the agent's probes say it is hearing those
+acknowledgements. When they stop (network change, firewall), moves go back
+to TCP within about 1.6 s. Datagrams are encrypted (HMAC-SHA256 keystream)
+and authenticated (truncated HMAC-SHA256), with strictly increasing
+sequence numbers against replay. The agent drops any move older by `ts`
+than the newest it has seen on either channel, and ignores UDP moves while
+input isn't on it. Before a click, scroll, key, leave or drag, the host
+repeats its latest UDP-only move over TCP, so those land where the pointer
+is even if that datagram was lost.
+
+A direct Wi-Fi link was considered and isn't possible between a Mac and a
+PC: macOS has no public Wi-Fi Direct API and AWDL is Apple-only. Joining
+one machine's hotspot removes the access point hop but takes the other off
+its network, for little gain. A cable (Ethernet, or a Thunderbolt bridge)
+is the fastest link and needs nothing from Curslink.
+
 Both ends log where time goes every 10 seconds while input is remote: the
 host logs mouse report rate, loop wait, event tap time and ping round trip;
 the agent logs arrival rate, lateness, longest gap, playback delay and
