@@ -87,9 +87,8 @@ class PynputCapture:
     switching suppression on and off in their event tap instead of being torn
     down and rebuilt at every switch.
 
-    The motion is read from where each report left the cursor relative to
-    the park point, not from the report's delta fields, which macOS pollutes
-    with the jump of the warp before them (see ``_mac_motion``).
+    The first reports after grabbing can carry the parking jump in their
+    deltas; see ``_mac_motion``.
     """
 
     def __init__(self, park_at: tuple[int, int] = (400, 400)):
@@ -104,6 +103,7 @@ class PynputCapture:
         # How long each grabbed mouse report took in our tap (s). On macOS
         # the tap holds up every mouse event on the system, so it must be quick.
         self.tap_times: list[float] = []
+        self._grabbed_at = 0.0
 
     def start(self, handler: CaptureHandler) -> None:
         from pynput import mouse
@@ -127,6 +127,8 @@ class PynputCapture:
     def set_grab(self, grabbed: bool) -> None:
         if grabbed == self._grabbed:
             return
+        if grabbed:
+            self._grabbed_at = time.monotonic()
         self._grabbed = grabbed
         if self._mac:
             # The listeners keep running; the event taps read _grabbed.
@@ -192,26 +194,20 @@ class PynputCapture:
         return None  # suppressed: this Mac doesn't see it
 
     def _mac_motion(self, event) -> tuple[float, float]:
-        """How far this report moved the mouse.
+        """How far this report moved the mouse: the event's own delta fields,
+        which keep counting when the hidden cursor is up against the edge of
+        a Mac display (0.4.11 read where the cursor went instead, so the
+        pointer on the other computer stopped wherever the Mac's displays
+        ended).
 
-        Not the event's own delta fields: after a warp, macOS folds the warp's
-        jump into the next report's delta, so the first report after
-        switching away carried "back towards the park point" (hundreds of
-        pixels towards the edge just crossed) and bounced input straight back
-        home, and every report after a re-park was off by the last one. The
-        cursor is put back on the park point after every report, so where
-        this report left it, minus the park point, is the motion.
+        Just after input leaves the Mac, though, macOS hands over a report
+        or two whose delta is really the cursor being parked: hundreds of
+        pixels straight back towards the edge just crossed, which used to
+        bounce input home. Reports that big, that soon, are dropped.
         """
-        x, y = _mac_location(event)
-        px, py = self.park_at
-        dx, dy = x - px, y - py
-        if not dx and not dy:
-            # The cursor didn't move at all: it really is detached from the
-            # mouse (only the frontmost app gets that), so the delta fields
-            # are all there is, and with no warp moving it they're honest.
-            return _mac_delta(event)
-        if abs(dx) > _MAC_STALE_PX or abs(dy) > _MAC_STALE_PX:
-            return 0, 0  # reported before the cursor was parked (as input switched): not motion
+        dx, dy = _mac_delta(event)
+        if time.monotonic() - self._grabbed_at < _MAC_SETTLE_S and max(abs(dx), abs(dy)) > _MAC_JUMP_PX:
+            return 0, 0
         return dx, dy
 
     def _mac_key_tap(self, event_type, event):
@@ -266,7 +262,10 @@ _MAC_DELTA_X, _MAC_DELTA_Y = 4, 5          # kCGMouseEventDeltaX / DeltaY
 _MAC_SOURCE_PID = 41                       # kCGEventSourceUnixProcessID
 # Further from the park point than one report could move it: the report was
 # made before the cursor was parked there.
-_MAC_STALE_PX = 400
+# For this long after grabbing, a single report moving further than
+# _MAC_JUMP_PX is the cursor being parked, not the mouse.
+_MAC_SETTLE_S = 0.15
+_MAC_JUMP_PX = 150
 
 
 def _mac_listener(base):
@@ -310,13 +309,6 @@ def _mac_delta(event) -> tuple[int, int]:
 
     return (Quartz.CGEventGetIntegerValueField(event, _MAC_DELTA_X),
             Quartz.CGEventGetIntegerValueField(event, _MAC_DELTA_Y))
-
-
-def _mac_location(event) -> tuple[float, float]:
-    import Quartz
-
-    point = Quartz.CGEventGetLocation(event)
-    return point.x, point.y
 
 
 def _mac_injected(event) -> bool:
@@ -466,22 +458,6 @@ class _INPUT(ctypes.Structure):
 
 
 _MOUSEEVENTF_MOVE, _MOUSEEVENTF_ABSOLUTE, _MOUSEEVENTF_VIRTUALDESK = 0x0001, 0x8000, 0x4000
-_win_ready: list = []
-
-
-def _win_dpi_aware() -> None:
-    """Physical pixels, as the layout and screeninfo use, on every monitor."""
-    if _win_ready:
-        return
-    _win_ready.append(True)
-    try:
-        user32 = ctypes.windll.user32
-        if not user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):  # per monitor v2
-            ctypes.windll.shcore.SetProcessDpiAwareness(2)
-    except Exception:
-        log.debug("couldn't make the process DPI aware (it may already be)", exc_info=True)
-
-
 def win_absolute(x: float, y: float, vx: int, vy: int, vw: int, vh: int) -> tuple[int, int]:
     """A virtual-desktop pixel -> SendInput's 0..65535 absolute coordinates."""
     nx = round((x - vx) * 65535 / max(1, vw - 1))
@@ -490,8 +466,15 @@ def win_absolute(x: float, y: float, vx: int, vy: int, vw: int, vh: int) -> tupl
 
 
 def _win_move(x: int, y: int) -> bool:
+    # Deliberately not DPI aware: the layout gives a Windows screen in the
+    # coordinates Windows shows apps that aren't (logical pixels, e.g. a 4K
+    # screen at 200% is 1920x1080), which is also what SetCursorPos used
+    # before 0.4.9. Absolute SendInput coordinates are a fraction of the
+    # virtual desktop, so a logical position over the logical desktop lands
+    # in the right physical place. 0.4.9-0.4.11 made the process DPI aware,
+    # which read the same numbers as physical pixels: the pointer was boxed
+    # into the top-left part of a scaled screen and moved too slowly.
     try:
-        _win_dpi_aware()
         user32 = ctypes.windll.user32
         vx, vy = user32.GetSystemMetrics(76), user32.GetSystemMetrics(77)
         vw, vh = user32.GetSystemMetrics(78), user32.GetSystemMetrics(79)
