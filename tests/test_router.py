@@ -49,7 +49,10 @@ def test_remote_motion_moves_and_clamps(parts):
 
 def test_motion_back_over_edge_returns_home(parts):
     router, capture, sink, transport, overlay = parts
+    now = [10.0]
+    router.clock = lambda: now[0]
     router.on_pointer(3839, 500)
+    now[0] += 0.5
     router.on_motion(-50, 0)
     assert router.is_local
     assert not capture.grabbed
@@ -210,3 +213,19 @@ def test_switching_to_where_input_already_is_does_nothing(parts):
     shown = len(overlay.shown)
     router.go_home("app")
     assert len(overlay.shown) == shown
+
+
+def test_a_push_straight_back_right_after_arriving_is_ignored(parts):
+    """A bogus first report used to bounce input home within 15 ms."""
+    router, capture, sink, transport, overlay = parts
+    now = [10.0]
+    router.clock = lambda: now[0]
+    router.on_pointer(3839, 500)
+    assert router.active_device == "laptop"
+    now[0] += 0.01
+    router.on_motion(-1500, 0)
+    assert router.active_device == "laptop" and capture.grabbed
+    assert router.x == 3840  # held at the laptop's edge
+    now[0] += 0.2
+    router.on_motion(-50, 0)
+    assert router.is_local  # a real push back still works

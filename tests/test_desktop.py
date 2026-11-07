@@ -365,6 +365,7 @@ def test_macos_capture_reads_deltas_and_survives_a_disabled_tap(monkeypatch):
             calls.append(("motion", dx, dy))
 
     monkeypatch.setattr(pb, "_mac_warp", lambda x, y: calls.append(("warp", x, y)))
+    monkeypatch.setattr(pb, "_mac_location", lambda event: event.get("loc", (10, 6)))
     capture = pb.PynputCapture(park_at=(7, 8))
     capture._mac, capture._handler = True, Handler()
     assert capture._mac_mouse_tap(5, fields) is fields  # not grabbed: the Mac gets it
@@ -413,3 +414,18 @@ def test_mac_grab_detaches_the_cursor_and_warp_never_reattaches_it(monkeypatch):
     assert calls == [("attach", False), ("warp", 7, 8), ("visible", False), ("attach", True), ("visible", True)]
     import inspect
     assert "CGAssociateMouseAndMouseCursorPosition" not in inspect.getsource(pb._mac_warp)
+
+
+def test_mac_motion_comes_from_where_the_cursor_went_not_the_delta_fields(monkeypatch):
+    import curslink.inputs.pynput_backend as pb
+
+    monkeypatch.setattr(pb, "_mac_location", lambda event: event["loc"])
+    monkeypatch.setattr(pb, "_mac_delta", lambda event: event["delta"])
+    capture = pb.PynputCapture(park_at=(1000, 500))
+    # After the warp to the park point the delta fields claim a huge jump
+    # back; where the cursor actually went says 4 px right.
+    assert capture._mac_motion({"loc": (1004, 500), "delta": (-1700, 0)}) == (4, 0)
+    # Made before the cursor was parked (still out at the edge): not motion.
+    assert capture._mac_motion({"loc": (2559, 500), "delta": (6, 0)}) == (0, 0)
+    # The cursor didn't move at all (truly detached): the fields are all there is.
+    assert capture._mac_motion({"loc": (1000, 500), "delta": (5, 1)}) == (5, 1)
