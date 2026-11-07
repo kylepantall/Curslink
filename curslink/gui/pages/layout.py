@@ -298,6 +298,10 @@ class LayoutPage(Page):
         self.items: list[ScreenItem] = []
         self.dirty = False
         self.allow_overlap = False
+        self.calibration = None  # EdgeCalibration, while calibrating an edge
+        self.edge_note = None
+        app.service.event.connect(self._on_service_event)
+        app.service.state_changed.connect(self._on_service_state)
         self.overlap_box = QWidget()
         ob = QHBoxLayout(self.overlap_box)
         ob.setContentsMargins(0, 0, 8, 0)
@@ -478,6 +482,11 @@ class LayoutPage(Page):
             # Keep the stacking order only where it matters.
             z = order[item.key] if self.allow_overlap and item.key in overlapping else None
             cfg.set_screen_z(item.device_id, item.screen["id"], z)
+        # A calibrated edge goes with the screens still meeting there.
+        touching = {frozenset((a, b)) for a, _edge, b in touching_edges(self.current_devices())}
+        for t in cfg.links():
+            if frozenset((t.get("a"), t.get("b"))) not in touching:
+                cfg.remove_link(t.get("a"), t.get("b"))
         if self.allow_overlap:
             cfg.set("layout", "allow_overlap", True)
         else:
@@ -630,6 +639,75 @@ class LayoutPage(Page):
             self.app.service.send(command)
             self._hint_sent = command if payload else ""
 
+    # -- calibrating an edge ---------------------------------------------------
+    def _say_edge(self, text: str) -> None:
+        if self.edge_note is not None:
+            self.edge_note.setText(text)
+            self.edge_note.setVisible(bool(text))
+
+    def calibrate_edge(self, a: str, edge: str, b: str) -> None:
+        """Click where screens ``a`` and ``b`` join, on the real monitors
+        (see curslink.gui.edgecalib)."""
+        from curslink.gui.edgecalib import EdgeCalibration
+        from curslink.gui.service import RUNNING
+        from curslink.layout import OPPOSITE
+
+        if self.calibration is not None:
+            return
+        if self.dirty:
+            self._say_edge("Save the layout first, then calibrate the edge.")
+            return
+        if self.app.service.state != RUNNING:
+            self._say_edge("Start linking first: you'll click on both computers' screens.")
+            return
+        me = self.app.config().get("host", "device_id")
+        items = {i.key: i for i in self.items}
+        ends = []
+        for ref, side in ((a, edge), (b, OPPOSITE[edge])):
+            item = items.get(ref)
+            if item is None:
+                return
+            _x, _y, w, h = item.layout_rect()
+            ends.append({"ref": ref, "device": item.device_id, "name": item.device_name, "side": side,
+                         "screen": {**item.screen, "width": w, "height": h}})
+        ends.sort(key=lambda e: e["device"] != me)  # start on this computer
+        self.calibration = EdgeCalibration(ends, me, self.app.service.send)
+        self.calibration.finished.connect(lambda spans, ends=ends: self.edge_calibrated(ends, spans))
+        self._say_edge("")
+        if not self.calibration.start():
+            self.calibration = None
+            self._say_edge("Couldn't find that screen on this computer.")
+
+    def edge_calibrated(self, ends: list[dict], spans) -> None:
+        self.calibration = None
+        if spans is None:
+            return
+        cfg = self.app.config()
+        (ea, sa), (eb, sb) = zip(ends, spans)
+        cfg.set_link(ea["ref"], ea["side"], sa, eb["ref"], eb["side"], sb)
+        cfg.save()
+        self.app.config_saved()
+        self.refresh_edges()
+        self._say_edge("Edge calibrated. The pointer now crosses along the stretches you clicked.")
+
+    def reset_edge(self, a: str, b: str) -> None:
+        cfg = self.app.config()
+        if cfg.remove_link(a, b):
+            cfg.save()
+            self.app.config_saved()
+        self.refresh_edges()
+
+    def _on_service_event(self, event: dict) -> None:
+        if self.calibration is not None:
+            self.calibration.on_event(event)
+
+    def _on_service_state(self, state: str) -> None:
+        from curslink.gui.service import RUNNING
+
+        if state != RUNNING and self.calibration is not None:
+            calibration, self.calibration = self.calibration, None
+            calibration.stop()
+
     def hideEvent(self, event) -> None:  # noqa: N802
         super().hideEvent(event)
         self.update_hint([])
@@ -732,10 +810,13 @@ class LayoutPage(Page):
         self.load()
 
     def refresh_edges(self) -> None:
-        from curslink.gui.widgets import clear_layout
+        from curslink.gui.widgets import clear_layout, pill
 
         clear_layout(self.edges_box)
         names = {i.device_id: i.device_name for i in self.items}
+        linked = set()
+        if self.app.has_config():
+            linked = {frozenset((t.get("a"), t.get("b"))) for t in self.app.config().links()}
         seen = set()
         for a, edge, b in touching_edges(self.current_devices()):
             if (b, a) in seen:
@@ -745,6 +826,18 @@ class LayoutPage(Page):
             bd, bscreen = b.split("/", 1)
             self.edges_box.addWidget(label(f"{names.get(ad, ad)} / {ascreen}  {edge} edge  →  "
                                            f"{names.get(bd, bd)} / {bscreen}", wrap=True))
+            row = QHBoxLayout()
+            done = frozenset((a, b)) in linked
+            row.addWidget(pill("Calibrated" if done else "By layout", "on" if done else "off"))
+            row.addStretch(1)
+            row.addWidget(button("Calibrate again…" if done else "Calibrate edge…", None,
+                                 lambda _=False, a=a, edge=edge, b=b: self.calibrate_edge(a, edge, b)))
+            if done:
+                row.addWidget(button("Reset", None, lambda _=False, a=a, b=b: self.reset_edge(a, b)))
+            self.edges_box.addLayout(row)
+        self.edge_note = label("", "small", wrap=True)
+        self.edge_note.hide()
+        self.edges_box.addWidget(self.edge_note)
         if self.allow_overlap:
             for behind, front, _shared in self.overlap_pairs():
                 if behind.device_id != front.device_id:

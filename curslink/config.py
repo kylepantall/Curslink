@@ -10,7 +10,7 @@ from typing import Any
 
 from curslink.gaze.confirm import ConfirmSettings, FacingSettings
 from curslink.gaze.zones import GazeSettings
-from curslink.layout import Device, Layout, Screen
+from curslink.layout import SIDES, Device, EdgeEnd, EdgeLink, Layout, Screen
 from curslink.pairing.service import DEFAULT_PAIRING_PORT
 from curslink.net.relay import (
     DEFAULT_RELAY_PORT,
@@ -257,10 +257,49 @@ def parse_layout(raw: dict[str, Any]) -> Layout:
     allow_overlap = raw.get("layout", {}).get("allow_overlap", False)
     if not isinstance(allow_overlap, bool):
         raise ConfigError("[layout].allow_overlap must be true or false")
+    links = parse_links(raw.get("layout", {}).get("links", []), devices)
     try:
-        return Layout.from_devices(devices, allow_overlap)
+        return Layout.from_devices(devices, allow_overlap, links)
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
+
+
+def parse_links(value: Any, devices: list[Device]) -> list[EdgeLink]:
+    """``[[layout.links]]``: calibrated edges, where two screens of
+    different devices really join. Each names both ends::
+
+        [[layout.links]]
+        a = "kyles-mac/screen2"
+        a_side = "right"
+        a_span = [643, 1389]   # where along that edge (px from its top or left)
+        b = "wks82261/main"
+        b_side = "left"
+        b_span = [0, 1080]
+
+    A link to a screen no longer in the layout is skipped, so removing a
+    device doesn't break the config."""
+    if not isinstance(value, list):
+        raise ConfigError("[layout].links must be a list of [[layout.links]] tables")
+    known = {(d.id, s.id) for d in devices for s in d.screens}
+    out = []
+    for i, t in enumerate(value):
+        if not isinstance(t, dict):
+            raise ConfigError("every [[layout.links]] entry must be a table")
+        ends = []
+        for k in ("a", "b"):
+            ref, side, span = t.get(k), t.get(f"{k}_side"), t.get(f"{k}_span")
+            if not isinstance(ref, str) or "/" not in ref:
+                raise ConfigError(f'[[layout.links]] #{i + 1}: {k} must be "device/screen"')
+            if side not in SIDES:
+                raise ConfigError(f"[[layout.links]] #{i + 1}: {k}_side must be one of {', '.join(SIDES)}")
+            if (not isinstance(span, list) or len(span) != 2
+                    or not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in span)):
+                raise ConfigError(f"[[layout.links]] #{i + 1}: {k}_span must be [start, end]")
+            device_id, screen_id = ref.split("/", 1)
+            ends.append(EdgeEnd(device_id, screen_id, side, float(span[0]), float(span[1])))
+        if all((e.device_id, e.screen_id) in known for e in ends):
+            out.append(EdgeLink(*ends))
+    return out
 
 
 def jump_screens(g: dict[str, Any], layout: Layout) -> frozenset[tuple[str, str]]:
