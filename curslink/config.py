@@ -74,10 +74,20 @@ class HostConfig:
     router: RouterSettings = field(default_factory=RouterSettings)
     gaze: GazeConfig = field(default_factory=GazeConfig)
     pairing: PairingConfig = field(default_factory=PairingConfig)
+    # Drag files over an edge (or look at a device while dragging) to send them.
+    files: bool = True
 
     @property
     def name(self) -> str:
         return self.layout.devices[self.device_id].name
+
+
+@dataclass
+class AgentFilesConfig:
+    """``[agent.files]``: files dragged here from the host."""
+
+    enabled: bool = True
+    folder: Path | None = None       # None = Downloads
 
 
 @dataclass
@@ -95,6 +105,17 @@ class AgentConfig:
     relay: RelayTarget | None = None
     pairing: PairingConfig = field(default_factory=PairingConfig)
     gaze: AgentGazeConfig = field(default_factory=AgentGazeConfig)
+    files: AgentFilesConfig = field(default_factory=AgentFilesConfig)
+
+
+def agent_files_config(raw: Any) -> AgentFilesConfig:
+    if not isinstance(raw, dict):
+        raise ConfigError("[agent.files] must be a table")
+    folder = str(raw.get("folder", "") or "").strip()
+    return AgentFilesConfig(
+        enabled=bool(raw.get("enabled", True)),
+        folder=Path(folder).expanduser() if folder else None,
+    )
 
 
 def _secret(raw: dict[str, Any]) -> str | None:
@@ -283,6 +304,7 @@ def host_config(raw: dict[str, Any], base_dir: Path = Path(".")) -> HostConfig:
         router=router,
         gaze=gaze,
         pairing=pairing_config(raw, base_dir),
+        files=bool(raw.get("files", {}).get("enabled", True)) if isinstance(raw.get("files", {}), dict) else True,
     )
 
 
@@ -305,6 +327,7 @@ def agent_config(raw: dict[str, Any], base_dir: Path = Path(".")) -> AgentConfig
         smooth_pointer=bool(agent.get("smooth_pointer", True)),
         pairing=pairing_config(raw, base_dir),
         gaze=agent_gaze_config(agent.get("gaze", {})),
+        files=agent_files_config(agent.get("files", {})),
     )
     if not cfg.host and not cfg.relay and not cfg.pairing.enabled:
         raise ConfigError("set [agent].host (LAN), a [relay] (internet), or leave [pairing] enabled")

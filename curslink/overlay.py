@@ -25,6 +25,7 @@ import subprocess
 import sys
 import threading
 import time
+from typing import Callable
 
 log = logging.getLogger(__name__)
 
@@ -48,6 +49,9 @@ class OverlayProcess:
         self._proc: subprocess.Popen | None = None
         self._disabled = False
         self._lock = threading.Lock()
+        # Each line the helper prints (e.g. ``drag {...}`` when a file drag
+        # passes over one of its drop targets), called on a reader thread.
+        self.on_line: Callable[[str], None] = lambda line: None
 
     def _ensure(self) -> subprocess.Popen | None:
         if self._disabled:
@@ -57,8 +61,11 @@ class OverlayProcess:
                 self._proc = subprocess.Popen(
                     helper_command(),
                     stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
                     text=True,
                 )
+                threading.Thread(target=self._read, args=(self._proc,), name="curslink-overlay-out",
+                                 daemon=True).start()
             except OSError:
                 log.warning("switch animation unavailable", exc_info=True)
                 self._disabled = True
@@ -69,15 +76,31 @@ class OverlayProcess:
         with self._lock:
             self._ensure()
 
+    def _read(self, proc: subprocess.Popen) -> None:
+        try:
+            for line in proc.stdout:
+                line = line.strip()
+                if line:
+                    try:
+                        self.on_line(line)
+                    except Exception:  # pragma: no cover - a bug in the handler
+                        log.exception("overlay helper line %r", line)
+        except (OSError, ValueError):
+            pass
+
     def show(self, effect: str, x: int, y: int) -> None:
         if effect not in ("pop", "blink"):
             return
+        self.command(f"{effect} {int(x)} {int(y)}")
+
+    def command(self, line: str) -> None:
+        """One command line for the helper (see :mod:`curslink.files.overlay`)."""
         with self._lock:
             proc = self._ensure()
             if proc is None or proc.stdin is None:
                 return
             try:
-                proc.stdin.write(f"{effect} {int(x)} {int(y)}\n")
+                proc.stdin.write(line.replace("\n", " ") + "\n")
                 proc.stdin.flush()
             except (BrokenPipeError, OSError):
                 self._proc = None
@@ -280,6 +303,7 @@ def make_effect_widget(effect: str, x: int, y: int):
 
 def _run_qt_helper() -> None:
     from PySide6.QtCore import QTimer
+    from PySide6.QtGui import QGuiApplication
     from PySide6.QtWidgets import QApplication
 
     app = QApplication.instance() or QApplication(["curslink-overlay"])
@@ -294,6 +318,16 @@ def _run_qt_helper() -> None:
 
     threading.Thread(target=read_stdin, daemon=True).start()
     alive: list = []
+    from curslink.files.overlay import FilesOverlay
+
+    def to_logical(x: float, y: float) -> tuple[float, float]:
+        screens = []
+        for sc in QGuiApplication.screens():
+            g = sc.geometry()
+            screens.append((g.x(), g.y(), g.width(), g.height(), sc.devicePixelRatio() or 1.0))
+        return native_to_logical(screens, x, y, sys.platform == "win32")
+
+    files = FilesOverlay(to_logical)
 
     def poll() -> None:
         while True:
@@ -313,6 +347,11 @@ def _run_qt_helper() -> None:
                     continue
                 alive.append(w)
                 w.destroyed.connect(lambda *_a, w=w: alive.remove(w) if w in alive else None)
+            elif parts:
+                try:
+                    files.handle(line)
+                except Exception:  # pragma: no cover - never take the helper down
+                    log.exception("overlay command %r", line)
 
     timer = QTimer()
     timer.timeout.connect(poll)

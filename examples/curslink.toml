@@ -61,6 +61,13 @@ confirm_with_agents = true   # agents running their own camera ([agent.gaze])
 # facing_deg = 18
 # facing_dwell_ms = 150
 
+# --- Dragging files ------------------------------------------------------
+# Drag a file over an edge to another computer (or look at it while you hold
+# the file) and let go there: it's sent over the paired, encrypted link and
+# saved in that computer's Downloads. See [agent.files] for the other end.
+# [files]
+# enabled = true
+
 # --- The layout ----------------------------------------------------------
 # Place every screen of every device in ONE shared coordinate space, arranged
 # like your real desk. x/y/width/height are in pixels in that shared space.
@@ -119,6 +126,11 @@ animations = true
 # too, the pointer only moves here when both agree (the host sees your head
 # turn away, this camera sees you facing this device); without one, this
 # camera alone moves it here and back. No calibration on the host needed.
+# Files dragged here from the host.
+# [agent.files]
+# enabled = true
+# folder = ""                # where they're saved; empty = Downloads
+
 # [agent.gaze]
 # enabled = true
 # camera = 0
