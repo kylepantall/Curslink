@@ -30,10 +30,15 @@ Host -> agent
                                        and say (drag_out back)
     fetch        {id} | {id, cancel}   send the files of that drag_out now (it
                                        was dropped on the host), or forget them
-    popup_in     {chat, open}          an Isolink floating chat carried here:
+    popup_in     {chat, open, grabX?, grabY?}
+                                       an Isolink floating chat carried here:
                                        press the left button and open it held
                                        (answer popup_result); see curslink.popups
     popup_close  {chat}                it opened on another device: close it here
+    popup_prepare {chat}               a chat is being dragged elsewhere and may
+                                       come here: get it ready (only to an agent
+                                       whose hello.features has "popup_prepare")
+    popup_unprepare {chat}             it didn't come here after all
 
 Agent -> host
     hello        {v, device_id, name, platform, screens, auth, camera, ping_s}
@@ -83,6 +88,8 @@ MESSAGE_TYPES = frozenset(
         "popup_in",
         "popup_close",
         "popup_result",
+        "popup_prepare",
+        "popup_unprepare",
         "enter",
         "leave",
         "move",
@@ -136,6 +143,9 @@ UDP_FEATURE = "udp"
 # popup_close, popup_result; see curslink.popups); [agent.isolink] enabled =
 # false leaves it out.
 POPUPS_FEATURE = "popups"
+# An agent that gets a chat ready while it's dragged elsewhere
+# (popup_prepare, popup_unprepare).
+PREPARE_FEATURE = "popup_prepare"
 # An agent that acknowledges the bytes of a file as they arrive (file_ack,
 # when file_begin asks for it), so the host keeps only a little in flight
 # while a drag is carried and the pointer and the drop never wait behind it.
@@ -225,7 +235,7 @@ def _validate(msg: Message) -> None:
     elif t == "fetch":
         if not isinstance(msg.data.get("id"), str):
             raise ProtocolError("fetch.id must be a string")
-    elif t in ("popup_in", "popup_close", "popup_result"):
+    elif t in ("popup_in", "popup_close", "popup_result", "popup_prepare", "popup_unprepare"):
         if not isinstance(msg.data.get("chat"), str) or not msg.data["chat"]:
             raise ProtocolError(f"{t}.chat must be a non-empty string")
     elif t == "isolink":
