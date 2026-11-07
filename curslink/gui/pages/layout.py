@@ -358,6 +358,11 @@ class LayoutPage(Page):
             # Sized for its range (-100000) it wanted 110 px each, which with
             # the Edges card beside it made the page wider than the window.
             spin.setMinimumWidth(64)
+            if theme.current().native and theme.current().platform == "win":
+                # Windows 11's spin box puts both arrows side by side, which
+                # leaves 64 px about two digits; the arrow keys and the wheel
+                # still step the value.
+                spin.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
             spin.valueChanged.connect(lambda v, k=key: self.spin_changed(k, v))
             self.spins[key] = spin
             fields.addWidget(label(text, "small"), 0, i)
