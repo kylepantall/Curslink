@@ -74,6 +74,8 @@ class AgentSession:
             self.show_effect(msg.get("effect", "none"), x, y)
         elif t == "leave":
             self.release_all()
+            if "x" in msg.data and "y" in msg.data:  # where the pointer left from (0.4.17+ hosts)
+                self.show_effect(msg.get("effect", "none"), int(msg.data["x"]), int(msg.data["y"]))
         elif t == "look":
             self.on_look(dict(msg.data))
         elif t == "drag":
