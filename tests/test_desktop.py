@@ -529,6 +529,7 @@ def test_mac_back_forward_and_smooth_scroll_reach_the_other_computer(monkeypatch
     monkeypatch.setattr(pb, "_mac_warp", lambda x, y: None)
     monkeypatch.setattr(pb, "_mac_cursor_visible", lambda visible: None)
     monkeypatch.setattr(pb, "_mac_injected", lambda event: False)
+    monkeypatch.setattr(pb, "_mac_ours", lambda event: event.get("ours", False))
     monkeypatch.setattr(pb, "_mac_field", lambda event, field: event["button"])
     monkeypatch.setattr(pb, "_mac_scroll", lambda event: event["scroll"])
     got = []
@@ -554,6 +555,12 @@ def test_mac_back_forward_and_smooth_scroll_reach_the_other_computer(monkeypatch
     capture._mac_mouse_tap(pb._MAC_SCROLL, {"scroll": (0.0, 0.25)})  # a smooth wheel's quarter line
     assert got == [("button", "x1", True), ("button", "x1", False), ("button", "x2", True),
                    ("button", "middle", True), ("scroll", 0.0, 0.25)]
+    # A mouse app (Logi Options+, Mos...) re-posting the wheel: still the user's.
+    monkeypatch.setattr(pb, "_mac_injected", lambda event: True)
+    got.clear()
+    capture._mac_mouse_tap(pb._MAC_SCROLL, {"scroll": (0.0, -1.0)})
+    capture._mac_mouse_tap(pb._MAC_SCROLL, {"scroll": (0.0, -2.0), "ours": True})  # Curslink's own: not sent
+    assert got == [("scroll", 0.0, -1.0)]
 
 
 def test_windows_adds_up_fractional_scrolls_into_whole_notches(monkeypatch):
