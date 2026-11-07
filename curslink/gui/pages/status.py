@@ -168,8 +168,14 @@ class StatusPage(Page):
             self.error_row.hide()
 
         names = self.device_names()
-        self.mini.setVisible(role == "host")
-        self.art.setVisible(role != "host")
+        # Host: the live map of the screens while linking; until then the
+        # "not linking" illustration (the map had nothing lit, so it was
+        # just grey outlines).
+        host_map = role == "host" and state == RUNNING
+        self.mini.setVisible(host_map)
+        self.art.setVisible(not host_map)
+        if role == "host" and not host_map:
+            set_spot(self.art, "not-linking", 120, 90)
         if role == "host":
             try:
                 self.mini.set_screens(screens_from_config(app.config()))

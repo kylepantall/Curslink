@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import subprocess
 import sys
 import time
 from typing import Awaitable, Callable
@@ -134,7 +135,9 @@ async def ask_in_dialog(peer: DeviceInfo) -> str | None:
 
     try:
         proc = await asyncio.create_subprocess_exec(
-            *dialog_command(peer), stdout=asyncio.subprocess.PIPE, stdin=asyncio.subprocess.DEVNULL
+            *dialog_command(peer), stdout=asyncio.subprocess.PIPE, stdin=asyncio.subprocess.DEVNULL,
+            # The console build draws the window; no console window with it.
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0,
         )
     except OSError:
         log.debug("pairing window unavailable", exc_info=True)

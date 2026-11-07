@@ -318,6 +318,19 @@ class Curslink(QObject):
         QApplication.quit()
 
 
+class WindowLog(QObject):
+    """Logs every window the app shows, so a window that flashes up can be
+    traced in the diagnostics."""
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802
+        from PySide6.QtCore import QEvent
+        from PySide6.QtWidgets import QWidget
+
+        if event.type() == QEvent.Type.Show and isinstance(obj, QWidget) and obj.isWindow():
+            log.info("window shown: %s %r at %s", type(obj).__name__, obj.windowTitle(), obj.geometry())
+        return False
+
+
 def _already_running(name: str) -> bool:
     """Ask a running copy to show its window; True if there was one."""
     socket = QLocalSocket()
@@ -373,6 +386,8 @@ def main(argv: list[str] | None = None) -> int:
     diagnostics.setup("gui", verbose=args.verbose)
     qInstallMessageHandler(diagnostics.qt_message_handler)
     main_thread()  # created on the Qt thread before any worker needs it
+    window_log = WindowLog(qt)
+    qt.installEventFilter(window_log)
     log.info("Qt %s, platform plugin %s", qVersion(), qt.platformName())
 
     from curslink.autostart import Autostart
