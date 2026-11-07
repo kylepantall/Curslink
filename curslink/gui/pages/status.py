@@ -227,7 +227,7 @@ class StatusPage(Page):
             cameras = [names.get(d, d) for d in status.cameras] if state == RUNNING else []
             if state == RUNNING and status.gaze:
                 self.gaze_toggle.setChecked(not status.gaze_paused)
-                hint = "Switch when you look at another screen. Ctrl+Alt+G pauses it."
+                hint = "Switch when you look at another screen. Ctrl+Alt+G turns it off."
             elif cameras:
                 # This camera is off, but an agent's own camera still switches.
                 self.gaze_toggle.setChecked(not status.gaze_paused)
@@ -238,7 +238,7 @@ class StatusPage(Page):
                 hint = ("Switch when you look at another screen. Calibrate first."
                         if not gaze_on_in_config else "Switch when you look at another screen.")
             if state == RUNNING and status.gaze and cameras:
-                hint = f"Using this camera and {', '.join(cameras)}'s. Ctrl+Alt+G pauses it."
+                hint = f"Using this camera and {', '.join(cameras)}'s. Ctrl+Alt+G turns it off."
             self.gaze_text.detail_label.setText(hint)
             self.gaze_text.detail_label.show()
             self.edge_toggle.setChecked(bool(cfg.get("host", {}).get("edge_switching", True)))

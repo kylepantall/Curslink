@@ -401,7 +401,7 @@ class CalibratePage(Page):
             return "Camera off"
         st = self.app.status
         if st.gaze_paused:
-            return "Camera on · gaze switching paused"
+            return "Gaze is off"
         names = {t.key: n for t, n in self.targets}
         looking = st.looking()
         return f"Camera on · you're looking at {names.get(looking, looking)}" if looking else \

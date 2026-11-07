@@ -327,7 +327,7 @@ class MainWindow(QMainWindow):
                 else:
                     text, colour = "Waiting for the host", DOT_COLOURS["warn"]
             elif status.gaze_paused:
-                text, colour = "Linking, gaze paused", DOT_COLOURS["warn"]
+                text, colour = "Linking, gaze off", DOT_COLOURS["warn"]
             else:
                 text, colour = "Linking as host", DOT_COLOURS["good"]
         elif state == STARTING:
