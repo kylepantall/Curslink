@@ -39,6 +39,7 @@ def main(argv: list[str]) -> int:
     qt = QApplication.instance() or QApplication(["curslink-screenshots"])
     style = theme.install_style(qt)
     manager = theme.manager("light")
+    manager.apply()  # as the app does, before any window is built
     # No Mica or vibrancy: grab() draws the widgets, not the desktop behind.
     app = Curslink(Prefs(config=str(config), start_linking=False, glass=False))
     win = MainWindow(app)
