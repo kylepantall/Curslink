@@ -11,9 +11,11 @@ import argparse
 import getpass
 import logging
 import sys
+import tempfile
+import time
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QTimer, Signal, qInstallMessageHandler, qVersion
+from PySide6.QtCore import QLockFile, QObject, QTimer, Signal, qInstallMessageHandler, qVersion
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication, QMessageBox
 
@@ -347,6 +349,38 @@ class WindowLog(QObject):
         return False
 
 
+def _take_instance_lock(name: str) -> QLockFile | None:
+    """The lock only one copy of the app holds, or None if another has it.
+
+    Checking for a running copy's socket alone let two copies start: one
+    launched while the other was still starting (before it listened) found
+    nobody, and on Windows a second server can listen on the same pipe name.
+    A lock file left by a copy that crashed is noticed as stale and taken.
+    """
+    lock = QLockFile(str(Path(tempfile.gettempdir()) / f"{name}.lock"))
+    lock.setStaleLockTime(0)  # stale only if its process has gone, however old
+    return lock if lock.tryLock(0) else None
+
+
+def _show_running_copy(name: str, wait_s: float = 10.0) -> bool:
+    """Ask the copy holding the lock to show its window, waiting while it
+    starts up and begins listening. True if it answered."""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            ctypes.windll.user32.AllowSetForegroundWindow(-1)  # ASFW_ANY: let it come to the front
+        except Exception:
+            pass
+    deadline = time.monotonic() + wait_s
+    while True:
+        if _already_running(name):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.25)
+
+
 def _already_running(name: str) -> bool:
     """Ask a running copy to show its window; True if there was one."""
     socket = QLocalSocket()
@@ -395,7 +429,10 @@ def main(argv: list[str] | None = None) -> int:
     qt.setQuitOnLastWindowClosed(False)
 
     name = instance_name()
-    if _already_running(name):
+    instance_lock = _take_instance_lock(name)
+    if instance_lock is None:
+        # Another copy is running (or starting): bring its window forward instead.
+        _show_running_copy(name)
         return 0
 
     # Only the copy that stays running owns the log files.
@@ -422,6 +459,7 @@ def main(argv: list[str] | None = None) -> int:
     theme.manager(prefs.theme).apply()
     app = Curslink(prefs)
     server = _listen(name, app)  # noqa: F841 - kept alive by its parent
+    app.instance_lock = instance_lock  # held until this copy exits
 
     from curslink.gui.tray import Tray
     from curslink.gui.window import MainWindow
