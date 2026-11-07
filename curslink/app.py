@@ -6,6 +6,7 @@ import asyncio
 import itertools
 import logging
 import math
+import sys
 import threading
 import time
 from dataclasses import replace
@@ -659,6 +660,13 @@ async def run_agent(cfg: AgentConfig) -> None:
     from curslink.smoothing import PointerSmoother
 
     sink = PynputSink(cfg.modifier_map)
+    if sys.platform == "win32":
+        # The input helper, if it's switched on, reaches admin apps and UAC
+        # prompts (see curslink.winhelper); without it, input goes in here.
+        from curslink.winhelper import win32 as helper_win32
+        from curslink.winhelper.client import HelperSink
+
+        sink = HelperSink(sink, helper_win32.this_session(), cfg.modifier_map)
     smoother = PointerSmoother(sink.move_to) if cfg.smooth_pointer else None
     session = AgentSession(
         sink,

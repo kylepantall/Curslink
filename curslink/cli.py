@@ -370,6 +370,26 @@ def wants_gui(argv: list[str]) -> bool:
     return stdin is None or not stdin.isatty()
 
 
+def cmd_winhelper(args) -> int:
+    """Windows: the input helper that reaches admin apps and UAC prompts."""
+    from curslink.winhelper import install as helper
+
+    if args.action == "status":
+        print(helper.status())
+        return 0
+    if sys.platform != "win32":
+        print("the input helper is for Windows only", file=sys.stderr)
+        return 2
+    try:
+        helper.install() if args.action == "install" else helper.uninstall()
+    except (OSError, RuntimeError) as exc:
+        logging.getLogger("curslink.winhelper").error("couldn't %s the input helper: %s", args.action, exc)
+        print(f"couldn't {args.action} the input helper: {exc}", file=sys.stderr)
+        return 1
+    print(f"input helper: {helper.status()}")
+    return 0
+
+
 def cmd_overlay_test(args) -> int:
     import time
 
@@ -483,6 +503,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--yes", "-y", action="store_true", help="install without asking")
     p.add_argument("--pre", action="store_true", help="include pre-releases")
     p.set_defaults(func=cmd_update)
+
+    p = sub.add_parser("winhelper", help="Windows: control admin apps and UAC prompts (needs admin)")
+    p.add_argument("action", choices=["install", "uninstall", "status"])
+    p.set_defaults(func=cmd_winhelper)
 
     p = sub.add_parser("overlay-test", help="play the switch animation")
     p.add_argument("--effect", choices=["pop", "blink"], default="pop")

@@ -72,6 +72,27 @@ if sys.platform == "win32":
         icon=icon,
     ))
 
+# Windows: curslink-helper.exe, the input helper service (curslink/winhelper).
+# One small self-contained file, because switching it on copies it into
+# Program Files, where a program running as the user can't swap it out.
+if sys.platform == "win32":
+    ha = Analysis(
+        [SPECPATH + "/../curslink/winhelper/__main__.py"],
+        pathex=[SPECPATH + "/.."],
+        hiddenimports=collect_submodules("pynput") + ["curslink.winhelper.service", "curslink.winhelper.inject"],
+        excludes=["pytest", "PySide6", "mediapipe", "cv2", "numpy", "matplotlib", "zeroconf", "tkinter"],
+    )
+    exes.append(EXE(
+        PYZ(ha.pure),
+        ha.scripts,
+        ha.binaries,
+        ha.datas,
+        [],
+        name="curslink-helper",
+        console=False,
+        icon=icon,
+    ))
+
 coll = COLLECT(*exes, a.binaries, a.datas, name="curslink")
 
 # macOS: also dist/Curslink.app, a real app bundle with the executable inside

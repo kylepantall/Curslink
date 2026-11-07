@@ -20,6 +20,7 @@ on:
       - curslink/update.py
       - curslink/cli.py
       - curslink/gui/**
+      - curslink/winhelper/**
       - curslink/assets/**
       - .github/workflows/build.yml
   workflow_dispatch:
@@ -85,7 +86,25 @@ jobs:
           "$exe" check -c examples/curslink.toml
           if [ "$RUNNER_OS" = Windows ]; then
             [ -f dist/curslink/curslinkw.exe ] || { echo "::error::no curslinkw.exe (the app without a console)"; exit 1; }
+            [ -f dist/curslink/curslink-helper.exe ] || { echo "::error::no curslink-helper.exe (the input helper)"; exit 1; }
           fi
+
+      # The runner is an administrator, so switch the input helper on for
+      # real: the service has to start (and its injector with it), then go.
+      - name: Smoke test the Windows input helper
+        if: runner.os == 'Windows'
+        run: |
+          exe=dist/curslink/curslink.exe
+          [ "$("$exe" winhelper status)" = missing ] || { echo "::error::helper installed before we started"; exit 1; }
+          "$exe" winhelper install
+          sleep 5
+          state=$("$exe" winhelper status)
+          echo "state after install: $state"
+          cat "/c/Program Files/Curslink Helper/logs/"*.log || true
+          "$exe" winhelper uninstall
+          [ "$state" = running ] || { echo "::error::the helper service didn't stay running"; exit 1; }
+          [ "$("$exe" winhelper status)" = missing ] || { echo "::error::uninstall left the service behind"; exit 1; }
+          [ ! -e "/c/Program Files/Curslink Helper" ] || { echo "::error::uninstall left the folder behind"; exit 1; }
 
       - name: Package
         run: |

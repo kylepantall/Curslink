@@ -305,6 +305,32 @@ The icon masters are in `curslink/assets` (drawn on Apple's 824-in-1024
 grid); `packaging/icons/make_icons.py` turns them into the committed `.ico`,
 `.icns` and Linux PNGs.
 
+### Windows: admin apps, UAC prompts and the lock screen
+
+Windows drops input a normal program injects into a program running as
+administrator (UIPI), and UAC prompts and the lock screen sit on the secure
+"Winlogon" desktop, which only SYSTEM can reach. The opt-in Settings toggle
+"Control admin apps and UAC prompts" (one admin prompt) copies
+`curslink-helper.exe`, a small one-file build, into
+`Program Files\Curslink Helper` and installs it as the `CurslinkHelper`
+service (`curslink/winhelper`):
+
+* the service (LocalSystem) keeps one injector running in the console
+  session, starting a new one on a user switch and restarting it with
+  backoff if it dies;
+* the injector (SYSTEM, in that session) serves a named pipe only that
+  session's user and SYSTEM can open, local clients only, and before each
+  command moves its thread to whichever desktop has the input;
+* the agent sends input to the pipe when it's there and injects it itself
+  when it isn't, so turning the helper on or off needs no restart.
+
+The copy lives in Program Files so a program running as the user can't
+replace what SYSTEM runs; its logs are there too for the same reason. The
+trade-off is that anything running as the user can drive the pipe, UAC
+prompts included, which is why it's off by default. Turning it off (or
+uninstalling Curslink) removes the service and the copy. Ctrl+Alt+Del
+can't be injected at all.
+
 ## Code map
 
 | Module | Role |
@@ -320,6 +346,7 @@ grid); `packaging/icons/make_icons.py` turns them into the committed `.ico`,
 | `curslink/security.py` | TLS-PSK contexts, hello authentication |
 | `curslink/pairing/` | Pairing store, code-confirmed handshake, mDNS discovery, pairing listener and window |
 | `curslink/overlay.py` | Pop/blink animation helper |
+| `curslink/winhelper/` | Windows input helper service: admin apps, UAC prompts, lock screen |
 | `curslink/app.py`, `cli.py` | Wiring and the `curslink` command |
 | `curslink/gui/` | The desktop app: window pages, tray, child process |
 | `curslink/events.py` | Status events and commands between the app and its child |
