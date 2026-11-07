@@ -70,6 +70,8 @@ class HostConfig:
     listen: str = "0.0.0.0"
     port: int = DEFAULT_PORT
     lan: bool = True
+    # Send pointer moves by UDP to agents that take them (see curslink.net.udp).
+    udp: bool = True
     relay: RelayTarget | None = None
     router: RouterSettings = field(default_factory=RouterSettings)
     gaze: GazeConfig = field(default_factory=GazeConfig)
@@ -102,6 +104,8 @@ class AgentConfig:
     animations: bool = True
     # Play the host's moves back evenly (see curslink.smoothing).
     smooth_pointer: bool = True
+    # Take pointer moves by UDP when the host is reached directly (see curslink.net.udp).
+    udp: bool = True
     relay: RelayTarget | None = None
     pairing: PairingConfig = field(default_factory=PairingConfig)
     gaze: AgentGazeConfig = field(default_factory=AgentGazeConfig)
@@ -321,6 +325,7 @@ def host_config(raw: dict[str, Any], base_dir: Path = Path(".")) -> HostConfig:
         listen=host.get("listen", "0.0.0.0"),
         port=_int(host, "port", DEFAULT_PORT),
         lan=lan,
+        udp=bool(host.get("udp", True)),
         relay=relay,
         router=router,
         gaze=gaze,
@@ -346,6 +351,7 @@ def agent_config(raw: dict[str, Any], base_dir: Path = Path(".")) -> AgentConfig
         modifier_map=dict(agent.get("modifier_map", {})),
         animations=agent.get("animations", True),
         smooth_pointer=bool(agent.get("smooth_pointer", True)),
+        udp=bool(agent.get("udp", True)),
         pairing=pairing_config(raw, base_dir),
         gaze=agent_gaze_config(agent.get("gaze", {})),
         files=agent_files_config(agent.get("files", {})),

@@ -11,7 +11,8 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from curslink.net.framing import STREAM_LIMIT, read_message
-from curslink.protocol import HOST_FEATURES, Message, ProtocolError, encode
+from curslink.net.udp import HostPath, HostUdp
+from curslink.protocol import HOST_FEATURES, UDP_FEATURE, Message, ProtocolError, encode
 
 log = logging.getLogger(__name__)
 
@@ -23,6 +24,9 @@ MAX_BUFFER_BYTES = 256 * 1024
 # Bulk frames (dropped files) wait for the connection to drain past this, so
 # input frames queued behind them stay milliseconds away.
 BULK_BUFFER_BYTES = 64 * 1024
+# Before these, a move that only went by UDP is repeated over TCP, so a
+# click or key lands where the pointer is even if that datagram was lost.
+SYNC_BEFORE = frozenset({"button", "scroll", "key", "leave", "drag"})
 
 
 @dataclass
@@ -37,6 +41,7 @@ class AgentConnection:
     facing: bool | None = None    # last thing that camera reported
     features: frozenset = frozenset()  # hello.features: what else it understands
     rtts: list = field(default_factory=list)  # ping round trips (s) since last taken
+    udp: HostPath | None = None   # moves by UDP (see curslink.net.udp), when the agent takes them
 
 
 class HostServer:
@@ -51,6 +56,7 @@ class HostServer:
         host: str = "0.0.0.0",
         port: int = 0,
         verify_hello: Callable[[str, object, bytes | None], bool] | None = None,
+        udp: bool = True,
     ):
         self.known_devices = known_devices
         self.ssl_context = ssl_context
@@ -66,6 +72,8 @@ class HostServer:
         self.verify_hello = verify_hello
         self.connections: dict[str, AgentConnection] = {}
         self._server: asyncio.base_events.Server | None = None
+        self.udp_enabled = udp
+        self.udp: HostUdp | None = None
 
     async def start(self) -> None:
         self._server = await asyncio.start_server(
@@ -74,10 +82,25 @@ class HostServer:
         sock = self._server.sockets[0]
         self.port = sock.getsockname()[1]
         log.info("listening on %s:%d", self.host, self.port)
+        if self.udp_enabled:
+            await self._start_udp()
+
+    async def _start_udp(self) -> None:
+        loop = asyncio.get_running_loop()
+        try:
+            _, self.udp = await loop.create_datagram_endpoint(HostUdp, local_addr=(self.host, self.port))
+        except OSError as exc:
+            log.warning("can't listen for UDP on port %d (%s); pointer moves will use TCP", self.port, exc)
+            self.udp = None
+            return
+        log.info("pointer moves can go by UDP on port %d", self.udp.port)
 
     async def close(self) -> None:
         for conn in list(self.connections.values()):
             conn.writer.close()
+        if self.udp is not None:
+            self.udp.close()
+            self.udp = None
         if self._server:
             self._server.close()
             await self._server.wait_closed()
@@ -101,6 +124,16 @@ class HostServer:
             log.warning("%s is not keeping up; dropping connection", device_id)
             transport.abort()
             return
+        path = conn.udp
+        if path is not None and self.udp is not None:
+            if t == "move" and _is_num(data.get("ts")) and _is_num(data.get("x")) and _is_num(data.get("y")):
+                if self.udp.send_move(path, data["x"], data["y"], data["ts"]):
+                    return
+            if t == "move":
+                path.unsynced = None  # TCP carries this one
+            elif path.unsynced is not None and t in SYNC_BEFORE:
+                conn.writer.write(encode("move", **path.unsynced))
+                path.unsynced = None
         conn.writer.write(encode(t, **data))
 
     async def send_bulk(self, device_id: str, t: str, **data) -> None:
@@ -162,7 +195,13 @@ class HostServer:
                 features=frozenset(f for f in (hello.get("features") or []) if isinstance(f, str)),
             )
             self.connections[device_id] = conn
-            writer.write(encode("welcome", device_id=device_id, features=list(HOST_FEATURES)))
+            welcome = {"device_id": device_id, "features": list(HOST_FEATURES)}
+            # Only for an agent that asked: older ones would drop the connection
+            # on a datagram-era frame they don't know (they never get one).
+            if self.udp is not None and UDP_FEATURE in conn.features:
+                conn.udp = self.udp.add(device_id)
+                welcome["udp"] = conn.udp.offer(self.udp.port)
+            writer.write(encode("welcome", **welcome))
             log.info("agent %s (%s, %s) connected from %s", device_id, conn.name, conn.platform, peer)
             self.on_connect(conn)
             pinger = asyncio.create_task(self._ping(conn))
@@ -180,6 +219,8 @@ class HostServer:
         except (ConnectionError, ssl.SSLError, OSError) as exc:
             log.info("connection from %s ended: %s", peer, exc)
         finally:
+            if conn is not None and self.udp is not None:
+                self.udp.remove(conn.udp)
             if conn is not None and self.connections.get(conn.device_id) is conn:
                 del self.connections[conn.device_id]
                 log.info("agent %s disconnected", conn.device_id)
@@ -212,3 +253,7 @@ class HostServer:
                 return
             n += 1
             self.send(conn.device_id, "ping", n=n, ts=round(time.monotonic() * 1000.0, 2))
+
+
+def _is_num(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
