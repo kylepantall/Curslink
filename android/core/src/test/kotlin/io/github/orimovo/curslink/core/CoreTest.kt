@@ -108,4 +108,30 @@ class CoreTest {
         assertEquals("pong", pong.first)
         assertTrue(pong.second.keys == setOf("n", "ts"))
     }
+
+    @Test
+    fun edgeFramesReachTheHandler() {
+        val got = mutableListOf<EdgeCommand>()
+        val s = AgentSession(object : InputHandler {
+            override fun enter(x: Double, y: Double, effect: String) {}
+            override fun leave(effect: String, x: Double?, y: Double?) {}
+            override fun move(x: Double, y: Double) {}
+            override fun button(name: String, pressed: Boolean) {}
+            override fun scroll(dx: Double, dy: Double) {}
+            override fun key(key: String, pressed: Boolean) {}
+            override fun edge(cmd: EdgeCommand) { got += cmd }
+        })
+        fun f(line: String) = s.handle(Frames.decode(line))
+        f("""{"t":"edge","role":"from","rect":[0,0,1080,2400],"side":"left","a":0,"b":2400,"at":900,"near":0.5,"name":"Mac","kind":"mac"}""")
+        f("""{"t":"edge","role":"sideways","rect":[0,0,1,1],"side":"left","a":0,"b":1,"at":0,"near":1}""")
+        f("""{"t":"edge","flash":true}""")
+        f("""{"t":"edge","hide":true}""")
+        assertEquals(3, got.size)
+        assertEquals("from", got[0].role)
+        assertEquals(listOf(0.0, 0.0, 1080.0, 2400.0), got[0].rect)
+        assertEquals(900.0, got[0].at, 0.0)
+        assertEquals("Mac", got[0].name)
+        assertTrue(got[1].flash)
+        assertTrue(got[2].hide)
+    }
 }

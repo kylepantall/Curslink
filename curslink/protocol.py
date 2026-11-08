@@ -39,6 +39,12 @@ Host -> agent
                                        come here: get it ready (only to an agent
                                        whose hello.features has "popup_prepare")
     popup_unprepare {chat}             it didn't come here after all
+    edge         {role, rect, side, a, b, at, near, name?, kind?} | {hide} | {flash}
+                                       the edge indicator: an edge of this device
+                                       leads to another (role "from") or the
+                                       pointer is heading here ("to"); see
+                                       curslink.edgehint. Only to an agent whose
+                                       hello.features has "edge"
 
 Agent -> host
     hello        {v, device_id, name, platform, screens, auth, camera, ping_s}
@@ -102,6 +108,7 @@ MESSAGE_TYPES = frozenset(
         "facing",
         "look",
         "hint",
+        "edge",
         "bye",
         "drag",
         "drag_out",
@@ -128,6 +135,8 @@ HOST_FEATURES = ("facing", "popups")
 # An agent without "look" would reject a look frame as unknown and drop the
 # connection, so the host only sends one to agents that list it.
 AGENT_FEATURES = ("look", "hint")
+# Added to hello.features by an agent that draws the edge indicator (edge frames).
+EDGE_FEATURE = "edge"
 # Added to hello.features by an agent that takes dragged files (drag and
 # file_* frames); it's optional ([agent.files] enabled = false leaves it out).
 FILES_FEATURE = "files"
@@ -201,6 +210,10 @@ def _num(msg: Message, key: str) -> None:
         raise ProtocolError(f"{msg.t}.{key} must be a number")
 
 
+def _is_number(v: Any) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
 def _validate(msg: Message) -> None:
     t = msg.t
     if t in ("move", "enter"):
@@ -230,6 +243,17 @@ def _validate(msg: Message) -> None:
     elif t == "hint":
         if msg.data.get("hide") is not True and not isinstance(msg.data.get("screens"), list):
             raise ProtocolError("hint needs screens, or hide")
+    elif t == "edge":
+        d = msg.data
+        if d.get("hide") is not True and d.get("flash") is not True:
+            rect = d.get("rect")
+            if d.get("role") not in ("from", "to") or d.get("side") not in ("left", "right", "top", "bottom"):
+                raise ProtocolError("edge needs a role and a side, or hide or flash")
+            if not (isinstance(rect, list) and len(rect) == 4 and all(_is_number(v) for v in rect)):
+                raise ProtocolError("edge.rect must be [x, y, width, height]")
+            for key in ("a", "b", "at", "near"):
+                if not _is_number(d.get(key)):
+                    raise ProtocolError(f"edge.{key} must be a number")
     elif t == "drag":
         if msg.data.get("hide") is not True and not isinstance(msg.data.get("card"), dict):
             raise ProtocolError("drag needs a card, or hide")

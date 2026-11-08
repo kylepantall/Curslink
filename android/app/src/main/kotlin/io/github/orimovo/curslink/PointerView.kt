@@ -14,7 +14,15 @@ import android.view.View
  * really plugged into the phone), plus the "pop" and "blink" as it arrives.
  * Fills the screen and lets every touch through.
  */
-class PointerView(context: Context) : View(context) {
+class PointerView(context: Context, toPx: (Double, Double) -> Pair<Float, Float> = { x, y -> x.toFloat() to y.toFloat() }) : View(context) {
+    /** The edge indicator, drawn under the pointer. */
+    private val glow = EdgeGlow(context, toPx)
+
+    fun edgeGlow(cmd: io.github.orimovo.curslink.core.EdgeCommand) {
+        glow.take(cmd)
+        postInvalidateOnAnimation()
+    }
+
     enum class Shape { ARROW, TEXT, HAND }
 
     private val d = resources.displayMetrics.density
@@ -82,6 +90,8 @@ class PointerView(context: Context) : View(context) {
 
     override fun onDraw(canvas: Canvas) {
         draws++
+        glow.draw(canvas, width, height)
+        if (glow.animating) postInvalidateOnAnimation()
         if (ring > 0f) {
             ringPaint.alpha = ((1f - ring) * 255).toInt()
             ringPaint.strokeWidth = 4f * d * (1f - ring) + 1f

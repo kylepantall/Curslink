@@ -19,6 +19,7 @@ which took focus away from whatever you were typing in.
 
 from __future__ import annotations
 
+import json
 import logging
 import queue
 import subprocess
@@ -353,6 +354,9 @@ def _run_qt_helper() -> None:
         return native_to_logical(screens, x, y, sys.platform == "win32")
 
     files = FilesOverlay(to_logical)
+    from curslink.edgeoverlay import EdgeOverlay
+
+    edges = EdgeOverlay(to_logical)
 
     def poll() -> None:
         while True:
@@ -372,6 +376,15 @@ def _run_qt_helper() -> None:
                     continue
                 alive.append(w)
                 w.destroyed.connect(lambda *_a, w=w: alive.remove(w) if w in alive else None)
+            elif parts and parts[0] == "edge":
+                try:
+                    data = json.loads(line.split(None, 1)[1])
+                    if isinstance(data, dict):
+                        edges.handle(data)
+                except (IndexError, ValueError, TypeError, KeyError):
+                    log.debug("bad edge command %r", line)
+                except Exception:  # pragma: no cover - never take the helper down
+                    log.exception("edge command %r", line)
             elif parts:
                 try:
                     files.handle(line)

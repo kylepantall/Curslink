@@ -14,7 +14,7 @@ from curslink.inputs.base import InputSink
 from curslink.net.framing import STREAM_LIMIT, read_message
 from curslink.net.relay import RelayError, RelayTarget, agent_connect
 from curslink.net.udp import AgentUdp
-from curslink.protocol import (AGENT_FEATURES, FILES_FEATURE, FILES_OUT_FEATURE, DROP_FEATURE, FILE_ACK_FEATURE, POPUPS_FEATURE, PREPARE_FEATURE, PROTOCOL_VERSION, UDP_FEATURE, Message, ProtocolError,
+from curslink.protocol import (AGENT_FEATURES, EDGE_FEATURE, FILES_FEATURE, FILES_OUT_FEATURE, DROP_FEATURE, FILE_ACK_FEATURE, POPUPS_FEATURE, PREPARE_FEATURE, PROTOCOL_VERSION, UDP_FEATURE, Message, ProtocolError,
                                encode)
 from curslink.security import channel_binding, hello_auth
 from curslink.tally import Tally
@@ -48,6 +48,9 @@ class AgentSession:
         self.on_look: Callable[[dict], None] = lambda data: None
         # The host's Layout page marking where screens overlap on ours.
         self.on_hint: Callable[[dict], None] = lambda data: None
+        # The edge indicator (see curslink.edgehint); None = we don't draw it,
+        # so hello doesn't offer the "edge" feature.
+        self.on_edge: Callable[[dict], None] | None = None
         # A file drag from the host: {"card": {...}} shows the placeholder
         # that follows the pointer, {"hide": True} takes it down.
         self.on_drag: Callable[[dict], None] = lambda data: None
@@ -122,6 +125,9 @@ class AgentSession:
             self.on_look(dict(msg.data))
         elif t == "hint":
             self.on_hint(dict(msg.data))
+        elif t == "edge":
+            if self.on_edge is not None:
+                self.on_edge(dict(msg.data))
         elif t == "drag":
             self.on_drag(dict(msg.data))
         elif t == "drag_out":
@@ -331,6 +337,8 @@ class AgentClient:
                 features.append(FILES_OUT_FEATURE)
             if self.session.popups is not None:
                 features += [POPUPS_FEATURE, PREPARE_FEATURE]
+            if self.session.on_edge is not None:
+                features.append(EDGE_FEATURE)
             if self.udp_enabled and self._direct:
                 features.append(UDP_FEATURE)
             hello = dict(

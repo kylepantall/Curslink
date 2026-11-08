@@ -122,6 +122,16 @@ class SettingsPage(Page):
         hot.addWidget(self.hotkeys)
         grid.addLayout(hot, 2, 1, 2, 1)
         self.switching.body.addLayout(grid)
+        self.edge_hint = Toggle("Show where an edge leads")
+        self.edge_hint.clicked.connect(lambda on: self.set_config("host", "edge_indicator", on))
+        hint_row = QHBoxLayout()
+        hint_row.addWidget(text_block(
+            "Show where an edge leads",
+            "Near an edge that leads to another device, the edge glows and a label shows its name. The edge "
+            "it's heading for glows on that device too."), 1)
+        hint_row.addWidget(self.edge_hint, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.switching.body.addSpacing(6)
+        self.switching.body.addLayout(hint_row)
         self.add(self.switching)
 
         # -- keyboard (host) ------------------------------------------------------
@@ -310,6 +320,7 @@ class SettingsPage(Page):
             gaze = raw.get("gaze", {})
             effect = host.get("effect", "pop")
             self.swap_keys.setChecked(bool(host.get("swap_cmd_ctrl", True)))
+            self.edge_hint.setChecked(bool(host.get("edge_indicator", True)))
             for b in self.effect_group.buttons():
                 b.setChecked(b.property("effect") == effect)
             self.camera.set_current(int(gaze.get("camera", 0) or 0), str(gaze.get("camera_name", "") or ""))

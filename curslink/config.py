@@ -361,6 +361,7 @@ def host_config(raw: dict[str, Any], base_dir: Path = Path(".")) -> HostConfig:
     router = RouterSettings(
         effect=host.get("effect", "pop"),
         edge_switching=host.get("edge_switching", True),
+        edge_indicator=bool(host.get("edge_indicator", True)),
         gaze_switching=raw.get("gaze", {}).get("enabled", False),
         gap_tolerance_px=_int(host, "gap_tolerance_px", 64),
         gaze_within_device=bool(raw.get("gaze", {}).get("within_device", False)),
