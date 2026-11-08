@@ -4,6 +4,8 @@
   keyboard and mouse (host).
 * Input Monitoring: to watch the keyboard and mouse (host).
 * Camera: for gaze switching (host). Checked and asked through AVFoundation.
+* Screen Recording: for mirror mode, to show the part of this Mac's screen
+  another screen covers (host, when mirror mode is on).
 * Local Network: to find and reach the other computers (both). macOS has no
   API to ask, so Curslink sends one mDNS packet: macOS refuses it with "No
   route to host" while access is off, and shows its prompt the first time.
@@ -35,12 +37,14 @@ ACCESSIBILITY = "accessibility"
 INPUT_MONITORING = "input-monitoring"
 CAMERA = "camera"
 LOCAL_NETWORK = "local-network"
+SCREEN_RECORDING = "screen-recording"
 
 _SETTINGS_URL = {
     ACCESSIBILITY: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
     INPUT_MONITORING: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent",
     CAMERA: "x-apple.systempreferences:com.apple.preference.security?Privacy_Camera",
     LOCAL_NETWORK: "x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork",
+    SCREEN_RECORDING: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
 }
 
 _kIOHIDRequestTypeListenEvent = 1
@@ -67,17 +71,30 @@ PERMISSIONS = {
     LOCAL_NETWORK: Permission(
         LOCAL_NETWORK, "Local Network",
         "Lets Curslink find your other computers on this network and pair with them."),
+    SCREEN_RECORDING: Permission(
+        SCREEN_RECORDING, "Screen Recording",
+        "For mirror mode: lets Curslink show the part of this screen that another screen covers. "
+        "The picture only goes to your own devices."),
 }
 
 
-def needed(role: str | None) -> list[str]:
-    """What this computer's role needs on macOS (nothing elsewhere)."""
+def needed(role: str | None, mirror: bool = False) -> list[str]:
+    """What this computer's role needs on macOS (nothing elsewhere).
+    ``mirror``: mirror mode is on, so the screen is captured too."""
     if not MAC:
         return []
     # The host runs gaze switching, so it needs the camera too.
     if role == "host":
-        return [ACCESSIBILITY, INPUT_MONITORING, CAMERA, LOCAL_NETWORK]
-    return [ACCESSIBILITY, LOCAL_NETWORK]
+        want = [ACCESSIBILITY, INPUT_MONITORING, CAMERA, LOCAL_NETWORK]
+    else:
+        want = [ACCESSIBILITY, LOCAL_NETWORK]
+    return want + [SCREEN_RECORDING] if mirror else want
+
+
+def mirror_on(raw: dict) -> bool:
+    """Is mirror mode on in this (host) config's raw settings?"""
+    layout = raw.get("layout") if isinstance(raw, dict) else None
+    return isinstance(layout, dict) and layout.get("mirror") is True and layout.get("allow_overlap") is True
 
 
 def _lib(path: str):
@@ -86,6 +103,10 @@ def _lib(path: str):
 
 def _ax():
     return _lib("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices")
+
+
+def _cg():
+    return _lib("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
 
 
 def _iokit():
@@ -109,14 +130,18 @@ def granted(key: str) -> bool:
             return _camera_status() == _AV_AUTHORIZED
         if key == LOCAL_NETWORK:
             return _local_network_ok()
+        if key == SCREEN_RECORDING:
+            fn = _cg().CGPreflightScreenCaptureAccess
+            fn.restype = ctypes.c_bool
+            return bool(fn())
     except Exception:
         log.warning("couldn't check the %s permission", key, exc_info=True)
         return True  # can't tell: don't nag
     return True
 
 
-def missing(role: str | None) -> list[str]:
-    return [k for k in needed(role) if not granted(k)]
+def missing(role: str | None, mirror: bool = False) -> list[str]:
+    return [k for k in needed(role, mirror) if not granted(k)]
 
 
 def check_command() -> list[str]:
@@ -126,11 +151,11 @@ def check_command() -> list[str]:
     return [sys.executable, "-m", "curslink", "_macperms"]
 
 
-def missing_fresh(role: str | None, timeout: float = 20.0) -> list[str]:
+def missing_fresh(role: str | None, timeout: float = 20.0, mirror: bool = False) -> list[str]:
     """Like :func:`missing`, but asked of a new Curslink process, the way the
     linking service will see it. This process's own answer can stay "no"
     after you allow it in System Settings, until Curslink restarts."""
-    want = needed(role)
+    want = needed(role, mirror)
     if not want:
         return []
     import json
@@ -141,10 +166,10 @@ def missing_fresh(role: str | None, timeout: float = 20.0) -> list[str]:
         return [k for k in want if not answers.get(k, False)]
     except Exception:
         log.warning("couldn't check permissions in a new process; asking this one", exc_info=True)
-        return missing(role)
+        return missing(role, mirror)
 
 
-def request(key: str) -> None:
+def request(key: str, open_settings_too: bool = True) -> None:
     """Ask macOS for ``key``: this adds Curslink to the list in System
     Settings (with the system prompt the first time), then opens that list."""
     if not MAC:
@@ -160,13 +185,20 @@ def request(key: str) -> None:
         elif key == LOCAL_NETWORK:
             if _local_network_ok():  # the first try shows macOS's prompt
                 return
+        elif key == SCREEN_RECORDING:
+            # The system prompt the first time (it offers System Settings).
+            fn = _cg().CGRequestScreenCaptureAccess
+            fn.restype = ctypes.c_bool
+            if fn():
+                return
         elif key == CAMERA and _camera_status() == _AV_NOT_DETERMINED:
             # First time: macOS shows its own prompt, no need for Settings.
             _request_camera()
             return
     except Exception:
         log.warning("couldn't request the %s permission", key, exc_info=True)
-    open_settings(key)
+    if open_settings_too:
+        open_settings(key)
 
 
 _AV_NOT_DETERMINED, _AV_AUTHORIZED = 0, 3

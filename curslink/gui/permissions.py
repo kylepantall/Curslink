@@ -39,9 +39,19 @@ class PermissionsCard(Card):
         self.asked = False  # pressed Allow at least once
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.check)
+        app.config_changed.connect(lambda *_: self.check())  # mirror mode turned on: Screen Recording
         # First answer from this process (instant); after that each check runs
         # in a new process, because macOS keeps a process's first answer.
-        self.apply(macperms.missing(app.role) if app.has_config() else [])
+        self.apply(macperms.missing(app.role, self.mirror()) if app.has_config() else [])
+
+    def mirror(self) -> bool:
+        """Mirror mode is on here (the host), so the screen is captured."""
+        if self.app.role != "host":
+            return False
+        try:
+            return macperms.mirror_on(self.app.config().raw())
+        except Exception:
+            return False
 
     def refresh(self) -> None:
         self.check()
@@ -49,7 +59,8 @@ class PermissionsCard(Card):
     def check(self) -> None:
         if self._checking or not self.app.has_config():
             return
-        if not macperms.needed(self.app.role):
+        mirror = self.mirror()
+        if not macperms.needed(self.app.role, mirror):
             self.apply([])
             return
         self._checking = True
@@ -62,7 +73,7 @@ class PermissionsCard(Card):
         def failed(_exc):
             self._checking = False
 
-        in_background(lambda: macperms.missing_fresh(role), done, failed, name="curslink-macperms")
+        in_background(lambda: macperms.missing_fresh(role, mirror=mirror), done, failed, name="curslink-macperms")
 
     def apply(self, now: list[str]) -> None:
         if now != self._missing:

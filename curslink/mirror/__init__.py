@@ -277,6 +277,7 @@ class MirrorHost:
         self._screen: Screen | None = None
         self._pointer: dict[str, tuple[float, float] | None] = {}
         self._pointer_at = 0.0
+        self._logged: set[str] = set()
 
     def can(self, device_id: str) -> bool:
         if device_id == self.local_id:
@@ -309,8 +310,9 @@ class MirrorHost:
                 continue
             self.sent[device] = state
             self._to(device, "mirror", **state)
-        if streams:
-            log.debug("mirror: %s", ", ".join(self.streams))
+        if set(self.streams) != self._logged:
+            self._logged = set(self.streams)
+            log.info("mirror: %s", ", ".join(f"{s.id} at {s.os_rect(s.source)}" for s in streams) or "nothing to mirror now")
 
     def _to(self, device_id: str, t: str, **data) -> None:
         if device_id == self.local_id:
