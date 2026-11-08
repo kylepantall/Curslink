@@ -3,8 +3,11 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-// CI passes the release's version; local builds are 0.0.0.
-val curslinkVersion = System.getenv("CURSLINK_VERSION")?.removePrefix("v")?.ifEmpty { null } ?: "0.0.0"
+// A release passes its version; other builds take pyproject.toml's, marked -dev.
+val curslinkVersion = System.getenv("CURSLINK_VERSION")?.removePrefix("v")?.takeIf { it.isNotEmpty() && it != "0.0.0" }
+    ?: rootDir.resolve("../pyproject.toml").takeIf { it.exists() }?.readLines()
+        ?.firstNotNullOfOrNull { Regex("""^version\s*=\s*"([^"]+)"""").find(it)?.groupValues?.get(1) }?.let { "$it-dev" }
+    ?: "0.0.0"
 val versionParts = curslinkVersion.split(".").map { it.takeWhile(Char::isDigit).toIntOrNull() ?: 0 } + listOf(0, 0, 0)
 
 android {
