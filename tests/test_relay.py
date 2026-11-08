@@ -239,11 +239,12 @@ async def test_paired_agents_meet_the_host_in_per_pair_rooms(tmp_path):
                              resolve=lambda cfg=cfg, store=store: resolve_host(cfg, store))
         tasks.append(asyncio.create_task(client.run_forever()))
 
-    await wait_for(lambda: server.is_connected("laptop"), 5)
+    # resolve_host listens on mDNS for up to 5 s before trying the relay.
+    await wait_for(lambda: server.is_connected("laptop"), 15)
     assert not server.is_connected("tablet")  # not paired with this host yet
     # pairing the tablet later opens its room without a restart
     host_store.add("tablet", "Tablet", "agent", b"T" * 32)
-    await wait_for(lambda: server.is_connected("tablet"), 5)
+    await wait_for(lambda: server.is_connected("tablet"), 15)
     assert len(relays.links) == 2
     server.send("tablet", "move", x=1, y=2)
     await wait_for(lambda: sinks["tablet"].calls)
