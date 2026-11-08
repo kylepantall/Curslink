@@ -191,6 +191,10 @@ class Layout:
     mirror: bool = False
     # Calibrated overlaps: see Fit.
     fits: tuple[Fit, ...] = ()
+    # Each screen's real size in mm, where its OS says (curslink.screensize):
+    # (device, screen) -> (width_mm, height_mm). Not in the config: filled in
+    # while running, for overlaps that aren't calibrated.
+    physical: dict[tuple[str, str], tuple[float, float]] = field(default_factory=dict)
 
     @classmethod
     def from_devices(cls, devices: Iterable[Device], allow_overlap: bool = False,
@@ -236,6 +240,45 @@ class Layout:
                 return f
         return None
 
+    def set_physical(self, device_id: str, sizes: list[dict]) -> bool:
+        """Take ``device_id``'s monitors' real sizes (as
+        curslink.screensize.physical_sizes gives them, from that computer).
+        True if any of its screens' sizes changed."""
+        from curslink.screensize import match
+
+        changed = False
+        for screen in self.screens(device_id):
+            key = (device_id, screen.id)
+            mm = match(sizes or [], screen.os_x, screen.os_y, screen.width, screen.height)
+            if self.physical.get(key) != mm:
+                changed = True
+                if mm is None:
+                    self.physical.pop(key, None)
+                else:
+                    self.physical[key] = mm
+        return changed
+
+    def sized_fit(self, behind: Screen, front: Screen) -> Fit | None:
+        """Without a calibrated :class:`Fit`, one from the two screens' real
+        sizes (``physical``): ``front`` keeps its middle where the layout has
+        it, at its real size on ``behind``. None if either size is unknown."""
+        a = self.physical.get((behind.device_id, behind.id))
+        b = self.physical.get((front.device_id, front.id))
+        if a is None or b is None:
+            return None
+        try:
+            # behind's pixels per mm over front's: behind's pixels per front pixel.
+            kx = (behind.width / a[0]) / (front.width / b[0])
+            ky = (behind.height / a[1]) / (front.height / b[1])
+        except ZeroDivisionError:
+            return None
+        k = (kx + ky) / 2
+        if not k > 0:
+            return None
+        cx, cy = front.center
+        return Fit((behind.device_id, behind.id), (front.device_id, front.id),
+                   cx - behind.x - k * front.width / 2, cy - behind.y - k * front.height / 2, k)
+
     def covered_parts(self, screen: Screen) -> list[tuple[Screen, tuple[int, int, int, int], tuple[int, int, int, int]]]:
         """Like :meth:`covering`, as ``(front, part behind, part in front)``,
         both in layout pixels: the part of ``screen`` that ``front`` covers,
@@ -243,7 +286,7 @@ class Layout:
         the pair is calibrated (a :class:`Fit`)."""
         out = []
         for front, rect in self.covering(screen):
-            f = self.fit(screen, front)
+            f = self.fit(screen, front) or self.sized_fit(screen, front)
             if f is None:
                 out.append((front, rect, rect))
                 continue

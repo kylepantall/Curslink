@@ -75,6 +75,50 @@ def os_to_logical(screens, rect, scale_positions: bool) -> tuple[float, float, f
     return None
 
 
+def _qscreen(screen_id: str, whole: tuple[float, float, float, float]):
+    """This computer's QScreen for a layout screen: "main" is the primary,
+    "screenN" the Nth (as Layout > Detect names them), else by display name,
+    else the one with its middle where the OS says (logical or physical)."""
+    screens = QGuiApplication.screens()
+    if screen_id == "main":
+        return QGuiApplication.primaryScreen()
+    if screen_id.startswith("screen") and screen_id[6:].isdigit() and 0 < int(screen_id[6:]) <= len(screens):
+        return screens[int(screen_id[6:]) - 1]
+    for sc in screens:
+        if sc.name() == screen_id:
+            return sc
+    x, y, w, h = whole
+    cx, cy = x + w / 2, y + h / 2
+    for sc in screens:
+        g, r = sc.geometry(), sc.devicePixelRatio() or 1.0
+        for k in (1.0, r):
+            if g.x() * k <= cx < (g.x() + g.width()) * k and g.y() * k <= cy < (g.y() + g.height()) * k:
+                return sc
+    return None
+
+
+def spec_to_logical(spec: dict) -> tuple[float, float, float, float, int] | None:
+    """Where a capture's or mirror's ``os`` rectangle is, in Qt's logical
+    pixels, and on which screen. With ``screen_os`` (the whole screen as the
+    host's layout has it) it goes by fractions of that screen, like the
+    pointer and the calibration layers do: Windows' scaling makes a screen's
+    size differ between processes, and the layout may have either."""
+    whole = spec.get("screen_os")
+    if isinstance(whole, list) and len(whole) == 4:
+        try:
+            ox, oy, ow, oh = (float(v) for v in whole)
+            x, y, w, h = (float(v) for v in spec.get("os"))
+            screens = QGuiApplication.screens()
+            qs = _qscreen(str(spec.get("screen", "")), (ox, oy, ow, oh))
+            if qs is not None and ow > 0 and oh > 0 and w > 0 and h > 0:
+                g = qs.geometry()
+                kx, ky = g.width() / ow, g.height() / oh
+                return g.x() + (x - ox) * kx, g.y() + (y - oy) * ky, w * kx, h * ky, screens.index(qs)
+        except (TypeError, ValueError):
+            pass
+    return os_to_logical(_screens(), spec.get("os"), sys.platform == "win32")
+
+
 def fit_jpeg(image: QImage, quality: int, scale: float) -> tuple[bytes, int, float]:
     """``image`` as a JPEG whose base64 fits :data:`MAX_B64`: lowers the
     quality, then the size, until it does. Returns the JPEG and the quality
@@ -215,7 +259,7 @@ class Capture:
         QTimer.singleShot(0, self.grab)
 
     def image(self) -> QImage | None:
-        found = os_to_logical(_screens(), self.spec.get("os"), sys.platform == "win32")
+        found = spec_to_logical(self.spec)
         if found is None:
             self.why = "no screen of this computer is there"
             return None
@@ -300,7 +344,7 @@ class MirrorWindow(QWidget):
         self.ok = self.set(spec)
 
     def set(self, spec: dict) -> bool:
-        found = os_to_logical(_screens(), spec.get("os"), sys.platform == "win32")
+        found = spec_to_logical(spec)
         if found is None:
             return False
         lx, ly, lw, lh, index = found

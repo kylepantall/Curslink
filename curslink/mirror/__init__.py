@@ -34,7 +34,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable
 
-from curslink.layout import Layout, Screen
+from curslink.layout import Fit, Layout, Screen
 
 log = logging.getLogger(__name__)
 
@@ -104,15 +104,95 @@ def streams_for(layout: Layout, screen: Screen, can: Callable[[str], bool] = lam
             for front, rect, there in layout.covered_parts(screen) if can(front.device_id)]
 
 
+def nudge(fit: tuple[float, float, float], dx: float, dy: float) -> tuple[float, float, float]:
+    """Move the picture on the screen in front by (dx, dy) of the screen
+    behind's pixels: the front screen sits that much the other way on it."""
+    x, y, k = fit
+    return (x - dx, y - dy, k)
+
+
+def grow(fit: tuple[float, float, float], factor: float, behind: tuple[float, float],
+         front: tuple[float, float]) -> tuple[float, float, float]:
+    """Make the picture ``factor`` times bigger, keeping the middle of the
+    covered part where it is on the screen in front."""
+    x, y, k = fit
+    k2 = min(MAX_FIT_SCALE, max(MIN_FIT_SCALE, k / factor))
+    out = []
+    for o, size_b, size_f in ((x, behind[0], front[0]), (y, behind[1], front[1])):
+        lo, hi = max(0.0, o), min(size_b, o + k * size_f)
+        c = (lo + hi) / 2 if hi > lo else o + k * size_f / 2
+        u = (c - o) / k  # that point, on the screen in front
+        out.append(c - k2 * u)
+    return (out[0], out[1], k2)
+
+
+MIN_FIT_SCALE, MAX_FIT_SCALE = 0.1, 10.0
+
+
+def current_fit(layout: Layout, behind: Screen, front: Screen) -> tuple[float, float, float]:
+    """Where ``front`` stands on ``behind`` now: calibrated, from the screens'
+    real sizes, or as laid out."""
+    f = layout.fit(behind, front) or layout.sized_fit(behind, front)
+    if f is not None:
+        return (f.x, f.y, f.scale)
+    return (float(front.x - behind.x), float(front.y - behind.y), 1.0)
+
+
+def apply_fit(layout: Layout, data: dict) -> tuple[float, float, float] | None:
+    """Change one overlap's fit in ``layout`` right away, for fine-tuning from
+    the Layout page (the ``fit {...}`` command). ``data`` names
+    ``"behind"`` and ``"front"`` ("device/screen") and then either ``"x",
+    "y", "scale"``; or ``"dx", "dy"`` (move the picture, in the screen
+    behind's pixels) and/or ``"grow"`` (a factor); or ``"reset": true`` to
+    drop the calibrated one. Returns the fit now in use, or None if ``data``
+    doesn't make sense."""
+    try:
+        behind_ref = tuple(str(data["behind"]).split("/", 1))
+        front_ref = tuple(str(data["front"]).split("/", 1))
+        if len(behind_ref) != 2 or len(front_ref) != 2:
+            return None
+        behind, front = layout.screen(*behind_ref), layout.screen(*front_ref)
+    except (KeyError, ValueError, TypeError):
+        return None
+    try:
+        if data.get("reset"):
+            new = None
+        elif "x" in data:
+            new = (float(data["x"]), float(data["y"]), float(data["scale"]))
+        else:
+            new = current_fit(layout, behind, front)
+            new = nudge(new, float(data.get("dx", 0)), float(data.get("dy", 0)))
+            if "grow" in data:
+                new = grow(new, float(data["grow"]), (behind.width, behind.height), (front.width, front.height))
+    except (KeyError, TypeError, ValueError):
+        return None
+    if new is not None and not new[2] > 0:
+        return None
+    keep = tuple(f for f in layout.fits if (f.behind, f.front) != (behind_ref, front_ref))
+    if new is not None:
+        keep += (Fit(behind_ref, front_ref, *new),)
+    layout.fits = keep
+    return current_fit(layout, behind, front)
+
+
+def screen_os(screen: Screen) -> list[int]:
+    """The whole screen as the layout has it, in that computer's OS pixels:
+    the helper places ``os`` rectangles as fractions of it, so a layout size
+    that isn't the screen's real one (Windows scaling) still lands right."""
+    return [screen.os_x, screen.os_y, screen.width, screen.height]
+
+
 def device_states(streams: list[Stream], names: dict[str, str], fps: int) -> dict[str, dict]:
     """What each device should capture and show for ``streams`` (the payload
     of its ``mirror`` frame). Devices with nothing to do aren't listed."""
     out: dict[str, dict] = {}
     for s in streams:
         src = out.setdefault(s.source.device_id, {"captures": [], "shows": []})
-        src["captures"].append({"id": s.id, "screen": s.source.id, "os": s.os_rect(s.source), "fps": fps})
+        src["captures"].append({"id": s.id, "screen": s.source.id, "os": s.os_rect(s.source),
+                                "screen_os": screen_os(s.source), "fps": fps})
         dst = out.setdefault(s.target.device_id, {"captures": [], "shows": []})
-        dst["shows"].append({"id": s.id, "screen": s.target.id, "os": s.os_rect(s.target), "size": list(s.shown[2:]),
+        dst["shows"].append({"id": s.id, "screen": s.target.id, "os": s.os_rect(s.target),
+                             "screen_os": screen_os(s.target), "size": list(s.shown[2:]),
                              "label": names.get(s.source.device_id, s.source.device_id), "edges": s.edges()})
     return out
 
@@ -286,6 +366,10 @@ class MirrorHost:
         self._pointer: dict[str, tuple[float, float] | None] = {}
         self._pointer_at = 0.0
         self._logged: set[str] = set()
+        # Fine-tuning an overlap: mirror the screen behind it, wherever the pointer is.
+        self.held: Screen | None = None
+        # Told the fit in use after each ``fit`` command (the app's events).
+        self.on_fit: Callable[[dict], None] | None = None
 
     def can(self, device_id: str) -> bool:
         if device_id == self.local_id:
@@ -297,8 +381,29 @@ class MirrorHost:
         self._screen = None
         self.update()
 
+    def hold(self, screen: Screen | None) -> None:
+        """Mirror ``screen`` as if it were in use (None: back to the pointer's)."""
+        self.held = screen
+        self.refresh()
+
+    def fit(self, data: dict) -> None:
+        """The ``fit {...}`` command (see :func:`apply_fit`); ``"hold": true``
+        keeps the screen behind mirrored while fine-tuning, ``"hold": false``
+        lets go."""
+        now = apply_fit(self.layout, data)
+        if now is None:
+            return
+        if "hold" in data:
+            device, screen_id = str(data["behind"]).split("/", 1)
+            self.hold(self.layout.screen(device, screen_id) if data["hold"] else None)
+        else:
+            self.refresh()
+        if self.on_fit is not None:
+            self.on_fit({"behind": data["behind"], "front": data["front"], "x": round(now[0], 1),
+                         "y": round(now[1], 1), "scale": round(now[2], 4)})
+
     def update(self) -> None:
-        screen = self.router.screen
+        screen = self.held or self.router.screen
         if screen != self._screen:
             self._screen = screen
             self._plan(screen)

@@ -39,6 +39,8 @@ class AgentConnection:
     platform: str
     writer: asyncio.StreamWriter
     screens: list = field(default_factory=list)
+    # Its monitors' real sizes (curslink.screensize), for mirror mode.
+    screen_mm: list = field(default_factory=list)
     last_seen: float = 0.0
     camera: bool = False          # runs its own camera to confirm gaze switches
     facing: bool | None = None    # last thing that camera reported
@@ -227,6 +229,7 @@ class HostServer:
                 platform=str(hello.get("platform", "?")),
                 writer=writer,
                 screens=list(hello.get("screens", []) or []),
+                screen_mm=[m for m in (hello.get("screen_mm") or []) if isinstance(m, dict)][:16],
                 last_seen=loop.time(),
                 camera=hello.get("camera") is True,
                 features=frozenset(f for f in (hello.get("features") or []) if isinstance(f, str)),
