@@ -38,6 +38,9 @@ class SettingsPage(Page):
         name_row.addStretch(1)
         me.body.addLayout(name_row)
         again = QHBoxLayout()
+        self.switch_button = button("Switch to agent…", None, app.ask_switch_role)
+        self.switch_button.setAccessibleName("Switch this computer between host and agent")
+        again.addWidget(self.switch_button)
         again.addWidget(button("Set this computer up again…", None, lambda: app.show_window("setup")))
         again.addStretch(1)
         me.body.addLayout(again)
@@ -261,6 +264,7 @@ class SettingsPage(Page):
             self.role_text.setText(
                 "Host: the keyboard and mouse are plugged in here." if role == "host"
                 else "Agent: another computer's keyboard and mouse control this one.")
+            self.switch_button.setText("Switch to agent…" if role == "host" else "Switch to host…")
             if role == "host":
                 me = raw.get("host", {}).get("device_id")
                 name = next((d.get("name", me) for d in raw.get("devices", []) if d.get("id") == me), me)
