@@ -319,17 +319,28 @@ class Capture:
 ARROW = [(0, 0), (0, 17.5), (4.4, 13.4), (7.4, 20.6), (10.4, 19.4), (7.5, 12.4), (13.2, 12.4)]
 
 
+EDGE_GRAB = 14  # px from a mirror's side that stretch it while adjusting
+
+
 class MirrorWindow(QWidget):
-    def __init__(self, spec: dict):
+    def __init__(self, spec: dict, out=None):
+        # Adjusting (spec "tune"): it takes the pointer to be dragged, stretched
+        # and zoomed, and says so on ``out`` as mirror_tune lines.
+        self.tune = bool(spec.get("tune"))
+        self.out = out
         flags = (Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint
-                 | Qt.WindowType.WindowTransparentForInput | Qt.WindowType.WindowDoesNotAcceptFocus
-                 | Qt.WindowType.NoDropShadowWindowHint)
+                 | Qt.WindowType.WindowDoesNotAcceptFocus | Qt.WindowType.NoDropShadowWindowHint)
+        if not self.tune:
+            flags |= Qt.WindowType.WindowTransparentForInput
         if sys.platform.startswith("linux"):
             flags |= Qt.WindowType.X11BypassWindowManagerHint
         super().__init__(None, flags)
         for attr in (Qt.WidgetAttribute.WA_TranslucentBackground, Qt.WidgetAttribute.WA_ShowWithoutActivating,
-                     Qt.WidgetAttribute.WA_TransparentForMouseEvents, Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow):
+                     Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow):
             self.setAttribute(attr, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, not self.tune)
+        self.setMouseTracking(self.tune)
+        self._drag: tuple[str, QPointF] | None = None  # (which: "move" or the sides, last global point)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         from curslink.capturehide import exclude_from_capture
 
@@ -407,6 +418,82 @@ class MirrorWindow(QWidget):
             self.timer.stop()
         self.update()
 
+    # -- adjusting -----------------------------------------------------------------
+    def _sides(self, pos: QPointF) -> str:
+        w, h = self.width(), self.height()
+        out = ""
+        if pos.x() < EDGE_GRAB:
+            out += "l"
+        elif pos.x() > w - EDGE_GRAB:
+            out += "r"
+        if pos.y() < EDGE_GRAB:
+            out += "t"
+        elif pos.y() > h - EDGE_GRAB:
+            out += "b"
+        return out
+
+    def _tell(self, **data) -> None:
+        if self.out is not None:
+            self.out("mirror_tune " + json.dumps({"id": self.spec.get("id"), **data}, separators=(",", ":")))
+
+    def mousePressEvent(self, e) -> None:  # noqa: N802
+        if not self.tune:
+            return
+        sides = self._sides(e.position())
+        self._drag = (sides or "move", e.globalPosition())
+
+    def mouseMoveEvent(self, e) -> None:  # noqa: N802
+        if not self.tune:
+            return
+        if self._drag is None:
+            sides = self._sides(e.position())
+            shapes = {"l": Qt.CursorShape.SizeHorCursor, "r": Qt.CursorShape.SizeHorCursor,
+                      "t": Qt.CursorShape.SizeVerCursor, "b": Qt.CursorShape.SizeVerCursor,
+                      "lt": Qt.CursorShape.SizeFDiagCursor, "rb": Qt.CursorShape.SizeFDiagCursor,
+                      "rt": Qt.CursorShape.SizeBDiagCursor, "lb": Qt.CursorShape.SizeBDiagCursor}
+            self.setCursor(shapes.get(sides, Qt.CursorShape.OpenHandCursor))
+            return
+        which, last = self._drag
+        now = e.globalPosition()
+        dx, dy = now.x() - last.x(), now.y() - last.y()
+        if abs(dx) < 1 and abs(dy) < 1:
+            return
+        self._drag = (which, now)
+        w, h = max(1, self.width()), max(1, self.height())
+        if which == "move":
+            self._tell(mx=round(dx / w, 5), my=round(dy / h, 5))
+            return
+        # Stretching a side: bigger by how far it moved, about the opposite side.
+        factors, ax, ay = [], 0.5, 0.5
+        if "r" in which:
+            factors.append((w + dx) / w)
+            ax = 0.0
+        if "l" in which:
+            factors.append((w - dx) / w)
+            ax = 1.0
+        if "b" in which:
+            factors.append((h + dy) / h)
+            ay = 0.0
+        if "t" in which:
+            factors.append((h - dy) / h)
+            ay = 1.0
+        factor = sum(factors) / len(factors)
+        if factor > 0:
+            self._tell(grow=round(factor, 5), ax=ax, ay=ay)
+
+    def mouseReleaseEvent(self, _e) -> None:  # noqa: N802
+        self._drag = None
+
+    def wheelEvent(self, e) -> None:  # noqa: N802
+        if not self.tune:
+            return
+        steps = e.angleDelta().y() / 120 or e.pixelDelta().y() / 40
+        if not steps:
+            return
+        pos = e.position()
+        self._tell(grow=round(1.05 ** steps, 5), ax=round(pos.x() / max(1, self.width()), 4),
+                   ay=round(pos.y() / max(1, self.height()), 4))
+
     def paintEvent(self, _e) -> None:  # noqa: N802
         if self.pixmap is None:
             return
@@ -438,7 +525,13 @@ class MirrorWindow(QWidget):
                 p.drawLine(a, b)
         if self.pointer is not None:
             self.paint_pointer(p, QPointF(r.x() + self.pointer[0] * r.width(), r.y() + self.pointer[1] * r.height()))
-        if age < TAG_S + 0.5:
+        if self.tune:
+            pen = QPen(QColor(ACCENT), 3, Qt.PenStyle.DashLine)
+            p.setPen(pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRect(r.adjusted(1.5, 1.5, -1.5, -1.5))
+            self.paint_tag(p, r, 1.0, "Drag to move · scroll to zoom · drag a side to stretch")
+        elif age < TAG_S + 0.5:
             self.paint_tag(p, r, 1.0 if age < TAG_S else max(0.0, 1 - (age - TAG_S) / 0.5))
         p.end()
 
@@ -454,8 +547,8 @@ class MirrorWindow(QWidget):
         p.setBrush(QColor("white"))
         p.drawPath(path)
 
-    def paint_tag(self, p: QPainter, r: QRectF, alpha: float) -> None:
-        text = f"{self.spec.get('label') or 'Behind'} · live"
+    def paint_tag(self, p: QPainter, r: QRectF, alpha: float, text: str = "") -> None:
+        text = text or f"{self.spec.get('label') or 'Behind'} · live"
         font = QFont()
         font.setPixelSize(12)
         font.setWeight(QFont.Weight.DemiBold)
@@ -532,12 +625,22 @@ class MirrorHelper:
                 self.windows.pop(sid).close_soon()
         for sid, spec in shows.items():
             window = self.windows.get(sid)
+            old = None
+            if window is not None and window.tune != bool(spec.get("tune")):
+                # Taking the pointer or not is fixed when a window is made.
+                old = self.windows.pop(sid)
+                old.close_soon()
+                window = None
             if window is None:
-                window = MirrorWindow(spec)
+                window = MirrorWindow(spec, self.out)
                 if not window.ok:
                     log.warning("mirror: no screen here at %s", spec.get("os"))
                     window.deleteLater()
                     continue
+                if old is not None and old.pixmap is not None:
+                    window.pixmap = old.pixmap
+                    window.shown_at = time.monotonic() - TAG_S - 1  # no "live" tag again
+                    window.show()
                 self.windows[sid] = window
             elif not window.set(spec):
                 self.windows.pop(sid).close_soon()

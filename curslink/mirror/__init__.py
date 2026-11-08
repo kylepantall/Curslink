@@ -162,7 +162,13 @@ def apply_fit(layout: Layout, data: dict) -> tuple[float, float, float] | None:
         else:
             new = current_fit(layout, behind, front)
             new = nudge(new, float(data.get("dx", 0)), float(data.get("dy", 0)))
-            if "grow" in data:
+            if "grow" in data and isinstance(data.get("anchor"), (list, tuple)) and len(data["anchor"]) == 2:
+                # Bigger about a point of the front screen (its pixels) that stays put.
+                x, y, k = new
+                k2 = min(MAX_FIT_SCALE, max(MIN_FIT_SCALE, k / float(data["grow"])))
+                u, v = float(data["anchor"][0]), float(data["anchor"][1])
+                new = (x + (k - k2) * u, y + (k - k2) * v, k2)
+            elif "grow" in data:
                 new = grow(new, float(data["grow"]), (behind.width, behind.height), (front.width, front.height))
     except (KeyError, TypeError, ValueError):
         return None
@@ -182,7 +188,8 @@ def screen_os(screen: Screen) -> list[int]:
     return [screen.os_x, screen.os_y, screen.width, screen.height]
 
 
-def device_states(streams: list[Stream], names: dict[str, str], fps: int) -> dict[str, dict]:
+def device_states(streams: list[Stream], names: dict[str, str], fps: int,
+                  tuning: tuple[str, str] | None = None) -> dict[str, dict]:
     """What each device should capture and show for ``streams`` (the payload
     of its ``mirror`` frame). Devices with nothing to do aren't listed."""
     out: dict[str, dict] = {}
@@ -194,6 +201,8 @@ def device_states(streams: list[Stream], names: dict[str, str], fps: int) -> dic
         dst["shows"].append({"id": s.id, "screen": s.target.id, "os": s.os_rect(s.target),
                              "screen_os": screen_os(s.target), "size": list(s.shown[2:]),
                              "label": names.get(s.source.device_id, s.source.device_id), "edges": s.edges()})
+        if tuning == (f"{s.source.device_id}/{s.source.id}", f"{s.target.device_id}/{s.target.id}"):
+            dst["shows"][-1]["tune"] = True  # the mirror takes the pointer: drag, stretch and zoom it
     return out
 
 
@@ -329,6 +338,15 @@ class MirrorPeer:
 
     def helper_line(self, line: str) -> bool:
         """A line the helper printed: True if it was mirror mode's."""
+        word, _, rest = line.partition(" ")
+        if word == "mirror_tune":
+            try:
+                data = json.loads(rest)
+            except json.JSONDecodeError:
+                return True
+            if isinstance(data, dict) and data.get("id") in self.showing:
+                self.send("mirror_tune", **data)
+            return True
         frame = helper_frame(line)
         if frame is None:
             return False
@@ -370,6 +388,10 @@ class MirrorHost:
         self.held: Screen | None = None
         # Told the fit in use after each ``fit`` command (the app's events).
         self.on_fit: Callable[[dict], None] | None = None
+        # Adjusting an overlap on the mirror itself: ("behind", "front") keys,
+        # and the layout's pointer_through to put back after.
+        self.tuning: tuple[str, str] | None = None
+        self._through = layout.pointer_through
 
     def can(self, device_id: str) -> bool:
         if device_id == self.local_id:
@@ -393,6 +415,8 @@ class MirrorHost:
         now = apply_fit(self.layout, data)
         if now is None:
             return
+        if "tune" in data or data.get("hold") is False:
+            self.set_tuning((str(data["behind"]), str(data["front"])) if data.get("tune") else None)
         if "hold" in data:
             device, screen_id = str(data["behind"]).split("/", 1)
             self.hold(self.layout.screen(device, screen_id) if data["hold"] else None)
@@ -401,6 +425,47 @@ class MirrorHost:
         if self.on_fit is not None:
             self.on_fit({"behind": data["behind"], "front": data["front"], "x": round(now[0], 1),
                          "y": round(now[1], 1), "scale": round(now[2], 4)})
+
+    def set_tuning(self, pair: tuple[str, str] | None) -> None:
+        """Let the mirror of ``pair`` take the pointer, to drag, stretch and
+        zoom it (None: done). While it does, the pointer doesn't go through
+        to the screen behind, so it can reach the mirror."""
+        if pair == self.tuning:
+            return
+        if self.tuning is None:
+            self._through = self.layout.pointer_through
+        self.tuning = pair
+        self.layout.pointer_through = False if pair is not None else self._through
+        self.sent = {d: {} for d in self.sent}  # send the shows again, with or without "tune"
+
+    def tune(self, data: dict) -> None:
+        """A ``mirror_tune`` from the mirror being adjusted: ``{"id", "mx", "my"}``
+        (dragged by that fraction of its size) or ``{"id", "grow", "ax", "ay"}``
+        (bigger about that point, as fractions of it)."""
+        stream = self.streams.get(data.get("id"))
+        if stream is None or self.tuning is None:
+            return
+        behind, front = stream.source, stream.target
+        pair = (f"{behind.device_id}/{behind.id}", f"{front.device_id}/{front.id}")
+        if pair != self.tuning:
+            return
+        sx, sy, sw, sh = stream.shown
+        k = current_fit(self.layout, behind, front)[2]
+        cmd: dict = {"behind": pair[0], "front": pair[1]}
+        try:
+            if "grow" in data:
+                factor = float(data["grow"])
+                if not 0.2 <= factor <= 5:
+                    return
+                cmd["grow"] = factor
+                cmd["anchor"] = [sx - front.x + float(data.get("ax", 0.5)) * sw,
+                                 sy - front.y + float(data.get("ay", 0.5)) * sh]
+            else:
+                cmd["dx"] = float(data.get("mx", 0)) * sw * k
+                cmd["dy"] = float(data.get("my", 0)) * sh * k
+        except (TypeError, ValueError):
+            return
+        self.fit(cmd)
 
     def update(self) -> None:
         screen = self.held or self.router.screen
@@ -413,7 +478,7 @@ class MirrorHost:
         streams = streams_for(self.layout, screen, self.can)
         self.streams = {s.id: s for s in streams}
         self._pointer = {sid: p for sid, p in self._pointer.items() if sid in self.streams}
-        states = device_states(streams, self.names, self.fps)
+        states = device_states(streams, self.names, self.fps, self.tuning)
         for device in set(self.sent) | set(states):
             state = states.get(device, EMPTY)
             if self.sent.get(device, EMPTY) == state:
@@ -458,6 +523,8 @@ class MirrorHost:
             self.on_frame(device_id, data)
         elif t == "mirror_ack":
             self.on_ack(device_id, data.get("id"))
+        elif t == "mirror_tune":
+            self.tune(data)
 
     def local_send(self, t: str, **data) -> None:
         """What this computer's own MirrorPeer sends 'to the host'."""
@@ -465,6 +532,8 @@ class MirrorHost:
             self.on_frame(self.local_id, data)
         elif t == "mirror_ack":
             self.on_ack(self.local_id, data.get("id"))
+        elif t == "mirror_tune":
+            self.tune(data)
 
     # -- the pointer -------------------------------------------------------------
     def _captures_cursor(self, device_id: str) -> bool:

@@ -70,6 +70,8 @@ Agent -> host
                                        host whose welcome.features has "popups")
     popup_result {chat, ok}            whether a popup_in chat opened here
     mirror_frame {id, jpg, w, h}       a frame of a mirror it captures
+    mirror_tune {id, mx, my} | {id, grow, ax, ay}
+                                       the mirror being adjusted was dragged or zoomed
     mirror_ack   {id}                  a frame of a mirror it shows was shown
 
 ``hello.camera`` is true when the agent runs its own camera to confirm
@@ -123,6 +125,7 @@ MESSAGE_TYPES = frozenset(
         "mirror_frame",
         "mirror_pointer",
         "mirror_ack",
+        "mirror_tune",
         "edge",
         "bye",
         "drag",

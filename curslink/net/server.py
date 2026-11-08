@@ -294,7 +294,7 @@ class HostServer:
             self.on_isolink(conn.device_id, dict(msg.data))
         elif msg.t == "popup_result":
             self.on_popup_result(conn.device_id, dict(msg.data))
-        elif msg.t in ("mirror_frame", "mirror_ack"):
+        elif msg.t in ("mirror_frame", "mirror_ack", "mirror_tune"):
             self.on_mirror(conn.device_id, msg.t, dict(msg.data))
         elif msg.t.startswith("file_"):
             reply = self.on_files(conn.device_id, msg)

@@ -229,9 +229,11 @@ front of it shows the part it covers, live (`curslink.mirror`).
   shows in front.
 - Fine-tuning: what lines up depends on where you sit (the screen in front
   is nearer to you), so "Fine-tune…" (`curslink.gui.fittune`) holds the
-  mirror up and moves or resizes it with the arrow keys and +/- while you
-  look. Each change goes to the service as `fit {...}`
-  (`curslink.mirror.apply_fit`), so it shows at once; Save writes the
+  mirror up and lets you adjust it on the mirror itself: the host marks its
+  show spec `"tune"`, the helper's mirror window then takes the pointer
+  (the layout's `pointer_through` is off meanwhile so the pointer can reach
+  it) and reports drags, side stretches and wheel zooms as `mirror_tune`
+  frames; `MirrorHost.tune` turns them into `fit` changes. Save writes the
   `[[layout.fit]]` without a restart.
 - Curslink's own overlay windows (the edge indicator, mirrors) are kept out
   of captures (`curslink.capturehide`; on macOS the capture also leaves out

@@ -643,7 +643,7 @@ def test_fine_tune_dialog_sends_nudges_and_saves_what_the_service_says(qapp):
     d = FitTuneDialog(b, f, None, sent.append)
     d.saved.connect(saved.append)
     last = lambda: json.loads(sent[-1][4:])  # noqa: E731
-    assert last() == {"behind": "pc/main", "front": "lap/main", "hold": True}
+    assert last() == {"behind": "pc/main", "front": "lap/main", "hold": True, "tune": True}
     d.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Right, Qt.KeyboardModifier.NoModifier))
     assert last()["dx"] == 1 and last()["dy"] == 0
     d.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Down, Qt.KeyboardModifier.ShiftModifier))
@@ -792,3 +792,83 @@ def test_edge_glow_and_label_follow_the_fit():
     # ...and the one on the laptop sits on the mirror's bottom edge, 200 px down.
     assert hint.target_side == "top" and hint.trect[1] == 600
     assert (hint.ta, hint.tb) == pytest.approx((0, 300))
+
+
+def test_adjusting_a_mirror_on_itself_moves_and_zooms_the_fit():
+    lines = []
+    transport = Transport({"lap"}, {"lap"})
+    host, router, local = make_host(desk(), transport, lines)
+    assert router.layout.pointer_through
+    host.fit({"behind": "pc/main", "front": "lap/main", "hold": True, "tune": True})
+    show, = transport.of("mirror", "lap")[-1]["shows"]
+    assert show["tune"] is True
+    assert not router.layout.pointer_through  # the pointer can reach the mirror
+    sid = show["id"]
+    pc, lap = router.layout.screen("pc", "main"), router.layout.screen("lap", "main")
+    # Dragged right by a tenth of its 200 px: the picture moves 20 px right.
+    host.on_message("lap", "mirror_tune", {"id": sid, "mx": 0.1, "my": 0})
+    f = router.layout.fit(pc, lap)
+    assert (f.x, f.y, f.scale) == pytest.approx((780, 400, 1.0))
+    # Zoomed 2x about its top-left corner: that corner stays where it is.
+    host.on_message("lap", "mirror_tune", {"id": sid, "grow": 2, "ax": 0, "ay": 0})
+    f = router.layout.fit(pc, lap)
+    assert f.scale == pytest.approx(0.5)
+    # The mirror's top-left (the laptop's own top-left now) still shows PC (780, 400).
+    assert (f.x, f.y) == pytest.approx((780, 400))
+    # From a mirror not being adjusted: nothing.
+    host.on_message("lap", "mirror_tune", {"id": "other", "mx": 1})
+    # Done: the pointer goes through again, and the mirror lets it.
+    host.fit({"behind": "pc/main", "front": "lap/main", "dx": 0, "hold": False})
+    assert router.layout.pointer_through and host.tuning is None
+
+
+def test_the_peer_passes_a_mirrors_adjustments_to_the_host():
+    sent = []
+    peer = MirrorPeer(lambda line: None, lambda t, **d: sent.append((t, d)))
+    peer.handle("mirror", {"captures": [], "shows": [{"id": "s", "screen": "main", "os": [0, 0, 10, 10]}]})
+    assert peer.helper_line('mirror_tune {"id": "s", "mx": 0.5, "my": 0}')
+    assert peer.helper_line('mirror_tune {"id": "gone", "mx": 0.5}')
+    assert sent == [("mirror_tune", {"id": "s", "mx": 0.5, "my": 0})]
+
+
+def test_a_mirror_being_adjusted_takes_drags_and_the_wheel(qapp):
+    from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+    from PySide6.QtGui import QMouseEvent, QWheelEvent
+
+    from curslink.mirror.helper import MirrorHelper
+
+    out = []
+    helper = MirrorHelper(out.append)
+    spec = {"id": "s", "screen": "main", "os": [200, 150, 200, 100], "label": "PC", "edges": []}
+    helper.handle("mirror " + json.dumps({"captures": [], "shows": [spec]}))
+    plain = helper.windows["s"]
+    assert not plain.tune and plain.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+    helper.handle("mirror " + json.dumps({"captures": [], "shows": [{**spec, "tune": True}]}))
+    window = helper.windows["s"]
+    assert window is not plain and window.tune
+    assert not window.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+
+    def mouse(kind, x, y, button=Qt.MouseButton.LeftButton):
+        local = QPointF(x, y)
+        glob = QPointF(window.mapToGlobal(QPoint(x, y)))
+        return QMouseEvent(kind, local, glob, button, button, Qt.KeyboardModifier.NoModifier)
+
+    # Drag from the middle: it moves.
+    window.mousePressEvent(mouse(QEvent.Type.MouseButtonPress, 100, 50))
+    window.mouseMoveEvent(mouse(QEvent.Type.MouseMove, 120, 40))
+    window.mouseReleaseEvent(mouse(QEvent.Type.MouseButtonRelease, 120, 40))
+    tune = json.loads(out[-1].partition(" ")[2])
+    assert out[-1].startswith("mirror_tune ") and tune == {"id": "s", "mx": 0.1, "my": -0.1}
+    # Drag the right side out by 20 px: 10% bigger, about the left side.
+    window.mousePressEvent(mouse(QEvent.Type.MouseButtonPress, 195, 50))
+    window.mouseMoveEvent(mouse(QEvent.Type.MouseMove, 215, 50))
+    window.mouseReleaseEvent(mouse(QEvent.Type.MouseButtonRelease, 215, 50))
+    assert json.loads(out[-1].partition(" ")[2]) == {"id": "s", "grow": 1.1, "ax": 0.0, "ay": 0.5}
+    # One wheel notch: 5% bigger about the pointer.
+    window.wheelEvent(QWheelEvent(QPointF(50, 25), QPointF(window.mapToGlobal(QPoint(50, 25))), QPoint(0, 0),
+                                  QPoint(0, 120), Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+                                  Qt.ScrollPhase.NoScrollPhase, False))
+    assert json.loads(out[-1].partition(" ")[2]) == {"id": "s", "grow": 1.05, "ax": 0.25, "ay": 0.25}
+    window.grab()  # paints the outline and hint without trouble
+    helper.handle('mirror {"captures": [], "shows": []}')
+    qapp.processEvents()
