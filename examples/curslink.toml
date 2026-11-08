@@ -139,7 +139,7 @@ confirm_with_agents = true   # agents running their own camera ([agent.gaze])
 # device (which wins). A table replaces the built-in mapping for its pair; an
 # empty one changes no keys. Names are by family: cmd also covers cmd_l and
 # cmd_r (cmd is the Windows / Super key on a PC). Settings > Keyboard >
-# Key mappings edits these.
+# Change a single key > Customise edits these.
 # [keymap]
 # "linux>windows" = { caps_lock = "ctrl" }
 # "mac>windows" = { cmd = "ctrl", ctrl = "cmd", alt = "alt" }
@@ -191,7 +191,7 @@ animations = true
 udp = true                   # take pointer moves by UDP when the host is reached
                              # directly (never through a relay)
 # This computer's own fixes for keys the host sends, applied after the
-# host's [keymap]. Settings > Keyboard > "My keyboard is set up wrong" finds
+# host's [keymap]. Settings > Keyboard > "Fix a key" finds
 # and saves them; by family, so ctrl covers ctrl_l and ctrl_r:
 # modifier_map = { ctrl = "cmd", caps_lock = "esc" }
 

@@ -2,7 +2,7 @@
 
 * :class:`PairMapDialog` (host): what each key becomes on its way to another
   computer, per pair of systems (``mac>windows``) or for one device.
-* :class:`KeyboardCheckDialog` (agent): "My keyboard is set up wrong". It
+* :class:`KeyboardCheckDialog` (agent): "Fix a key". It
   listens to the keys the host sends (the running agent reports them instead
   of typing them, see ``keys learn on`` in :mod:`curslink.events`) and works
   out fixes two ways: a guided check that asks for keys this system has, and
@@ -152,15 +152,15 @@ class PairMapDialog(QDialog):
 
     def __init__(self, config, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Key mappings")
+        self.setWindowTitle("Change keys")
         self.config = config
         raw = config.raw()
         me = raw.get("host", {}).get("device_id")
         self.presets = bool(raw.get("host", {}).get("swap_cmd_ctrl", True))
         self.changes: dict[str, dict[str, str] | None] = {}
         v = QVBoxLayout(self)
-        v.addWidget(label("Choose a pair, then the keys that change when you type from the first into the "
-                          "second. Pairs you leave alone use the built-in mapping.", "small", wrap=True))
+        v.addWidget(label("Keys already follow each computer's shortcuts. Change one here only if it does "
+                          "the wrong thing when you type from one system into another.", "small", wrap=True))
         pick = QHBoxLayout()
         self.src = QComboBox()
         self.dst = QComboBox()
@@ -185,7 +185,7 @@ class PairMapDialog(QDialog):
         self.rows = MapRows()
         v.addWidget(self.rows)
         actions = QHBoxLayout()
-        self.reset_button = button("Use the built-in mapping", None, self.reset)
+        self.reset_button = button("Back to automatic", None, self.reset)
         actions.addWidget(self.reset_button)
         actions.addStretch(1)
         v.addLayout(actions)
@@ -235,12 +235,12 @@ class PairMapDialog(QDialog):
         if dst.startswith("device:"):
             self.note.setText("Keys for this device only: they replace the mapping for its system.")
         elif custom is not None:
-            self.note.setText("Your own mapping for this pair.")
+            self.note.setText("You changed keys for this pair.")
         elif mapping:
-            self.note.setText("The built-in mapping: Cmd and Ctrl trade places, so shortcuts stay under the "
-                              "same finger. Change it here, or turn it off in Settings.")
+            self.note.setText("Automatic: Cmd and Ctrl trade places, so shortcuts work the way each computer "
+                              "expects.")
         else:
-            self.note.setText("The built-in mapping changes no keys for this pair.")
+            self.note.setText("Automatic: every key works as usual for this pair.")
         self.reset_button.setEnabled(custom is not None)
 
     def reset(self) -> None:
@@ -361,7 +361,7 @@ class KeyboardView(QWidget):
 
 
 class KeyboardCheckDialog(QDialog):
-    """Agent: "My keyboard is set up wrong". A step-by-step window: get
+    """Agent: "Fix a key". A step-by-step window: get
     ready, check my keys (the key to press lights up on a drawn keyboard for
     this system), teach a key (shared keyboard, then this computer's own),
     review and save. Fixes are saved on this computer."""

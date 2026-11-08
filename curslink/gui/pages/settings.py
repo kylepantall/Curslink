@@ -136,19 +136,18 @@ class SettingsPage(Page):
 
         # -- keyboard (host) ------------------------------------------------------
         self.keyboard_card = Card("Keyboard", rows=True)
-        self.swap_keys = Toggle("Swap Cmd and Ctrl between Mac and PC")
+        title = "Use each computer's shortcuts"
+        self.swap_keys = Toggle(title)
         self.swap_keys.clicked.connect(lambda on: self.set_config("host", "swap_cmd_ctrl", on))
         if sys.platform == "darwin":
-            detail = ("On a Windows or Linux computer, Cmd works as Ctrl and Ctrl works as the Windows key, so "
-                      "Cmd+C copies and Cmd+V pastes the way they do here. Option is Alt.")
+            detail = ("Automatic. On Windows and Linux, Cmd works as Ctrl, so Cmd+C copies and Cmd+V pastes the way "
+                      "they do here. On a Mac every key works as usual.")
         else:
-            detail = ("On a Mac, Ctrl works as Cmd and the Windows key works as Ctrl, so Ctrl+C copies and "
-                      "Ctrl+V pastes the way they do here. Alt is Option.")
-        self.keyboard_card.add_row(text_block("Swap Cmd and Ctrl between Mac and PC", detail), self.swap_keys)
-        self.pair_maps_button = button("Key mappings…", None, self.edit_pair_maps)
-        self.pair_maps_text = text_block(
-            "Key mappings for each pair",
-            "Change what any key becomes from this computer to macOS, Windows, Linux or Android, or to one device.")
+            detail = ("Automatic. On a Mac, Ctrl works as Cmd, so Ctrl+C copies and Ctrl+V pastes the way they do "
+                      "here. On Windows and Linux every key works as usual.")
+        self.keyboard_card.add_row(text_block(title, detail), self.swap_keys)
+        self.pair_maps_button = button("Customise…", None, self.edit_pair_maps)
+        self.pair_maps_text = text_block("Change a single key", "Only needed if a key does the wrong thing.")
         self.keyboard_card.add_row(self.pair_maps_text, self.pair_maps_button)
         self.add(self.keyboard_card)
 
@@ -174,10 +173,10 @@ class SettingsPage(Page):
         self.add(self.mirror_card)
         # -- keyboard (agent) -----------------------------------------------------
         self.agent_keys_card = Card("Keyboard", rows=True)
-        self.fix_keys_button = button("My keyboard is set up wrong…", None, self.check_keyboard)
+        self.fix_keys_button = button("Fix a key…", None, self.check_keyboard)
         self.fix_keys_text = text_block(
             "Keys from the shared keyboard",
-            "If a key does the wrong thing here, check the keys or teach one, and the fix is saved on this computer.")
+            "They follow this computer's shortcuts automatically. If one does the wrong thing, fix it here.")
         self.agent_keys_card.add_row(self.fix_keys_text, self.fix_keys_button)
         self.add(self.agent_keys_card)
 
@@ -334,13 +333,12 @@ class SettingsPage(Page):
             if role == "host":
                 custom = len(raw.get("keymap", {}) or {})
                 self.pair_maps_text.detail_label.setText(
-                    "Change what any key becomes from this computer to macOS, Windows, Linux or Android, or to "
-                    "one device." + (f" {custom} pair{'s' if custom != 1 else ''} use your own mapping." if custom else ""))
+                    "Only needed if a key does the wrong thing." + (" You have changed some keys." if custom else ""))
             else:
                 fixes = len(raw.get("agent", {}).get("modifier_map", {}) or {})
                 self.fix_keys_text.detail_label.setText(
-                    "If a key does the wrong thing here, check the keys or teach one, and the fix is saved on this "
-                    "computer." + (f" {fixes} key{'s' if fixes != 1 else ''} fixed so far." if fixes else ""))
+                    "They follow this computer's shortcuts automatically. If one does the wrong thing, fix it here."
+                    + (f" {fixes} key{'s' if fixes != 1 else ''} fixed on this computer." if fixes else ""))
             if role == "host":
                 self.load_jumps(raw)
             self.agent_card.setVisible(role == "agent")

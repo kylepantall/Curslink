@@ -201,7 +201,7 @@ def key_label(name: str, kind: str = "") -> str:
 
 
 def guided_steps(kind: str) -> list[tuple[str, str]]:
-    """What the "My keyboard is set up wrong" check asks for on a ``kind``
+    """What the "Fix a key" check asks for on a ``kind``
     computer: (key name expected, what to ask). Modifiers first, then the
     letters that move between QWERTY, QWERTZ and AZERTY."""
     mods = [("ctrl", "ctrl"), ("cmd", "cmd"), ("alt", "alt")] if kind != "mac" else \
