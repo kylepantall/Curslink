@@ -135,7 +135,21 @@ class SettingsPage(Page):
             detail = ("On a Mac, Ctrl works as Cmd and the Windows key works as Ctrl, so Ctrl+C copies and "
                       "Ctrl+V pastes the way they do here. Alt is Option.")
         self.keyboard_card.add_row(text_block("Swap Cmd and Ctrl between Mac and PC", detail), self.swap_keys)
+        self.pair_maps_button = button("Key mappings…", None, self.edit_pair_maps)
+        self.pair_maps_text = text_block(
+            "Key mappings for each pair",
+            "Change what any key becomes from this computer to macOS, Windows, Linux or Android, or to one device.")
+        self.keyboard_card.add_row(self.pair_maps_text, self.pair_maps_button)
         self.add(self.keyboard_card)
+
+        # -- keyboard (agent) -----------------------------------------------------
+        self.agent_keys_card = Card("Keyboard", rows=True)
+        self.fix_keys_button = button("My keyboard is set up wrong…", None, self.check_keyboard)
+        self.fix_keys_text = text_block(
+            "Keys from the shared keyboard",
+            "If a key does the wrong thing here, check the keys or teach one, and the fix is saved on this computer.")
+        self.agent_keys_card.add_row(self.fix_keys_text, self.fix_keys_button)
+        self.add(self.agent_keys_card)
 
         # -- per-monitor jumps (host) ---------------------------------------------
         self.jump_card = Card("Jump to the monitor you look at", rows=True)
@@ -278,6 +292,17 @@ class SettingsPage(Page):
             self.switching.setVisible(role == "host")
             self.jump_card.setVisible(role == "host")
             self.keyboard_card.setVisible(role == "host")
+            self.agent_keys_card.setVisible(role == "agent")
+            if role == "host":
+                custom = len(raw.get("keymap", {}) or {})
+                self.pair_maps_text.detail_label.setText(
+                    "Change what any key becomes from this computer to macOS, Windows, Linux or Android, or to "
+                    "one device." + (f" {custom} pair{'s' if custom != 1 else ''} use your own mapping." if custom else ""))
+            else:
+                fixes = len(raw.get("agent", {}).get("modifier_map", {}) or {})
+                self.fix_keys_text.detail_label.setText(
+                    "If a key does the wrong thing here, check the keys or teach one, and the fix is saved on this "
+                    "computer." + (f" {fixes} key{'s' if fixes != 1 else ''} fixed so far." if fixes else ""))
             if role == "host":
                 self.load_jumps(raw)
             self.agent_card.setVisible(role == "agent")
@@ -464,6 +489,20 @@ class SettingsPage(Page):
         except OSError as exc:
             self.login.setChecked(not on)
             self.update_text.setText(f"Couldn't change start at sign-in: {exc}")
+
+    def edit_pair_maps(self) -> None:
+        from curslink.gui.keymap import PairMapDialog
+
+        cfg = self.app.config()
+        dialog = PairMapDialog(cfg, self.window())
+        if dialog.exec():
+            cfg.save()
+            self.app.config_saved(restart=True)
+
+    def check_keyboard(self) -> None:
+        from curslink.gui.keymap import KeyboardCheckDialog
+
+        KeyboardCheckDialog(self.app, self.window()).exec()
 
     def set_config(self, table: str, key: str, value, restart: bool = True) -> None:
         if self._loading:

@@ -61,6 +61,165 @@ def swap_cmd_ctrl(key: str) -> str:
     return _CMD_CTRL_SWAP.get(key, key)
 
 
+OS_KINDS = ("mac", "windows", "linux", "android")
+OS_LABELS = {"mac": "macOS", "windows": "Windows", "linux": "Linux", "android": "Android"}
+
+
+def os_kind(platform: str) -> str:
+    """``"mac"``, ``"windows"``, ``"linux"``, ``"android"`` or ``""`` (unknown).
+
+    Takes the same text as :func:`os_family`; Android agents send ``"Android 14"``.
+    """
+    p = (platform or "").strip().lower()
+    if p.startswith(("darwin", "mac", "ios")):
+        return "mac"
+    if p.startswith(("win", "cygwin")):
+        return "windows"
+    if p.startswith("android"):
+        return "android"
+    if p.startswith(("linux", "freebsd", "openbsd", "netbsd")):
+        return "linux"
+    return ""
+
+
+def pair_key(src: str, dst: str) -> str:
+    """How a pair is written in ``[keymap]``: ``"mac>windows"``."""
+    return f"{src}>{dst}"
+
+
+def preset_map(src: str, dst: str) -> dict[str, str]:
+    """The built-in mapping for typing on a ``src`` keyboard into a ``dst``
+    computer: Cmd and Ctrl trade places between a Mac and Windows or Linux.
+    Android takes Cmd and Ctrl both as Ctrl already, so it needs nothing."""
+    pc = ("windows", "linux")
+    if (src == "mac" and dst in pc) or (src in pc and dst == "mac"):
+        return {"cmd": "ctrl", "ctrl": "cmd"}
+    return {}
+
+
+_SIDES = ("", "_l", "_r")
+
+
+def expand_map(mapping: dict[str, str]) -> dict[str, str]:
+    """A mapping written by family (``cmd = "ctrl"``) as exact key names.
+
+    A modifier family maps each side to the same side (``cmd_l`` ->
+    ``ctrl_l``) unless that side is written out itself; ``alt`` covers
+    ``alt_gr`` too. A letter covers its capital (``z = "y"`` also turns
+    ``Z`` into ``Y``)."""
+    out: dict[str, str] = {}
+    for src, dst in mapping.items():
+        src, dst = str(src).strip(), str(dst).strip()
+        if not src or not dst:
+            continue
+        if src in MODIFIER_FAMILIES and dst in MODIFIER_FAMILIES:
+            for side in _SIDES:
+                out.setdefault(src + side, dst + side)
+            if src == "alt":
+                out.setdefault("alt_gr", dst + "_r")
+        elif src in MODIFIER_FAMILIES:
+            for name in MODIFIER_FAMILIES[src]:
+                out.setdefault(name, dst)
+        elif len(src) == 1 and src.isalpha():
+            out.setdefault(src.lower(), dst)
+            out.setdefault(src.upper(), dst.upper() if len(dst) == 1 else dst)
+        else:
+            out.setdefault(src, dst)
+    # Exact names written in the table win over what a family filled in.
+    for src, dst in mapping.items():
+        src, dst = str(src).strip(), str(dst).strip()
+        if src and dst and src not in MODIFIER_FAMILIES and len(src) > 1:
+            out[src] = dst
+    return {k: v for k, v in out.items() if k != v}
+
+
+class KeyMaps:
+    """The host's keyboard mappings, per pair of computers.
+
+    ``custom`` holds the ``[keymap]`` tables: ``"mac>windows"`` for a pair of
+    systems, ``"device:<id>"`` for one device (which wins). A pair without a
+    table of its own gets :func:`preset_map` when ``presets`` is on (the old
+    ``[host].swap_cmd_ctrl``); a table, even an empty one, replaces it."""
+
+    def __init__(self, custom: dict[str, dict[str, str]] | None = None, presets: bool = True):
+        self.custom = {k: dict(v) for k, v in (custom or {}).items()}
+        self.presets = presets
+        self._cache: dict[tuple[str, str, str], dict[str, str]] = {}
+
+    def table(self, src: str, dst: str, device_id: str = "") -> dict[str, str]:
+        """The mapping (as written, by family) for typing from ``src`` into
+        ``dst``, or into ``device_id``."""
+        if device_id and f"device:{device_id}" in self.custom:
+            return self.custom[f"device:{device_id}"]
+        if pair_key(src, dst) in self.custom:
+            return self.custom[pair_key(src, dst)]
+        return preset_map(src, dst) if self.presets else {}
+
+    def mapping(self, local_platform: str, remote_platform: str, device_id: str = "") -> dict[str, str]:
+        src, dst = os_kind(local_platform), os_kind(remote_platform)
+        k = (src, dst, device_id)
+        if k not in self._cache:
+            self._cache[k] = expand_map(self.table(src, dst, device_id)) if (src and dst) or device_id else {}
+        return self._cache[k]
+
+    def key(self, local_platform: str, remote_platform: str, key: str, device_id: str = "") -> str:
+        return self.mapping(local_platform, remote_platform, device_id).get(key, key)
+
+
+# Keys people remap, with names to show for them (``cmd`` is the Windows or
+# Super key on a PC). Anything else can be typed in as its key name.
+KEY_LABELS = {
+    "ctrl": "Ctrl / Control", "cmd": "Cmd / Windows / Super", "alt": "Alt / Option", "shift": "Shift",
+    "alt_gr": "AltGr", "caps_lock": "Caps Lock", "esc": "Esc", "tab": "Tab", "enter": "Enter",
+    "backspace": "Backspace", "delete": "Delete", "insert": "Insert", "home": "Home", "end": "End",
+    "page_up": "Page Up", "page_down": "Page Down", "up": "Up", "down": "Down", "left": "Left",
+    "right": "Right", "space": "Space", "menu": "Menu", "print_screen": "Print Screen",
+    **{f"f{n}": f"F{n}" for n in range(1, 13)},
+}
+
+
+def key_label(name: str, kind: str = "") -> str:
+    """A key name as people know it; ``kind`` (an :func:`os_kind`) picks the
+    word for Cmd, Ctrl and Alt on that system."""
+    fam = family(name)
+    side = {"_l": " (left)", "_r": " (right)"}.get(name[-2:], "") if name != fam else ""
+    words = {
+        "mac": {"cmd": "Cmd", "ctrl": "Control", "alt": "Option"},
+        "windows": {"cmd": "Windows key", "ctrl": "Ctrl", "alt": "Alt"},
+        "linux": {"cmd": "Super", "ctrl": "Ctrl", "alt": "Alt"},
+        "android": {"cmd": "Meta", "ctrl": "Ctrl", "alt": "Alt"},
+    }.get(kind, {})
+    if fam in words:
+        return words[fam] + side
+    if len(name) == 1:
+        return name.upper() if name.isalpha() else name
+    return KEY_LABELS.get(name, name)
+
+
+def guided_steps(kind: str) -> list[tuple[str, str]]:
+    """What the "My keyboard is set up wrong" check asks for on a ``kind``
+    computer: (key name expected, what to ask). Modifiers first, then the
+    letters that move between QWERTY, QWERTZ and AZERTY."""
+    mods = [("ctrl", "ctrl"), ("cmd", "cmd"), ("alt", "alt")] if kind != "mac" else \
+        [("cmd", "cmd"), ("ctrl", "ctrl"), ("alt", "alt")]
+    steps = [(k, f"Press the key you use as {key_label(k, kind)} on this computer") for k, _ in mods]
+    steps.append(("shift", "Press Shift"))
+    steps += [(c, f"Type the letter {c.upper()}") for c in "qwzyam"]
+    return steps
+
+
+def learned_fix(sent: str, wanted: str) -> tuple[str, str] | None:
+    """The fix for a key that arrived as ``sent`` when ``wanted`` was meant,
+    written by family so both sides of a modifier follow; ``None`` when they
+    already agree."""
+    a, b = family(sent), family(wanted)
+    if a == b:
+        return None
+    if a in MODIFIER_FAMILIES and b in MODIFIER_FAMILIES:
+        return a, b
+    return (a if len(sent) == 1 else sent), (b if len(wanted) == 1 else wanted)
+
+
 def normalize_char(char: str | None, vk: int | None) -> str | None:
     """Undo control-character mangling (Ctrl+A arrives as ``"\\x01"`` on Windows)."""
     if char and len(char) == 1 and ord(char) >= 32 and char != "\x7f":

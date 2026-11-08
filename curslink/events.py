@@ -10,7 +10,9 @@ confused with anything else printed there::
 and reads one command per line on stdin (``home``, ``gaze pause``,
 ``gaze resume``, ``gaze toggle``, ``stop``; on a host also ``calibrate on``,
 which frees the camera for the app's calibration, and ``look {json}``, which
-asks an agent to show or hide the calibration's "Look here" card). The child stops when stdin
+asks an agent to show or hide the calibration's "Look here" card; on an
+agent ``keys learn on``/``off``, which reports the host's keys as
+``key_learned`` events instead of typing them). The child stops when stdin
 closes, so it never outlives the app that started it.
 
 Without ``--events`` nothing is printed and :func:`emit` does nothing.
@@ -27,7 +29,8 @@ from typing import Any, Callable, TextIO
 
 PREFIX = "@curslink "
 
-COMMANDS = ("home", "gaze pause", "gaze resume", "gaze toggle", "calibrate on", "look {...}", "stop")
+COMMANDS = ("home", "gaze pause", "gaze resume", "gaze toggle", "calibrate on", "look {...}", "keys learn on",
+            "keys learn off", "stop")
 
 
 class EventChannel:

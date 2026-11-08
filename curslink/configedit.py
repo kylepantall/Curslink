@@ -185,6 +185,36 @@ class ConfigFile:
         if t is not None and key in t:
             del t[key]
 
+    # -- key mappings ---------------------------------------------------------
+    def keymap(self, name: str) -> dict[str, str] | None:
+        """A ``[keymap]`` table (``"mac>windows"``, ``"device:<id>"``), or
+        ``None`` when that pair uses the built-in mapping."""
+        table = self.raw().get("keymap", {}).get(name)
+        return dict(table) if isinstance(table, dict) else None
+
+    def set_keymap(self, name: str, mapping: dict[str, str] | None) -> None:
+        """Write a pair's mapping; ``None`` goes back to the built-in one."""
+        if mapping is None:
+            t = self._table("keymap", create=False)
+            if t is not None and name in t:
+                del t[name]
+                if not len(t):
+                    del self.doc["keymap"]
+            return
+        t = self._table("keymap", create=True)
+        inline = tomlkit.inline_table()
+        inline.update(mapping)
+        t[name] = inline
+
+    def set_modifier_map(self, mapping: dict[str, str]) -> None:
+        """``[agent].modifier_map``: this computer's own fixes for the keys the host sends."""
+        if not mapping:
+            self.remove("agent", "modifier_map")
+            return
+        inline = tomlkit.inline_table()
+        inline.update(mapping)
+        self.set("agent", "modifier_map", inline)
+
     # -- calibrated edges -----------------------------------------------------
     def links(self) -> list[dict[str, Any]]:
         return list(self.raw().get("layout", {}).get("links", []))

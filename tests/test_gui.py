@@ -872,3 +872,91 @@ def test_devices_page_on_an_agent_points_phones_to_the_host(desktop, qapp, monke
     assert desktop.switch_role() == "host"
     page.refresh()
     assert "scan a code" in page.phone_text.text() and not page.qr_button.isHidden()
+
+
+def test_host_key_mappings_per_pair(desktop, qapp):
+    from curslink.config import host_config
+    from curslink.gui.keymap import PairMapDialog
+
+    desktop.window.pages["setup"].create()
+    cfg = desktop.config()
+    cfg.add_device("laptop", "Work laptop")
+    dialog = PairMapDialog(cfg)
+    dialog.src.setCurrentIndex(dialog.src.findData("linux"))
+    dialog.dst.setCurrentIndex(dialog.dst.findData("windows"))
+    assert dialog.rows.mapping() == {}          # nothing built in between two PCs
+    dialog.rows.add_row("caps_lock", "ctrl")
+    dialog.src.setCurrentIndex(dialog.src.findData("mac"))
+    assert dialog.rows.mapping() == {"cmd": "ctrl", "ctrl": "cmd"}   # the preset, shown
+    dialog.dst.setCurrentIndex(dialog.dst.findData("device:laptop"))
+    dialog.rows.add_row("cmd", "alt")
+    dialog.save()
+    cfg.save()
+    assert desktop.config().keymap("linux>windows") == {"caps_lock": "ctrl"}
+    assert desktop.config().keymap("mac>windows") is None             # untouched: still built in
+    maps = host_config(desktop.config().raw()).keymaps
+    assert maps.key("linux", "Windows 11", "caps_lock") == "ctrl"
+    assert maps.key("darwin", "Windows 11", "cmd", "laptop") == "alt"
+
+    cfg = desktop.config()
+    dialog = PairMapDialog(cfg)
+    dialog.src.setCurrentIndex(dialog.src.findData("linux"))
+    dialog.dst.setCurrentIndex(dialog.dst.findData("windows"))
+    assert dialog.rows.mapping() == {"caps_lock": "ctrl"} and dialog.reset_button.isEnabled()
+    dialog.reset()
+    dialog.save()
+    cfg.save()
+    assert desktop.config().keymap("linux>windows") is None
+
+
+def test_my_keyboard_is_set_up_wrong(desktop, qapp, monkeypatch):
+    from PySide6.QtCore import QEvent, Qt
+    from PySide6.QtGui import QKeyEvent
+
+    from curslink.configedit import new_agent_config
+    from curslink.gui import keymap
+    from curslink.inputs.keys import guided_steps
+
+    desktop.config_path.write_text(new_agent_config("laptop", "Laptop"))
+    sent = []
+    desktop.service.send = sent.append
+    monkeypatch.setattr(desktop.service, "is_alive", lambda: True)
+    monkeypatch.setattr(desktop, "config_saved", lambda restart=True: sent.append("saved"))
+    monkeypatch.setattr(keymap, "this_kind", lambda: "windows")
+    dialog = keymap.KeyboardCheckDialog(desktop)
+    assert sent == ["keys learn on"]
+
+    # The guided check: the host sends Cmd where Ctrl was meant and the other way round.
+    dialog.start_check()
+    arrives = {"ctrl": "cmd_l", "cmd": "ctrl_l"}
+    for wanted, _ in guided_steps("windows"):
+        desktop.service.event.emit({"event": "key_learned", "key": arrives.get(wanted, wanted), "pressed": True})
+    assert dialog.rows.mapping() == {"cmd": "ctrl", "ctrl": "cmd"}
+    assert dialog.prompt.text() == "All done"
+
+    # Teach one key: Caps Lock on the shared keyboard should be Esc here.
+    dialog.start_teach()
+    dialog.heard("caps_lock")
+    dialog.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Escape, Qt.KeyboardModifier.NoModifier))
+    assert dialog.rows.mapping()["caps_lock"] == "esc"
+
+    dialog.save()
+    assert desktop.config().get("agent", "modifier_map") == {"cmd": "ctrl", "ctrl": "cmd", "caps_lock": "esc"}
+    assert sent[-2:] == ["keys learn off", "saved"]
+
+
+def test_qt_keys_are_named_like_the_host_sends_them(qapp):
+    from PySide6.QtCore import QEvent, Qt
+    from PySide6.QtGui import QKeyEvent
+
+    from curslink.gui.keymap import qt_key_name
+
+    def ev(key, text=""):
+        return QKeyEvent(QEvent.Type.KeyPress, key, Qt.KeyboardModifier.NoModifier, text)
+
+    assert qt_key_name(ev(Qt.Key.Key_Control), mac=True) == "cmd"
+    assert qt_key_name(ev(Qt.Key.Key_Control), mac=False) == "ctrl"
+    assert qt_key_name(ev(Qt.Key.Key_Meta), mac=True) == "ctrl"
+    assert qt_key_name(ev(Qt.Key.Key_A, "A")) == "a"
+    assert qt_key_name(ev(Qt.Key.Key_F5)) == "f5"
+    assert qt_key_name(ev(Qt.Key.Key_Slash, "/")) == "/"
