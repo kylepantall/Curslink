@@ -246,6 +246,7 @@ class Capture:
         self.last_sent = 0.0
         self.failed = False
         self.why = ""
+        self.guides: GuideOverlay | None = None
         self.timer = QTimer()
         self.timer.timeout.connect(self.grab)
         self.set(spec)
@@ -254,6 +255,7 @@ class Capture:
         if spec.get("os") != self.spec.get("os"):
             self.last_hash = b""
         self.spec = spec
+        self.show_guides(bool(spec.get("tune")))
         fps = max(1, min(30, int(spec.get("fps", 15) or 15)))
         self.timer.start(round(1000 / fps))
         QTimer.singleShot(0, self.grab)
@@ -312,24 +314,142 @@ class Capture:
         frame = {"id": self.id, "jpg": base64.b64encode(raw).decode("ascii"), "w": img.width(), "h": img.height()}
         self.out("mirror_frame " + json.dumps(frame, separators=(",", ":")))
 
+    def show_guides(self, on: bool) -> None:
+        """While its mirror is being adjusted, the guides across this screen."""
+        if on and self.guides is None:
+            self.guides = GuideOverlay(self.spec)
+            if not self.guides.ok:
+                self.guides.deleteLater()
+                self.guides = None
+        elif on:
+            self.guides.set(self.spec)
+        elif self.guides is not None:
+            self.guides.hide()
+            self.guides.deleteLater()
+            self.guides = None
+
     def stop(self) -> None:
         self.timer.stop()
+        self.show_guides(False)
 
 
-ARROW = [(0, 0), (0, 17.5), (4.4, 13.4), (7.4, 20.6), (10.4, 19.4), (7.5, 12.4), (13.2, 12.4)]
+# Alignment guides while a mirror is being adjusted: the same lines and ring
+# drawn across the screen behind and on the mirror, so you move, stretch and
+# zoom it until they carry on unbroken past the screen in front's bezel.
+GUIDE_COLORS = {"h": QColor(56, 225, 255), "v": QColor(255, 79, 216), "d": QColor(255, 214, 10),
+                "o": QColor(93, 255, 122)}
 
 
-class MirrorWindow(QWidget):
+def guide_shapes(c: QRectF) -> list[tuple[str, QPointF, QPointF]]:
+    """The guides for a covered area ``c`` (in the painter's coordinates):
+    three lines across and three down through it, and its two diagonals,
+    each carried on far past it. ("o", centre, (r, r)) is the ring, crossing
+    all four of its sides."""
+    import math
+
+    w, h = max(1.0, c.width()), max(1.0, c.height())
+    far = 20 * max(w, h) + 10_000
+    out = []
+    for f in (0.25, 0.5, 0.75):
+        y = c.top() + f * h
+        out.append(("h", QPointF(c.left() - far, y), QPointF(c.right() + far, y)))
+        x = c.left() + f * w
+        out.append(("v", QPointF(x, c.top() - far), QPointF(x, c.bottom() + far)))
+    n = far / w
+    out.append(("d", c.topLeft() - QPointF(w, h) * n, c.bottomRight() + QPointF(w, h) * n))
+    out.append(("d", c.topRight() + QPointF(w, -h) * n, c.bottomLeft() - QPointF(w, -h) * n))
+    r = (min(w, h) / 2 + math.hypot(w, h) / 2) / 2  # between the inner and outer circles
+    out.append(("o", c.center(), QPointF(r, r)))
+    return out
+
+
+def paint_guides(p: QPainter, c: QRectF, width: float = 2.0) -> None:
+    p.save()
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    shapes = guide_shapes(c)
+    for halo in (True, False):
+        for kind, a, b in shapes:
+            p.setPen(QPen(QColor(0, 0, 0, 150), width + 2.5) if halo else QPen(GUIDE_COLORS[kind], width))
+            if kind == "o":
+                p.drawEllipse(a, b.x(), b.y())
+            else:
+                p.drawLine(a, b)
+    p.restore()
+
+
+class GuideOverlay(QWidget):
+    """The guides over the whole screen behind, while its mirror is being
+    adjusted: click-through, and kept out of the capture (the mirror draws
+    its own, in the same place on the picture)."""
+
     def __init__(self, spec: dict):
         flags = (Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint
-                 | Qt.WindowType.WindowTransparentForInput | Qt.WindowType.WindowDoesNotAcceptFocus
-                 | Qt.WindowType.NoDropShadowWindowHint)
+                 | Qt.WindowType.WindowDoesNotAcceptFocus | Qt.WindowType.NoDropShadowWindowHint
+                 | Qt.WindowType.WindowTransparentForInput)
         if sys.platform.startswith("linux"):
             flags |= Qt.WindowType.X11BypassWindowManagerHint
         super().__init__(None, flags)
         for attr in (Qt.WidgetAttribute.WA_TranslucentBackground, Qt.WidgetAttribute.WA_ShowWithoutActivating,
                      Qt.WidgetAttribute.WA_TransparentForMouseEvents, Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow):
             self.setAttribute(attr, True)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        from curslink.capturehide import exclude_from_capture
+
+        exclude_from_capture(self)
+        self.covered = QRectF()
+        self.ok = self.set(spec)
+
+    def set(self, spec: dict) -> bool:
+        whole = spec.get("screen_os")
+        screen = spec_to_logical({**spec, "os": whole}) if isinstance(whole, list) else None
+        at = spec.get("guides") if isinstance(spec.get("guides"), list) else spec.get("os")
+        found = spec_to_logical({**spec, "os": at})
+        if screen is None or found is None:
+            return False
+        sx, sy, sw, sh, index = screen
+        lx, ly, lw, lh, _ = found
+        qs = QGuiApplication.screens()[index]
+        if self.screen() is not qs:
+            self.setScreen(qs)
+        self.setGeometry(QRect(round(sx), round(sy), max(1, round(sw)), max(1, round(sh))))
+        self.covered = QRectF(lx - round(sx), ly - round(sy), lw, lh)
+        if not self.isVisible():
+            self.show()
+        self.update()
+        return True
+
+    def paintEvent(self, _e) -> None:  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        paint_guides(p, self.covered)
+        p.end()
+
+
+ARROW = [(0, 0), (0, 17.5), (4.4, 13.4), (7.4, 20.6), (10.4, 19.4), (7.5, 12.4), (13.2, 12.4)]
+
+
+EDGE_GRAB = 14  # px from a mirror's side that stretch it while adjusting
+
+
+class MirrorWindow(QWidget):
+    def __init__(self, spec: dict, out=None):
+        # Adjusting (spec "tune"): it takes the pointer to be dragged, stretched
+        # and zoomed, and says so on ``out`` as mirror_tune lines.
+        self.tune = bool(spec.get("tune"))
+        self.out = out
+        flags = (Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint
+                 | Qt.WindowType.WindowDoesNotAcceptFocus | Qt.WindowType.NoDropShadowWindowHint)
+        if not self.tune:
+            flags |= Qt.WindowType.WindowTransparentForInput
+        if sys.platform.startswith("linux"):
+            flags |= Qt.WindowType.X11BypassWindowManagerHint
+        super().__init__(None, flags)
+        for attr in (Qt.WidgetAttribute.WA_TranslucentBackground, Qt.WidgetAttribute.WA_ShowWithoutActivating,
+                     Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow):
+            self.setAttribute(attr, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, not self.tune)
+        self.setMouseTracking(self.tune)
+        self._drag: tuple[str, QPointF] | None = None  # (which: "move" or the sides, last global point)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         from curslink.capturehide import exclude_from_capture
 
@@ -356,6 +476,7 @@ class MirrorWindow(QWidget):
         self.setGeometry(QRect(round(lx), round(ly), max(1, round(lw)), max(1, round(lh))))
         if self.isVisible() and self.windowOpacity() < 1:
             self.timer.start(16)
+        self.update()
         return True
 
     def image(self, data: dict) -> None:
@@ -407,6 +528,82 @@ class MirrorWindow(QWidget):
             self.timer.stop()
         self.update()
 
+    # -- adjusting -----------------------------------------------------------------
+    def _sides(self, pos: QPointF) -> str:
+        w, h = self.width(), self.height()
+        out = ""
+        if pos.x() < EDGE_GRAB:
+            out += "l"
+        elif pos.x() > w - EDGE_GRAB:
+            out += "r"
+        if pos.y() < EDGE_GRAB:
+            out += "t"
+        elif pos.y() > h - EDGE_GRAB:
+            out += "b"
+        return out
+
+    def _tell(self, **data) -> None:
+        if self.out is not None:
+            self.out("mirror_tune " + json.dumps({"id": self.spec.get("id"), **data}, separators=(",", ":")))
+
+    def mousePressEvent(self, e) -> None:  # noqa: N802
+        if not self.tune:
+            return
+        sides = self._sides(e.position())
+        self._drag = (sides or "move", e.globalPosition())
+
+    def mouseMoveEvent(self, e) -> None:  # noqa: N802
+        if not self.tune:
+            return
+        if self._drag is None:
+            sides = self._sides(e.position())
+            shapes = {"l": Qt.CursorShape.SizeHorCursor, "r": Qt.CursorShape.SizeHorCursor,
+                      "t": Qt.CursorShape.SizeVerCursor, "b": Qt.CursorShape.SizeVerCursor,
+                      "lt": Qt.CursorShape.SizeFDiagCursor, "rb": Qt.CursorShape.SizeFDiagCursor,
+                      "rt": Qt.CursorShape.SizeBDiagCursor, "lb": Qt.CursorShape.SizeBDiagCursor}
+            self.setCursor(shapes.get(sides, Qt.CursorShape.OpenHandCursor))
+            return
+        which, last = self._drag
+        now = e.globalPosition()
+        dx, dy = now.x() - last.x(), now.y() - last.y()
+        if abs(dx) < 1 and abs(dy) < 1:
+            return
+        self._drag = (which, now)
+        w, h = max(1, self.width()), max(1, self.height())
+        if which == "move":
+            self._tell(mx=round(dx / w, 5), my=round(dy / h, 5))
+            return
+        # Stretching a side: bigger by how far it moved, about the opposite side.
+        factors, ax, ay = [], 0.5, 0.5
+        if "r" in which:
+            factors.append((w + dx) / w)
+            ax = 0.0
+        if "l" in which:
+            factors.append((w - dx) / w)
+            ax = 1.0
+        if "b" in which:
+            factors.append((h + dy) / h)
+            ay = 0.0
+        if "t" in which:
+            factors.append((h - dy) / h)
+            ay = 1.0
+        factor = sum(factors) / len(factors)
+        if factor > 0:
+            self._tell(grow=round(factor, 5), ax=ax, ay=ay)
+
+    def mouseReleaseEvent(self, _e) -> None:  # noqa: N802
+        self._drag = None
+
+    def wheelEvent(self, e) -> None:  # noqa: N802
+        if not self.tune:
+            return
+        steps = e.angleDelta().y() / 120 or e.pixelDelta().y() / 40
+        if not steps:
+            return
+        pos = e.position()
+        self._tell(grow=round(1.05 ** steps, 5), ax=round(pos.x() / max(1, self.width()), 4),
+                   ay=round(pos.y() / max(1, self.height()), 4))
+
     def paintEvent(self, _e) -> None:  # noqa: N802
         if self.pixmap is None:
             return
@@ -438,9 +635,29 @@ class MirrorWindow(QWidget):
                 p.drawLine(a, b)
         if self.pointer is not None:
             self.paint_pointer(p, QPointF(r.x() + self.pointer[0] * r.width(), r.y() + self.pointer[1] * r.height()))
-        if age < TAG_S + 0.5:
+        if self.tune:
+            paint_guides(p, self.guide_rect(r))
+            pen = QPen(QColor(ACCENT), 3, Qt.PenStyle.DashLine)
+            p.setPen(pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRect(r.adjusted(1.5, 1.5, -1.5, -1.5))
+            self.paint_tag(p, r, 1.0, "Line up the coloured lines · drag to move · scroll to zoom · drag a side to stretch")
+        elif age < TAG_S + 0.5:
             self.paint_tag(p, r, 1.0 if age < TAG_S else max(0.0, 1 - (age - TAG_S) / 0.5))
         p.end()
+
+    def guide_rect(self, r: QRectF) -> QRectF:
+        """Where the guides' area (spec ``guides``, on the screen behind) is
+        on this mirror, which shows spec ``src`` of there."""
+        try:
+            gx, gy, gw, gh = (float(v) for v in self.spec["guides"])
+            x, y, w, h = (float(v) for v in self.spec["src"])
+        except (KeyError, TypeError, ValueError):
+            return r
+        if w <= 0 or h <= 0:
+            return r
+        kx, ky = r.width() / w, r.height() / h
+        return QRectF(r.x() + (gx - x) * kx, r.y() + (gy - y) * ky, gw * kx, gh * ky)
 
     def paint_pointer(self, p: QPainter, at: QPointF) -> None:
         path = QPainterPath()
@@ -454,8 +671,8 @@ class MirrorWindow(QWidget):
         p.setBrush(QColor("white"))
         p.drawPath(path)
 
-    def paint_tag(self, p: QPainter, r: QRectF, alpha: float) -> None:
-        text = f"{self.spec.get('label') or 'Behind'} · live"
+    def paint_tag(self, p: QPainter, r: QRectF, alpha: float, text: str = "") -> None:
+        text = text or f"{self.spec.get('label') or 'Behind'} · live"
         font = QFont()
         font.setPixelSize(12)
         font.setWeight(QFont.Weight.DemiBold)
@@ -532,12 +749,22 @@ class MirrorHelper:
                 self.windows.pop(sid).close_soon()
         for sid, spec in shows.items():
             window = self.windows.get(sid)
+            old = None
+            if window is not None and window.tune != bool(spec.get("tune")):
+                # Taking the pointer or not is fixed when a window is made.
+                old = self.windows.pop(sid)
+                old.close_soon()
+                window = None
             if window is None:
-                window = MirrorWindow(spec)
+                window = MirrorWindow(spec, self.out)
                 if not window.ok:
                     log.warning("mirror: no screen here at %s", spec.get("os"))
                     window.deleteLater()
                     continue
+                if old is not None and old.pixmap is not None:
+                    window.pixmap = old.pixmap
+                    window.shown_at = time.monotonic() - TAG_S - 1  # no "live" tag again
+                    window.show()
                 self.windows[sid] = window
             elif not window.set(spec):
                 self.windows.pop(sid).close_soon()

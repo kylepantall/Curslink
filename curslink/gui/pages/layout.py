@@ -302,6 +302,8 @@ class LayoutPage(Page):
         # Overlaps to line up once the layout is saved and the service is back:
         # [(behind key, front key)], see save().
         self.pending_lineups: list[tuple[str, str]] = []
+        # Lined up by clicks, in mirror mode: next, check it by eye with the guides (tune_fit).
+        self.pending_tune: tuple[str, str] | None = None
         self.edge_note = None
         app.service.event.connect(self._on_service_event)
         app.service.state_changed.connect(self._on_service_state)
@@ -546,6 +548,17 @@ class LayoutPage(Page):
         self.pending_lineups.pop(0)
         self.calibrate_fit(behind, front)
 
+    def continue_lineup(self) -> None:
+        """After a restart: check the overlap just lined up on its mirror, else line up the next."""
+        if self.pending_tune is not None and self.calibration is None and not self.dirty:
+            behind, front = self.pending_tune
+            self.pending_tune = None
+            self.tune_fit(behind, front)
+            if self.calibration is not None:
+                self.calibration.finished.connect(lambda _code: self.next_lineup())
+                return
+        self.next_lineup()
+
     def set_dirty(self, dirty: bool) -> None:
         self.dirty = dirty
         blocked = self.blocking_overlap()
@@ -774,6 +787,14 @@ class LayoutPage(Page):
         cfg.save()
         self.app.config_saved()
         self.refresh_edges()
+        if cfg.get("layout", "mirror", False):
+            # Clicks get close; the guides on the mirror itself get it right.
+            self.pending_tune = (behind, front)
+            self._say_edge("Overlap lined up. Next, line up the coloured lines on the mirror…")
+            if not self.app.service.is_alive():
+                self.pending_tune = None
+                self._say_edge("Overlap lined up. Start linking, then use \u201cFine-tune\u2026\u201d to check it on the mirror.")
+            return
         self._say_edge("Overlap lined up. Mirror mode now shows exactly what the screen in front covers.")
 
     def tune_fit(self, behind: str, front: str) -> None:
@@ -843,10 +864,10 @@ class LayoutPage(Page):
     def _on_service_state(self, state: str) -> None:
         from curslink.gui.service import RUNNING
 
-        if state == RUNNING and self.pending_lineups:
+        if state == RUNNING and (self.pending_lineups or self.pending_tune):
             from PySide6.QtCore import QTimer
 
-            QTimer.singleShot(3000, self.next_lineup)  # give the other computers a moment to reconnect
+            QTimer.singleShot(3000, self.continue_lineup)  # give the other computers a moment to reconnect
         if state != RUNNING and self.calibration is not None:
             calibration, self.calibration = self.calibration, None
             calibration.stop()

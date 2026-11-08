@@ -1,4 +1,4 @@
-"""Fine-tuning an overlap by eye, for mirror mode.
+"""Fine-tuning an overlap by eye, on the mirror itself, for mirror mode.
 
 Lining up with clicks (curslink.gui.fitcalib), or the screens' real sizes,
 get close, but what looks right depends on where you sit: the screen in
@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QDialog, QGridLayout, QHBoxLayout, QLabel, QPushButton, QVBoxLayout
+from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout
 
 STEP = 1.0  # screen behind's pixels per arrow press
 BIG_STEP = 10.0  # with Shift
@@ -43,21 +43,13 @@ class FitTuneDialog(QDialog):
         self.setWindowTitle("Fine-tune overlap")
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         lay = QVBoxLayout(self)
-        intro = QLabel(f"{front['name']} now mirrors {behind['name']} behind it. Sit where you normally do and "
-                       "move the picture until it carries on from the screen behind.\n\n"
-                       "Arrow keys move it, + and - make it bigger or smaller. Hold Shift for bigger steps.")
+        intro = QLabel(f"Coloured lines and a ring now cross {behind['name']}, and the mirror on {front['name']} "
+                       "draws them too. Sit where you normally do and adjust the mirror right there until every "
+                       "line carries on straight past the bezel and the ring is round:\n\n"
+                       "• drag it to move it\n• scroll on it to zoom\n• drag a side or corner to stretch it\n\n"
+                       "Then Save here.")
         intro.setWordWrap(True)
         lay.addWidget(intro)
-        grid = QGridLayout()
-        for text, row, col, slot in (("↑", 0, 1, lambda: self.move_by(0, -1)), ("←", 1, 0, lambda: self.move_by(-1, 0)),
-                                     ("→", 1, 2, lambda: self.move_by(1, 0)), ("↓", 2, 1, lambda: self.move_by(0, 1)),
-                                     ("−", 1, 4, lambda: self.grow_by(1 / GROW)), ("+", 1, 5, lambda: self.grow_by(GROW))):
-            b = QPushButton(text)
-            b.setAutoRepeat(True)
-            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            b.clicked.connect(slot)
-            grid.addWidget(b, row, col)
-        lay.addLayout(grid)
         self.readout = QLabel("")
         lay.addWidget(self.readout)
         row = QHBoxLayout()
@@ -77,7 +69,7 @@ class FitTuneDialog(QDialog):
         row.addWidget(save)
         lay.addLayout(row)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.command(hold=True)
+        self.command(hold=True, tune=True)
 
     # -- changes ---------------------------------------------------------------
     def command(self, **data) -> None:

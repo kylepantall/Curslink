@@ -74,6 +74,8 @@ Agent -> host
                                        host whose welcome.features has "popups")
     popup_result {chat, ok}            whether a popup_in chat opened here
     mirror_frame {id, jpg, w, h}       a frame of a mirror it captures
+    mirror_tune {id, mx, my} | {id, grow, ax, ay}
+                                       the mirror being adjusted was dragged or zoomed
     mirror_ack   {id}                  a frame of a mirror it shows was shown
     netstats     {udp, loss_pct, rtt_ms, jitter_ms}
                                        how the link looks from the agent (every few
@@ -135,6 +137,7 @@ MESSAGE_TYPES = frozenset(
         "mirror_pointer",
         "mirror_ack",
         "netstats",
+        "mirror_tune",
         "edge",
         "bye",
         "drag",
