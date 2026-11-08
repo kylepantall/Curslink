@@ -270,12 +270,14 @@ async def run_host(cfg: HostConfig) -> None:
         settings=cfg.router,
     )
     router.key_for = key_mapper(server, cfg.keymaps)
+    edges = edge_indicator(cfg, router, server, overlay)
 
     def agent_connected(conn) -> None:
         events.emit("agent", device_id=conn.device_id, name=conn.name, platform=conn.platform,
                     connected=True, screens=conn.screens)
 
     def agent_disconnected(device_id: str) -> None:
+        edges.forget(device_id)
         router.on_disconnect(device_id)
         events.emit("agent", device_id=device_id, connected=False)
 
@@ -371,6 +373,36 @@ async def run_host(cfg: HostConfig) -> None:
         if relay:
             await relay.close()
         await server.close()
+
+
+def edge_indicator(cfg: HostConfig, router: Router, server: HostServer, overlay):
+    """The bar of light and label near an edge that leads to another device
+    (see curslink.edgehint), drawn by the host's overlay helper and the agents'."""
+    from curslink.edgehint import EdgeIndicator, command_line, device_kind
+    from curslink.protocol import EDGE_FEATURE
+
+    def send(device_id: str, data: dict) -> None:
+        if device_id == cfg.device_id:
+            overlay.command(command_line(data))
+        elif server.supports(device_id, EDGE_FEATURE):
+            server.send(device_id, "edge", **data)
+
+    def name(device_id: str) -> str:
+        conn = server.connections.get(device_id)
+        device = cfg.layout.devices.get(device_id)
+        return (conn.name if conn is not None and conn.name else None) or (device.name if device else device_id)
+
+    def kind(device_id: str) -> str:
+        if device_id == cfg.device_id:
+            return device_kind(sys.platform)
+        conn = server.connections.get(device_id)
+        return device_kind(conn.platform if conn is not None else "")
+
+    edges = EdgeIndicator(cfg.layout, router.available, send, name, kind, cfg.router.gap_tolerance_px)
+    edges.enabled = cfg.router.edge_indicator and cfg.router.edge_switching
+    router.on_position = edges.update
+    router.listeners.append(lambda e: edges.crossed(e.to_device) if e.from_device != e.to_device else None)
+    return edges
 
 
 def key_mapper(server: HostServer, maps: KeyMaps, local_platform: str = sys.platform):
@@ -858,6 +890,10 @@ async def run_agent(cfg: AgentConfig) -> None:
     if native is not None:
         send_files_home(cfg, session, client, overlay, native, asyncio.get_running_loop())
     session.on_hint = lambda data: events.emit("hint", **data)
+    if overlay and cfg.animations:
+        from curslink.edgehint import command_line
+
+        session.on_edge = lambda data: overlay.command(command_line(data))
 
     def on_state(state: str, detail: str) -> None:
         if state == "connected" and client.host and not detail.startswith("relay"):
@@ -867,6 +903,8 @@ async def run_agent(cfg: AgentConfig) -> None:
         if state != "connected":
             events.emit("look", hide=True)  # the host can't take it down now
             events.emit("hint", hide=True)
+            if session.on_edge is not None:
+                session.on_edge({"hide": True})
         events.emit("host", state=state, detail=detail)
 
     client.on_state = on_state

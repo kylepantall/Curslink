@@ -62,6 +62,9 @@ class NullOverlay:
 class RouterSettings:
     effect: str = "pop"                      # pop | blink | none
     edge_switching: bool = True
+    # Near an edge that leads to another device, show where it goes
+    # (curslink.edgehint): a bar of light and a label with its name.
+    edge_indicator: bool = True
     gaze_switching: bool = True
     gap_tolerance_px: int = 64
     # Legacy switch: every monitor is a jump monitor (see gaze_jump_screens).
@@ -123,6 +126,9 @@ class Router:
         # move input mid-drag.
         self.carries_drag: Callable[[str, str], bool] = lambda from_device, to_device: False
         self._blocked_said = ""
+        # Where the pointer is now (device, global x, y), after each move: the
+        # edge indicator (curslink.edgehint) follows it.
+        self.on_position: Callable[[str, float, float], None] = lambda device_id, x, y: None
         # While the Layout page calibrates an edge: left clicks (and Esc,
         # Backspace) on another computer come here instead of going to it.
         self.picker: Callable[[dict], None] | None = None
@@ -220,6 +226,7 @@ class Router:
                 return
         self._set_screen(screen)
         self.x, self.y = x, y
+        self.on_position(self.local_id, x, y)
         if not self.settings.edge_switching:
             return
         pushes = self.layout.edge_pushes(self.local_id, self.x, self.y)
@@ -262,6 +269,7 @@ class Router:
                 return
         self._set_screen(here)
         self.x, self.y = nx, ny
+        self.on_position(self.active_device, nx, ny)
         if not self._edge_armed:
             self._edge_armed = not self.layout.edge_pushes(self.active_device, nx, ny, ARM_PX)
         ox, oy = here.to_os(nx, ny)

@@ -27,6 +27,7 @@ listen = "0.0.0.0"
 port = 24850
 effect = "pop"               # pop | blink | none (played where the pointer lands)
 edge_switching = true        # push the pointer off a screen edge to switch
+edge_indicator = true        # near such an edge, it glows and a label names the device it leads to
 gap_tolerance_px = 64        # bridge small gaps between screens in the layout
 return_hotkey = "ctrl+alt+home"
 gaze_toggle_hotkey = "ctrl+alt+g"

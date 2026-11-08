@@ -221,6 +221,7 @@ class LinkService : Service() {
         override fun button(name: String, pressed: Boolean) { InputService.instance?.button(name, pressed) }
         override fun scroll(dx: Double, dy: Double) { InputService.instance?.scroll(dx, dy) }
         override fun key(key: String, pressed: Boolean) { InputService.instance?.key(key, pressed) }
+        override fun edge(cmd: io.github.orimovo.curslink.core.EdgeCommand) { InputService.instance?.edge(cmd) }
     }
 
     /** While control is here: keep Wi-Fi out of power saving, for smooth moves. */
