@@ -496,47 +496,79 @@ def test_fits_are_read_from_the_config_and_checked():
         parse_fits([{"behind": "mac/screen2", "front": "pc/main", "x": 0, "y": 0, "scale": 0}], devices)
 
 
-def test_two_clicked_corners_give_the_fit():
+def test_a_corner_clicked_on_each_screen_gives_the_fit():
     pytest.importorskip("PySide6.QtCore")
     from curslink.gui.fitcalib import solve
 
-    assert solve([(2640, 1100), (1200, 1102)], "top", (2880, 1536)) == (1200, 1101, 0.5)
-    x, y, k = solve([(1200, 900), (2640, 900)], "bottom", (2880, 1536))
-    assert (x, k) == (1200, 0.5) and y == 900 - 768
-    assert solve([(1200, 900), (1210, 900)], "top", (2880, 1536)) is None  # too close
+    # Kyle's desk: the laptop (2880 x 1536) stands in front of the Mac's
+    # bottom-left, its left side past the Mac's left edge. Truth: its
+    # top-left corner at (-700, 1100) on the Mac, 0.5 Mac px per laptop px.
+    k, x, y = 0.5, -700.0, 1100.0
+    top_right_on_mac = (x + 2880 * k, y)                       # the laptop's top-right corner, on the Mac
+    mac_bottom_left_on_laptop = ((0 - x) / k, (1440 - y) / k)  # the Mac's bottom-left corner, behind the laptop
+    got = solve((2880, 0), top_right_on_mac, (0, 1440), mac_bottom_left_on_laptop)
+    assert got == pytest.approx((x, y, k))
+    # Corners too close together along both sides: no answer.
+    assert solve((2880, 0), (100, 100), (0, 1440), (2870, 10)) is None
 
 
-def test_lining_up_on_another_computer_goes_by_its_clicks(qapp):
+def test_the_corner_asked_for_is_one_on_that_screen():
+    pytest.importorskip("PySide6.QtCore")
+    from curslink.gui.fitcalib import guess_corner
+
+    mac, laptop = (0, 0, 3440, 1440), (-1000, 1200, 2880, 1536)
+    assert guess_corner(laptop, mac) == "top-right"     # the laptop's corner on the Mac
+    assert guess_corner(mac, laptop) == "bottom-left"   # the Mac's corner behind the laptop
+
+
+def test_lining_up_goes_by_a_click_on_each_computer(qapp):
     from curslink.gui.fitcalib import FitCalibration
 
     sent = []
-    behind = {"device": "mac", "name": "Mac", "screen": {"id": "screen2", "os_x": 0, "os_y": 0,
-                                                          "width": 3440, "height": 1440}}
-    cal = FitCalibration(behind, {"name": "PC", "width": 2880, "height": 1536}, "pc", sent.append)
+    behind = {"device": "mac", "name": "Mac", "rect": [0, 0, 3440, 1440],
+              "screen": {"id": "screen2", "os_x": 0, "os_y": 0, "width": 3440, "height": 1440}}
+    front = {"device": "pc", "name": "Laptop", "rect": [-1000, 1200, 2880, 1536],
+             "screen": {"id": "main", "os_x": 0, "os_y": 0, "width": 2880, "height": 1536}}
+    cal = FitCalibration(behind, front, "host", sent.append)
     got = []
     cal.finished.connect(got.append)
     assert cal.start() and sent[0] == "pick on"
     hint = json.loads(sent[1].partition(" ")[2])
-    assert hint["devices"]["mac"]["screens"][0]["fit"]["corners"] == "top"
-    cal.on_event({"event": "picked", "key": "tab"})
-    assert cal.corners == "bottom"
-    cal.on_event({"event": "picked", "key": "tab"})
-    cal.on_event({"event": "picked", "device": "mac", "screen": "screen2", "x": 1200, "y": 1100})
-    cal.on_event({"event": "picked", "device": "other", "screen": "screen2", "x": 5, "y": 5})  # not that screen
-    cal.on_event({"event": "picked", "device": "mac", "screen": "screen2", "x": 2640, "y": 1100})
-    assert got == [(1200, 1100, 0.5)] and sent[-2:] == ["pick off", 'hint {"devices":{}}']
+    mac, pc = hint["devices"]["mac"]["screens"][0]["fit"], hint["devices"]["pc"]["screens"][0]["fit"]
+    assert (mac["role"], mac["corner"], "waiting" in mac) == ("behind", "top-right", False)
+    assert (pc["role"], pc["corner"], "waiting" in pc) == ("front", "bottom-left", True)
+    cal.on_event({"event": "picked", "key": "tab"})                      # another corner, and back round
+    assert cal.corners[0] == "bottom-right"
+    for _ in range(3):
+        cal.on_event({"event": "picked", "key": "tab"})
+    cal.on_event({"event": "picked", "device": "pc", "screen": "main", "x": 5, "y": 5})  # not its turn
+    cal.on_event({"event": "picked", "device": "mac", "screen": "screen2", "x": 740, "y": 1100})
+    assert cal.active == 1
+    cal.on_event({"event": "picked", "device": "pc", "screen": "main", "x": 1400, "y": 680})
+    assert got and got[0] == pytest.approx((-700, 1100, 0.5)) and sent[-2:] == ["pick off", 'hint {"devices":{}}']
 
 
 def test_the_fit_layer_paints(qapp):
     from PySide6.QtCore import QPointF
     from PySide6.QtGui import QImage, QPainter
 
-    from curslink.gui.fitcalib import FitState, frame_for, paint_fit
+    from curslink.gui.fitcalib import FitState, paint_fit
 
-    st = FitState("PC", 2880 / 1536, "top", [QPointF(100, 300)], QPointF(500, 302))
-    frame = frame_for(st)
-    assert round(frame.width()) == 400 and round(frame.height()) == round(400 / (2880 / 1536))
     img = QImage(800, 600, QImage.Format.Format_ARGB32)
-    p = QPainter(img)
-    paint_fit(p, img.rect().toRectF(), st)
-    p.end()
+    for st in (FitState("behind", "Laptop", "top-right", pointer=QPointF(400, 300)),
+               FitState("front", "Mac", "bottom-left", point=QPointF(10, 10), step=2),
+               FitState("front", "Mac", "bottom-left", waiting="Next, on Laptop")):
+        p = QPainter(img)
+        paint_fit(p, img.rect().toRectF(), st)
+        p.end()
+
+
+def test_a_fit_hanging_off_the_side_mirrors_into_the_right_corner():
+    from curslink.layout import Fit
+
+    # The laptop's left part sticks out past the Mac's left edge: what it
+    # covers is the Mac's bottom-left, shown in the laptop's top-right.
+    lay = _fit_layout([Fit(("mac", "screen2"), ("pc", "main"), -700, 1100, 0.5)])
+    (front, behind, there), = lay.covered_parts(lay.screen("mac", "screen2"))
+    assert behind == (0, 1100, 740, 340)
+    assert there == (front.x + 1400, front.y, 1480, 680)

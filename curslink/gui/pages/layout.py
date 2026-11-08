@@ -694,8 +694,8 @@ class LayoutPage(Page):
         self._say_edge("Edge calibrated. The pointer now crosses along the stretches you clicked.")
 
     def calibrate_fit(self, behind: str, front: str) -> None:
-        """On the screen behind, click where the screen in front's corners
-        really are (see curslink.gui.fitcalib), for mirror mode."""
+        """Click where the two screens' corners really are, one on each
+        (see curslink.gui.fitcalib), for mirror mode."""
         from curslink.gui.fitcalib import FitCalibration
         from curslink.gui.service import RUNNING
 
@@ -709,16 +709,18 @@ class LayoutPage(Page):
         if b is None or f is None:
             return
         me = self.app.config().get("host", "device_id")
-        if b.device_id != me and self.app.service.state != RUNNING:
-            self._say_edge("Start linking first: you'll click on the other computer's screen.")
+        if {b.device_id, f.device_id} != {me} and self.app.service.state != RUNNING:
+            self._say_edge("Start linking first: you'll click on the other computer's screen too.")
             return
-        _x, _y, bw, bh = b.layout_rect()
-        _x, _y, fw, fh = f.layout_rect()
-        end = {"device": b.device_id, "name": b.device_name, "screen": {**b.screen, "width": bw, "height": bh}}
-        self.calibration = FitCalibration(end, {"name": f.device_name, "width": fw, "height": fh}, me,
-                                          self.app.service.send)
+
+        def end(item) -> dict:
+            x, y, w, h = item.layout_rect()
+            return {"device": item.device_id, "name": item.device_name, "rect": [x, y, w, h],
+                    "screen": {**item.screen, "width": w, "height": h}}
+
+        self.calibration = FitCalibration(end(b), end(f), me, self.app.service.send)
         self.calibration.finished.connect(lambda fit, b=behind, f=front: self.fit_calibrated(b, f, fit))
-        self._say_edge(f"On {b.device_name}'s screen, click where {f.device_name}'s top corners sit.")
+        self._say_edge(f"Click on {b.device_name}'s screen first, then on {f.device_name}'s.")
         if not self.calibration.start():
             self.calibration = None
             self._say_edge("Couldn't find that screen on this computer.")

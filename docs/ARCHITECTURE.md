@@ -214,13 +214,15 @@ front of it shows the part it covers, live (`curslink.mirror`).
   the mirror (`mirror_pointer`) and the mirror draws it.
 - Lining up: screens are laid out in their own pixels, which aren't the
   same size on every monitor, so the layout's overlap is only roughly what's
-  covered. "Line up overlap…" on the Layout page dims the screen behind and
-  has you click where the screen in front's top (or, with Tab, bottom)
-  corners sit (`curslink.gui.fitcalib`, on another computer through the
-  same `pick`/`hint` path as edge calibration). That gives a `Fit`: the
-  screen in front's real position and size on the one behind, saved as
-  `[[layout.fit]]`; `Layout.covered_parts` then says what to capture behind
-  and where it shows in front.
+  covered. "Line up overlap…" on the Layout page takes one click on each
+  screen (`curslink.gui.fitcalib`, on another computer through the same
+  `pick`/`hint` path as edge calibration): on the screen behind, where a
+  corner of the screen in front sits; on the screen in front, where a corner
+  of the screen behind sits behind it. Two corners from opposite sides of
+  the covered area give a `Fit`: how big one's pixels are against the
+  other's, and where it stands, saved as `[[layout.fit]]`;
+  `Layout.covered_parts` then says what to capture behind and where it
+  shows in front.
 - Curslink's own overlay windows (the edge indicator, mirrors) are kept out
   of captures (`curslink.capturehide`; on macOS the capture also leaves out
   the helper's own windows), so they don't show up twice.
