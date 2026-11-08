@@ -6,6 +6,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.graphics.BitmapFactory
 import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.net.Network
@@ -22,6 +23,9 @@ import io.github.orimovo.curslink.core.Hello
 import io.github.orimovo.curslink.core.HostPairing
 import io.github.orimovo.curslink.core.InputHandler
 import io.github.orimovo.curslink.core.LinkState
+import io.github.orimovo.curslink.core.MirrorCapture
+import io.github.orimovo.curslink.core.MirrorHandler
+import io.github.orimovo.curslink.core.MirrorShow
 import io.github.orimovo.curslink.core.PairResult
 import io.github.orimovo.curslink.core.PairingServer
 import io.github.orimovo.curslink.core.jsonOf
@@ -71,6 +75,7 @@ class LinkService : Service() {
     private lateinit var discovery: Discovery
     private var pairingServer: PairingServer? = null
     private var link: AgentLink? = null
+    private var mirror: MirrorCapturer? = null
     private var wifiLock: WifiManager.WifiLock? = null
     private val main = Handler(Looper.getMainLooper())
     private val netCallback = object : ConnectivityManager.NetworkCallback() {
@@ -96,8 +101,10 @@ class LinkService : Service() {
             onFailed = { reason -> AppLog.i(TAG, "pairing failed: $reason"); clearPairRequest() },
         ).also { it.start() }
         discovery.start(prefs.deviceId, prefs.name, pairingServer!!.boundPort)
+        mirror = MirrorCapturer(this, { link?.session?.mirror }, ::mediaForeground)
         link = AgentLink(
             handler = Input(),
+            mirror = Mirrors(),
             pairing = { prefs.pairing },
             hello = { Hello(prefs.name, platform(), screens()) },
             discover = ::candidates,
@@ -119,6 +126,7 @@ class LinkService : Service() {
         instance = null
         runCatching { (getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager).unregisterNetworkCallback(netCallback) }
         link?.stop()
+        mirror?.close()
         pairingServer?.close()
         discovery.stop()
         releaseWifi()
@@ -222,6 +230,38 @@ class LinkService : Service() {
         override fun scroll(dx: Double, dy: Double) { InputService.instance?.scroll(dx, dy) }
         override fun key(key: String, pressed: Boolean) { InputService.instance?.key(key, pressed) }
         override fun edge(cmd: io.github.orimovo.curslink.core.EdgeCommand) { InputService.instance?.edge(cmd) }
+    }
+
+    // ------------------------------------------------------------- mirrors
+    /** Mirror mode (core/Mirror.kt): show what's behind the phone, share what's behind something else. */
+    private inner class Mirrors : MirrorHandler {
+        override fun state(captures: List<MirrorCapture>, shows: List<MirrorShow>) {
+            if (captures.isNotEmpty() || shows.isNotEmpty()) {
+                AppLog.i(TAG, "mirror mode: capturing ${captures.size}, showing ${shows.size}")
+            }
+            InputService.instance?.mirrorShows(shows)
+            mirror?.set(captures)
+        }
+
+        override fun image(id: String, jpeg: ByteArray) {
+            val bmp = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size) ?: return
+            InputService.instance?.mirrorImage(id, bmp) ?: bmp.recycle()
+        }
+
+        override fun pointer(id: String, x: Double?, y: Double?) {
+            InputService.instance?.mirrorPointer(id, x, y)
+        }
+    }
+
+    /** Android wants a media projection foreground service while the screen is shared. */
+    // Called on the capturer's thread, and done before it returns: on Android
+    // 14 the service type has to be there before the projection is opened.
+    private fun mediaForeground(on: Boolean) {
+        if (Build.VERSION.SDK_INT < 29) return
+        val type = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or
+            (if (on) ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION else 0)
+        runCatching { startForeground(NOTE_LINK, buildNotification(), type) }
+            .onFailure { AppLog.w(TAG, "couldn't change the foreground service for screen sharing", it) }
     }
 
     /** While control is here: keep Wi-Fi out of power saving, for smooth moves. */

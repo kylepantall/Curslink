@@ -14,7 +14,7 @@ from curslink.inputs.base import InputSink
 from curslink.net.framing import STREAM_LIMIT, read_message
 from curslink.net.relay import RelayError, RelayTarget, agent_connect
 from curslink.net.udp import AgentUdp
-from curslink.protocol import (AGENT_FEATURES, EDGE_FEATURE, FILES_FEATURE, FILES_OUT_FEATURE, DROP_FEATURE, FILE_ACK_FEATURE, POPUPS_FEATURE, PREPARE_FEATURE, PROTOCOL_VERSION, UDP_FEATURE, Message, ProtocolError,
+from curslink.protocol import (AGENT_FEATURES, EDGE_FEATURE, FILES_FEATURE, FILES_OUT_FEATURE, DROP_FEATURE, FILE_ACK_FEATURE, MIRROR_FEATURE, POPUPS_FEATURE, PREPARE_FEATURE, PROTOCOL_VERSION, UDP_FEATURE, Message, ProtocolError,
                                encode)
 from curslink.security import channel_binding, hello_auth
 from curslink.tally import Tally
@@ -63,6 +63,10 @@ class AgentSession:
         # A curslink.popups.AgentPopups opens and closes Isolink's floating
         # chats the host carries here (popup_in, popup_close).
         self.popups = None
+        # A curslink.mirror.MirrorPeer captures and shows mirror mode's
+        # covered areas (mirror, mirror_frame, mirror_pointer, mirror_ack);
+        # without one the agent doesn't offer the "mirror" feature.
+        self.mirror = None
         # Set while the app's keyboard check is listening: keys from the host
         # go here (as sent, before [agent].modifier_map) instead of being typed.
         self.learn: Callable[[str, bool], None] | None = None
@@ -138,6 +142,9 @@ class AgentSession:
         elif t in ("popup_in", "popup_close", "popup_prepare", "popup_unprepare"):
             if self.popups is not None:
                 self.popups.handle(t, dict(msg.data))
+        elif t in ("mirror", "mirror_frame", "mirror_pointer", "mirror_ack"):
+            if self.mirror is not None:
+                self.mirror.handle(t, dict(msg.data))
         elif t == "fetch":
             if self.drag_out is not None:
                 self.drag_out.fetch(dict(msg.data))
@@ -341,6 +348,8 @@ class AgentClient:
                 features.append(EDGE_FEATURE)
             if self.udp_enabled and self._direct:
                 features.append(UDP_FEATURE)
+            if self.session.mirror is not None:
+                features.append(MIRROR_FEATURE)
             hello = dict(
                 v=PROTOCOL_VERSION,
                 device_id=self.device_id,

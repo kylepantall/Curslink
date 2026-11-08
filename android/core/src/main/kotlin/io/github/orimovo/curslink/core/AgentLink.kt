@@ -80,7 +80,7 @@ enum class LinkState { WAITING, CONNECTING, CONNECTED }
  * Applies the host's frames, like curslink.net.client.AgentSession: keeps
  * track of held keys and buttons so a leave or a dropped link lets go of them.
  */
-class AgentSession(private val handler: InputHandler) {
+class AgentSession(private val handler: InputHandler, val mirror: MirrorSession? = null) {
     @Volatile var active = false
         private set
     private val keys = LinkedHashSet<String>()
@@ -140,6 +140,7 @@ class AgentSession(private val handler: InputHandler) {
                 }
                 handler.key(key, pressed)
             }
+            "mirror", "mirror_frame", "mirror_pointer", "mirror_ack" -> return mirror?.handle(f)
             "edge" -> EdgeCommand.parse(f)?.let { handler.edge(it) }
             // Everything else (look, hint, drag, files, popups) is only sent to
             // agents that list the feature in hello, and we list none of them.
@@ -172,8 +173,10 @@ class AgentLink(
     private val log: (String) -> Unit = {},
     /** How often the host should check we're there (hello.ping_s): seldom, to save battery. */
     private val pingSeconds: Double = 5.0,
+    /** Mirror mode (see Mirror.kt); null leaves this phone out of it. */
+    mirror: MirrorHandler? = null,
 ) {
-    val session = AgentSession(handler)
+    val session = AgentSession(handler, mirror?.let { MirrorSession(it) })
     @Volatile private var running = false
     @Volatile private var socket: Socket? = null
     @Volatile private var udp: AgentUdp? = null
@@ -279,7 +282,9 @@ class AgentLink(
             val tls = Tls.connect(s.getInputStream(), s.getOutputStream(), p.myId, p.key)
             val io = FrameIO(tls.input, tls.output)
             val me = hello()
-            val features = listOf("edge") + if (opened.direct) listOf("udp") else emptyList()
+            val features = listOf("edge") + (if (opened.direct) listOf("udp") else emptyList()) +
+                // mirror_cursor: our captures show the pointer already (it's drawn on the screen).
+                (if (session.mirror != null) listOf("mirror", "mirror_cursor") else emptyList())
             io.send("hello", jsonOf(
                 "v" to PROTOCOL_VERSION,
                 "device_id" to p.myId,
@@ -304,6 +309,7 @@ class AgentLink(
                     }.onFailure { log("pointer moves will come over TCP: ${it.message}") }
                 }
             }
+            session.mirror?.send = { t, data -> io.send(t, data) }
             onState(LinkState.CONNECTED, via)
             while (running) {
                 val f = try {
@@ -319,6 +325,7 @@ class AgentLink(
             socket = null
             runCatching { s.close() }
             session.releaseAll()
+            session.mirror?.let { m -> m.send = { _, _ -> }; m.reset() }
         }
     }
 }

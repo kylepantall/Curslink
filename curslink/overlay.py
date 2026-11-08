@@ -354,6 +354,9 @@ def _run_qt_helper() -> None:
         return native_to_logical(screens, x, y, sys.platform == "win32")
 
     files = FilesOverlay(to_logical)
+    from curslink.mirror.helper import MirrorHelper
+
+    mirror = MirrorHelper()
     from curslink.edgeoverlay import EdgeOverlay
 
     edges = EdgeOverlay(to_logical)
@@ -376,6 +379,11 @@ def _run_qt_helper() -> None:
                     continue
                 alive.append(w)
                 w.destroyed.connect(lambda *_a, w=w: alive.remove(w) if w in alive else None)
+            elif parts and parts[0].startswith("mirror"):
+                try:
+                    mirror.handle(line)
+                except Exception:  # pragma: no cover - never take the helper down
+                    log.exception("overlay command %s", parts[0])
             elif parts and parts[0] == "edge":
                 try:
                     data = json.loads(line.split(None, 1)[1])

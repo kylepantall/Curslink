@@ -39,6 +39,15 @@ Host -> agent
                                        come here: get it ready (only to an agent
                                        whose hello.features has "popup_prepare")
     popup_unprepare {chat}             it didn't come here after all
+    mirror       {captures, shows}     mirror mode (see curslink.mirror): what this
+                                       device should capture and show now (all of
+                                       it, each time); only to an agent whose
+                                       hello.features has "mirror"
+    mirror_frame {id, jpg, w, h}       a captured frame for a mirror it shows
+    mirror_pointer {id, x, y} | {id, hide}
+                                       where the pointer is in a mirror it shows
+                                       (0..1 across and down), or none
+    mirror_ack   {id}                  a frame it captured was shown: send another
     edge         {role, rect, side, a, b, at, near, name?, kind?} | {hide} | {flash}
                                        the edge indicator: an edge of this device
                                        leads to another (role "from") or the
@@ -60,6 +69,8 @@ Agent -> host
                                        what this device's Isolink says (only to a
                                        host whose welcome.features has "popups")
     popup_result {chat, ok}            whether a popup_in chat opened here
+    mirror_frame {id, jpg, w, h}       a frame of a mirror it captures
+    mirror_ack   {id}                  a frame of a mirror it shows was shown
 
 ``hello.camera`` is true when the agent runs its own camera to confirm
 gaze switches (see :mod:`curslink.gaze.confirm`). An agent only sends
@@ -108,6 +119,10 @@ MESSAGE_TYPES = frozenset(
         "facing",
         "look",
         "hint",
+        "mirror",
+        "mirror_frame",
+        "mirror_pointer",
+        "mirror_ack",
         "edge",
         "bye",
         "drag",
@@ -130,7 +145,7 @@ MESSAGE_TYPES = frozenset(
 BUTTONS = frozenset({"left", "right", "middle", "x1", "x2"})
 EFFECTS = frozenset({"pop", "blink", "none"})
 # What this host understands beyond the base protocol, sent in welcome.features.
-HOST_FEATURES = ("facing", "popups")
+HOST_FEATURES = ("facing", "popups", "mirror")
 # What this agent understands beyond the base protocol, sent in hello.features.
 # An agent without "look" would reject a look frame as unknown and drop the
 # connection, so the host only sends one to agents that list it.
@@ -160,6 +175,13 @@ PREPARE_FEATURE = "popup_prepare"
 # when file_begin asks for it), so the host keeps only a little in flight
 # while a drag is carried and the pointer and the drop never wait behind it.
 FILE_ACK_FEATURE = "file_ack"
+# An agent that takes part in mirror mode (mirror, mirror_frame,
+# mirror_pointer, mirror_ack): it can capture part of its screens and show
+# part of another's (see curslink.mirror).
+MIRROR_FEATURE = "mirror"
+# Listed with "mirror" by an agent whose captures already show its pointer
+# (a phone, which draws its own): the host sends no mirror_pointer for them.
+MIRROR_CURSOR_FEATURE = "mirror_cursor"
 FILE_FRAMES = frozenset({"file_begin", "file_item", "file_data", "file_end", "file_cancel", "file_result",
                          "file_ack"})
 
@@ -243,6 +265,14 @@ def _validate(msg: Message) -> None:
     elif t == "hint":
         if msg.data.get("hide") is not True and not isinstance(msg.data.get("screens"), list):
             raise ProtocolError("hint needs screens, or hide")
+    elif t == "mirror":
+        if not isinstance(msg.data.get("captures"), list) or not isinstance(msg.data.get("shows"), list):
+            raise ProtocolError("mirror needs captures and shows")
+    elif t in ("mirror_frame", "mirror_pointer", "mirror_ack"):
+        if not isinstance(msg.data.get("id"), str) or not msg.data["id"]:
+            raise ProtocolError(f"{t}.id must be a non-empty string")
+        if t == "mirror_frame" and not isinstance(msg.data.get("jpg"), str):
+            raise ProtocolError("mirror_frame.jpg must be a string")
     elif t == "edge":
         d = msg.data
         if d.get("hide") is not True and d.get("flash") is not True:
