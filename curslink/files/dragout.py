@@ -144,9 +144,9 @@ class AgentDragOut:
         if not self._held or self._watching:
             return
         strips = outer_sides(self.screens())
-        if strips:
-            self._watching = True
-            self.helper("strips " + json.dumps(strips, separators=(",", ":")))
+        self._watching = True
+        # Without the screens' layout here, the helper works the edges out itself.
+        self.helper("strips " + (json.dumps(strips, separators=(",", ":")) if strips else "edges"))
 
     def _stop_watching(self) -> None:
         if self._watching:

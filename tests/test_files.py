@@ -880,3 +880,40 @@ async def test_the_card_shows_at_once_and_gives_way_to_the_real_drag(tmp_path):
     assert helper[-2].startswith("card ") and helper[-1].startswith("nativedrag ")
     drop.on_helper("nativedrag-started c1")
     assert helper[-1] == "card hide"
+
+
+async def test_a_mac_drag_keeps_the_card_following_the_pointer(tmp_path):
+    drop, receiver, helper, calls = native(tmp_path)
+    drop.begin("m1", CARD)
+    drop.on_helper("nativedrag-started m1 card")
+    assert "card hide" not in helper
+    drop.on_helper("nativedrag-ended m1 copy")
+    assert helper[-1] == "card hide"
+
+
+async def test_agent_without_screen_info_asks_the_helper_for_edges(monkeypatch):
+    import curslink.files.dragout as dragout
+
+    monkeypatch.setattr(dragout, "WATCH_AFTER_S", 0.01)
+    helper = []
+
+    async def nothing(t, **d):
+        pass
+
+    out = AgentDragOut(helper.append, lambda t, **d: None, nothing, "PC", nudge=lambda r: None, explorer=lambda: [])
+    out.on_button("left", True)
+    await asyncio.sleep(0.05)
+    assert helper == ["strips edges"]
+
+
+def test_helper_edge_strips(capsys):
+    QtWidgets = pytest.importorskip("PySide6.QtWidgets")
+    from curslink.files.overlay import FilesOverlay
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    files = FilesOverlay(lambda x, y: (x, y))
+    files.handle("strips edges")
+    assert len(files.strips) == 4 * len(app.screens())
+    assert "drop targets on the screen edges" in capsys.readouterr().out
+    files.handle("strips off")
+    assert files.strips == []
