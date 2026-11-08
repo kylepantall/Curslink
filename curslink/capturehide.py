@@ -20,6 +20,16 @@ _WDA_EXCLUDEFROMCAPTURE = 0x11
 def exclude_from_capture(widget) -> None:
     """Leave ``widget``'s window out of screen captures, where the OS can."""
     try:
+        from PySide6.QtGui import QGuiApplication
+
+        platform = QGuiApplication.platformName()
+    except Exception:  # pragma: no cover
+        return
+    # Only with the real window system: under another Qt platform (offscreen,
+    # in tests) the window id isn't an NSView or HWND.
+    if (sys.platform, platform) not in (("win32", "windows"), ("darwin", "cocoa")):
+        return
+    try:
         wid = int(widget.winId())
     except Exception:  # pragma: no cover - no native window
         return
