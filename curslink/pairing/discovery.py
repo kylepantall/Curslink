@@ -122,6 +122,19 @@ async def reachable(addresses, port: int, timeout: float = 2.0, ssl=None) -> str
     return next((a for a, ok in zip(addresses, answered) if ok), None)
 
 
+async def resolve_local_name(name: str, timeout: float = 3.0) -> list[str]:
+    """IPv4 addresses the operating system's resolver gives for a ``.local``
+    name (Windows, macOS and most Linux resolve these themselves), or []."""
+    try:
+        infos = await asyncio.wait_for(
+            asyncio.get_running_loop().getaddrinfo(name, None, family=socket.AF_INET, type=socket.SOCK_STREAM),
+            timeout,
+        )
+    except (OSError, asyncio.TimeoutError):
+        return []
+    return list(dict.fromkeys(info[4][0] for info in infos))
+
+
 def local_addresses() -> list[str]:
     """This machine's LAN addresses (IPv4, not loopback or link-local)."""
     try:

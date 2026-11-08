@@ -1222,6 +1222,16 @@ async def resolve_host(cfg: AgentConfig, store: PairingStore) -> ConnectTarget:
             # mDNS didn't reach us (some routers and mesh Wi-Fi drop it one
             # way): try where we paired with it or last found it.
             log.info("%s didn't answer on mDNS; trying its last address %s:%d", peer.name, peer.address, cfg.port)
+            from curslink.pairing.discovery import reachable, resolve_local_name
+
+            if await reachable([peer.address], cfg.port, timeout=1.5, ssl=ctx) is None:
+                # Its address changed (DHCP) and the browse missed it: ask the
+                # system resolver for "<name>.local" (unicast-style lookup).
+                name = f"{peer.device_id}.local"
+                address = await reachable(await resolve_local_name(name), cfg.port, ssl=ctx)
+                if address:
+                    log.info("%s is at %s now (found by name, %s)", peer.name, address, name)
+                    return ConnectTarget(address, cfg.port, ctx, auth_key, relay)
             return ConnectTarget(peer.address, cfg.port, ctx, auth_key, relay)
     if relay:
         return ConnectTarget("", cfg.port, ctx, auth_key, relay)

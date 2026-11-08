@@ -140,3 +140,10 @@ def test_reachable_skips_addresses_that_dont_answer():
                     await reachable(("192.0.2.1",), port, timeout=0.3))
 
     assert asyncio.run(go()) == ("127.0.0.1", None)
+
+
+def test_resolve_local_name_returns_ipv4_or_nothing():
+    from curslink.pairing.discovery import resolve_local_name
+
+    assert "127.0.0.1" in asyncio.run(resolve_local_name("localhost"))
+    assert asyncio.run(resolve_local_name("no-such-host.invalid", timeout=2.0)) == []
