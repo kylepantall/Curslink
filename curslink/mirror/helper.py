@@ -100,6 +100,72 @@ def fit_jpeg(image: QImage, quality: int, scale: float) -> tuple[bytes, int, flo
     return raw, quality, scale
 
 
+MAC_NO_RECORDING = ("macOS hasn't allowed Screen Recording for Curslink. Allow it in System Settings > "
+                    "Privacy & Security > Screen & System Audio Recording, then restart Curslink")
+_recording: bool | None = None
+
+
+def mac_screen_recording(ask: bool = False) -> bool:
+    """macOS: may Curslink see the screen? Without Screen Recording a grab
+    comes back empty or with just the wallpaper. macOS keeps a process's
+    first answer, so this checks once. With ``ask``, a "no" asks macOS (its
+    prompt, and Curslink listed in System Settings), once."""
+    global _recording
+    from curslink import macperms
+
+    if _recording is None:
+        _recording = macperms.granted(macperms.SCREEN_RECORDING)
+        if not _recording and ask:
+            log.warning("mirror: %s", MAC_NO_RECORDING)
+            macperms.request(macperms.SCREEN_RECORDING, open_settings_too=False)
+    return _recording
+
+
+def mac_grab(x: float, y: float, w: float, h: float) -> QImage | None:
+    """macOS: the screen in a rectangle of points, through Quartz, or None."""
+    try:
+        import Quartz
+    except ImportError:  # pragma: no cover - macOS only
+        return None
+    create = getattr(Quartz, "CGWindowListCreateImage", None)
+    if create is None:  # pragma: no cover - macOS only
+        return None
+    try:
+        cg = create(Quartz.CGRectMake(x, y, w, h), Quartz.kCGWindowListOptionOnScreenOnly,
+                    Quartz.kCGNullWindowID, Quartz.kCGWindowImageDefault)
+        if cg is None:
+            return None
+        return cgimage_to_qimage(Quartz, cg)
+    except Exception:  # pragma: no cover - macOS only
+        log.debug("mirror: Quartz couldn't grab the screen", exc_info=True)
+        return None
+
+
+# CGBitmapInfo: the byte order bits, and CGImageAlphaInfo values.
+_CG_ORDER_MASK, _CG_ORDER_32_LITTLE = 0x7000, 0x2000
+_CG_ALPHA_LAST = (1, 3, 5)  # premultiplied last, last, none skip last
+
+
+def cgimage_to_qimage(quartz, cg) -> QImage | None:
+    """A 32-bit CGImage as a QImage (a copy)."""
+    w, h = int(quartz.CGImageGetWidth(cg)), int(quartz.CGImageGetHeight(cg))
+    if w <= 0 or h <= 0 or int(quartz.CGImageGetBitsPerPixel(cg)) != 32:
+        return None
+    bpr = int(quartz.CGImageGetBytesPerRow(cg))
+    info = int(quartz.CGImageGetBitmapInfo(cg))
+    alpha = int(quartz.CGImageGetAlphaInfo(cg))
+    if info & _CG_ORDER_MASK == _CG_ORDER_32_LITTLE:
+        fmt = QImage.Format.Format_ARGB32_Premultiplied  # BGRA in memory, like Qt's ARGB32 here
+    elif alpha in _CG_ALPHA_LAST:
+        fmt = QImage.Format.Format_RGBA8888_Premultiplied
+    else:
+        return None
+    data = bytes(quartz.CGDataProviderCopyData(quartz.CGImageGetDataProvider(cg)))
+    if len(data) < bpr * h:
+        return None
+    return QImage(data, w, h, bpr, fmt).copy()
+
+
 class Capture:
     """Grabs one covered rectangle ``fps`` times a second and prints it."""
 
@@ -112,6 +178,8 @@ class Capture:
         self.last_hash = b""
         self.last_sent = 0.0
         self.failed = False
+        self.why = ""
+        self.said_quartz = False
         self.timer = QTimer()
         self.timer.timeout.connect(self.grab)
         self.set(spec)
@@ -127,16 +195,30 @@ class Capture:
     def image(self) -> QImage | None:
         found = os_to_logical(_screens(), self.spec.get("os"), sys.platform == "win32")
         if found is None:
+            self.why = "no screen of this computer is there"
             return None
         lx, ly, lw, lh, index = found
+        if sys.platform == "darwin" and not mac_screen_recording(ask=True):
+            self.why = MAC_NO_RECORDING
+            return None
         qscreen = QGuiApplication.screens()[index]
         g = qscreen.geometry()
         # Relative to the screen, in Qt's logical pixels; the pixmap comes
         # back at the screen's real resolution.
         pix = qscreen.grabWindow(0, round(lx - g.x()), round(ly - g.y()), max(1, round(lw)), max(1, round(lh)))
-        if pix.isNull() or pix.width() <= 0:
-            return None
-        return pix.toImage()
+        if not pix.isNull() and pix.width() > 0:
+            return pix.toImage()
+        if sys.platform == "darwin":
+            # Qt's grab comes back empty on recent macOS: ask Quartz directly
+            # (macOS points, the same as Qt's logical pixels there).
+            img = mac_grab(lx, ly, lw, lh)
+            if img is not None:
+                if not self.said_quartz:
+                    log.info("mirror: capturing through Quartz (Qt's screen grab came back empty)")
+                    self.said_quartz = True
+                return img
+        self.why = "the screen grab came back empty"
+        return None
 
     def grab(self) -> None:
         try:
@@ -148,9 +230,11 @@ class Capture:
             return
         if img is None:
             if not self.failed:
-                log.warning("mirror: nothing to capture at %s", self.spec.get("os"))
+                log.warning("mirror: couldn't capture %s: %s", self.spec.get("os"), self.why)
             self.failed = True
             return
+        if self.failed or not self.last_sent:
+            log.info("mirror: capturing %s at %dx%d", self.spec.get("os"), img.width(), img.height())
         self.failed = False
         small = img.scaled(64, 36, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.FastTransformation)
         small = small.convertToFormat(QImage.Format.Format_RGB32)

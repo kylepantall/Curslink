@@ -388,3 +388,55 @@ def test_no_drawn_pointer_for_a_phone_whose_capture_shows_its_own():
     router.on_motion(-150, -200)  # into the corner the PC covers
     assert router.active_device == "phone" and (router.x, router.y) == (950, 500)
     assert not [d for d in transport.of("mirror_pointer") if "x" in d]
+
+
+def test_quartz_images_become_qt_images(qapp):
+    from PySide6.QtGui import QColor
+
+    from curslink.mirror.helper import cgimage_to_qimage
+
+    class FakeQuartz:
+        """A 2x2 BGRA (32-bit little, premultiplied first) image, like macOS hands back."""
+        def __init__(self, info=0x2002, alpha=2, bpp=32):
+            self.info, self.alpha, self.bpp = info, alpha, bpp
+
+        def CGImageGetWidth(self, _): return 2  # noqa: E704,N802
+        def CGImageGetHeight(self, _): return 2  # noqa: E704,N802
+        def CGImageGetBitsPerPixel(self, _): return self.bpp  # noqa: E704,N802
+        def CGImageGetBytesPerRow(self, _): return 8  # noqa: E704,N802
+        def CGImageGetBitmapInfo(self, _): return self.info  # noqa: E704,N802
+        def CGImageGetAlphaInfo(self, _): return self.alpha  # noqa: E704,N802
+        def CGImageGetDataProvider(self, _): return None  # noqa: E704,N802
+        def CGDataProviderCopyData(self, _): return bytes([0, 0, 255, 255]) * 4  # noqa: E704,N802  # red
+
+    img = cgimage_to_qimage(FakeQuartz(), object())
+    assert (img.width(), img.height()) == (2, 2) and img.pixelColor(1, 1) == QColor(255, 0, 0)
+    rgba = cgimage_to_qimage(FakeQuartz(info=1, alpha=1), object())  # RGBA, alpha last
+    assert rgba.pixelColor(0, 0) == QColor(0, 0, 255)
+    assert cgimage_to_qimage(FakeQuartz(bpp=24), object()) is None
+
+
+def test_a_capture_says_why_it_got_nothing(qapp, caplog):
+    from curslink.mirror.helper import Capture
+
+    out = []
+    cap = Capture({"id": "c", "screen": "main", "os": [90000, 90000, 10, 10], "fps": 1}, out.append)
+    with caplog.at_level("WARNING", logger="curslink.mirror.helper"):
+        cap.grab()
+        cap.grab()
+    cap.stop()
+    assert not out
+    said = [r.getMessage() for r in caplog.records if "couldn't capture" in r.getMessage()]
+    assert len(said) == 1 and "no screen of this computer" in said[0]
+
+
+def test_macos_asks_for_screen_recording_only_with_mirror_mode(monkeypatch):
+    from curslink import macperms
+
+    monkeypatch.setattr(macperms, "MAC", True)
+    assert macperms.SCREEN_RECORDING not in macperms.needed("host")
+    assert macperms.SCREEN_RECORDING in macperms.needed("host", mirror=True)
+    assert macperms.mirror_on({"layout": {"allow_overlap": True, "mirror": True}})
+    assert not macperms.mirror_on({"layout": {"allow_overlap": False, "mirror": True}})
+    assert not macperms.mirror_on({"layout": {"allow_overlap": True}})
+    assert macperms.PERMISSIONS[macperms.SCREEN_RECORDING].title == "Screen Recording"
