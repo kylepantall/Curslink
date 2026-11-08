@@ -758,18 +758,15 @@ class LayoutPage(Page):
         b, f = items.get(behind), items.get(front)
         if b is None or f is None:
             return
-        bx, by, bw, bh = b.layout_rect()
-        fx, fy, fw, fh = f.layout_rect()
-        start = (float(fx - bx), float(fy - by), 1.0)
+        saved = None
         for t in cfg.fits():
             if (t.get("behind"), t.get("front")) == (behind, front):
                 try:
-                    start = (float(t["x"]), float(t["y"]), float(t["scale"]))
+                    saved = (float(t["x"]), float(t["y"]), float(t["scale"]))
                 except (KeyError, TypeError, ValueError):
-                    pass
-        dialog = FitTuneDialog({"key": behind, "name": b.device_name, "size": (bw, bh)},
-                               {"key": front, "name": f.device_name, "size": (fw, fh)},
-                               start, self.app.service.send, self)
+                    saved = None
+        dialog = FitTuneDialog({"key": behind, "name": b.device_name}, {"key": front, "name": f.device_name},
+                               saved, self.app.service.send, self)
         dialog.saved.connect(lambda fit, b=behind, f=front: self.fit_tuned(b, f, fit))
         self.calibration = dialog
         dialog.finished.connect(lambda _code: setattr(self, "calibration", None))

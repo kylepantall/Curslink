@@ -358,6 +358,10 @@ class AgentClient:
                 screens=detect_screens(),
                 features=features,
             )
+            if self.session.mirror is not None:
+                from curslink.screensize import physical_sizes
+
+                hello["screen_mm"] = physical_sizes()
             if self.facing_source is not None:
                 hello["camera"] = True
             if self.auth_key is not None:

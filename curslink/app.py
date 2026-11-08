@@ -539,12 +539,15 @@ def start_mirror(cfg: HostConfig, router: Router, server: HostServer, overlay, l
     else:
         log.warning("mirror mode: this computer can't capture or show mirrors without Qt (PySide6)")
     host = MirrorHost(cfg.layout, router, server, local, cfg.mirror_fps)
+    host.on_fit = lambda fit: events.emit("fit", **fit)
     server.on_mirror = host.on_message
     router.on_moved = host.update
     connected, disconnected = server.on_connect, server.on_disconnect
 
     def on_connect(conn) -> None:
         connected(conn)
+        if cfg.layout.set_physical(conn.device_id, getattr(conn, "screen_mm", [])):
+            log_sizes(cfg.layout, conn.device_id)
         loop.call_soon(host.refresh)
 
     def on_disconnect(device_id: str) -> None:
@@ -552,9 +555,21 @@ def start_mirror(cfg: HostConfig, router: Router, server: HostServer, overlay, l
         host.refresh()
 
     server.on_connect, server.on_disconnect = on_connect, on_disconnect
+    from curslink.screensize import physical_sizes
+
+    if cfg.layout.set_physical(router.local_id, physical_sizes()):
+        log_sizes(cfg.layout, router.local_id)
     host.refresh()
     log.info("mirror mode on (%d fps)", host.fps)
     return host
+
+
+def log_sizes(layout, device_id: str) -> None:
+    for screen in layout.screens(device_id):
+        mm = layout.physical.get((device_id, screen.id))
+        if mm is not None:
+            log.info("mirror: %s/%s is %.0f x %.0f mm (%.2f px per mm)", device_id, screen.id, mm[0], mm[1],
+                     screen.width / mm[0])
 
 
 def start_popups(router: Router, server: HostServer, capture):
