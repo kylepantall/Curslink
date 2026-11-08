@@ -73,6 +73,8 @@ class HostConfig:
     lan: bool = True
     # Send pointer moves by UDP to agents that take them (see curslink.net.udp).
     udp: bool = True
+    # Tune each link to how it's doing ([network] optimise; see curslink.net.quality).
+    optimise: bool = True
     relay: RelayTarget | None = None
     router: RouterSettings = field(default_factory=RouterSettings)
     gaze: GazeConfig = field(default_factory=GazeConfig)
@@ -113,6 +115,9 @@ class AgentConfig:
     smooth_pointer: bool = True
     # Take pointer moves by UDP when the host is reached directly (see curslink.net.udp).
     udp: bool = True
+    # Mark packets low-latency, and go direct again once the host shows up on
+    # the LAN after a relay connection ([network] optimise; see curslink.net.quality).
+    optimise: bool = True
     relay: RelayTarget | None = None
     pairing: PairingConfig = field(default_factory=PairingConfig)
     gaze: AgentGazeConfig = field(default_factory=AgentGazeConfig)
@@ -446,6 +451,7 @@ def host_config(raw: dict[str, Any], base_dir: Path = Path(".")) -> HostConfig:
         port=_int(host, "port", DEFAULT_PORT),
         lan=lan,
         udp=bool(host.get("udp", True)),
+        optimise=network_optimise(raw),
         relay=relay,
         router=router,
         gaze=gaze,
@@ -454,6 +460,12 @@ def host_config(raw: dict[str, Any], base_dir: Path = Path(".")) -> HostConfig:
         isolink=_enabled(raw.get("isolink", {}), "[isolink]"),
         mirror_fps=max(1, min(30, _int(raw.get("layout", {}), "mirror_fps", 15))),
     )
+
+
+def network_optimise(raw: dict[str, Any]) -> bool:
+    """``[network] optimise`` (on unless turned off)."""
+    table = raw.get("network", {})
+    return bool(table.get("optimise", True)) if isinstance(table, dict) else True
 
 
 def agent_config(raw: dict[str, Any], base_dir: Path = Path(".")) -> AgentConfig:
@@ -474,6 +486,7 @@ def agent_config(raw: dict[str, Any], base_dir: Path = Path(".")) -> AgentConfig
         animations=agent.get("animations", True),
         smooth_pointer=bool(agent.get("smooth_pointer", True)),
         udp=bool(agent.get("udp", True)),
+        optimise=network_optimise(raw),
         pairing=pairing_config(raw, base_dir),
         gaze=agent_gaze_config(agent.get("gaze", {})),
         files=agent_files_config(agent.get("files", {})),

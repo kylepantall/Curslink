@@ -10,9 +10,10 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
+from curslink.net import quality
 from curslink.net.framing import STREAM_LIMIT, read_message
 from curslink.net.udp import HostPath, HostUdp
-from curslink.protocol import HOST_FEATURES, UDP_FEATURE, Message, ProtocolError, encode
+from curslink.protocol import HOST_FEATURES, NETSTATS_FEATURE, UDP_FEATURE, Message, ProtocolError, encode
 
 log = logging.getLogger(__name__)
 
@@ -30,6 +31,10 @@ BULK_BUFFER_BYTES = 64 * 1024
 # Before these, a move that only went by UDP is repeated over TCP, so a
 # click or key lands where the pointer is even if that datagram was lost.
 SYNC_BEFORE = frozenset({"button", "scroll", "key", "leave", "drag"})
+# Re-tune each connection (see curslink.net.quality) this often.
+TUNE_EVERY_S = 2.0
+# An agent's netstats older than this is stale (it sends them every few seconds).
+NETSTATS_STALE_S = 15.0
 
 
 @dataclass
@@ -48,6 +53,19 @@ class AgentConnection:
     rtts: list = field(default_factory=list)  # ping round trips (s) since last taken
     udp: HostPath | None = None   # moves by UDP (see curslink.net.udp), when the agent takes them
     ping_s: float = PING_INTERVAL_S
+    relay: bool = False           # reached us through the relay, not directly
+    rtt: quality.RttWindow = field(default_factory=quality.RttWindow)  # ping round trips, last minute
+    netstats: dict | None = None  # the agent's last netstats frame
+    netstats_at: float = 0.0
+    optimiser: quality.Optimiser = field(default_factory=lambda: quality.Optimiser(False))
+    # The newest move held back to keep to tuning.move_interval_s, and when one last went.
+    pending_move: dict | None = None
+    last_move_at: float = 0.0
+    flush_handle: asyncio.TimerHandle | None = None
+
+    @property
+    def tuning(self) -> quality.Tuning:
+        return self.optimiser.tuning
 
     @property
     def dead_after_s(self) -> float:
@@ -67,6 +85,7 @@ class HostServer:
         port: int = 0,
         verify_hello: Callable[[str, object, bytes | None], bool] | None = None,
         udp: bool = True,
+        optimise: bool = False,
     ):
         self.known_devices = known_devices
         self.ssl_context = ssl_context
@@ -95,6 +114,10 @@ class HostServer:
         self._server: asyncio.base_events.Server | None = None
         self.udp_enabled = udp
         self.udp: HostUdp | None = None
+        # Tune each link to how it's doing (see curslink.net.quality).
+        self.optimise = optimise
+        # (device_id, Tuning): the optimiser changed what it does for that agent.
+        self.on_tuning: Callable[[str, quality.Tuning], None] = lambda device_id, tuning: None
 
     async def start(self) -> None:
         any_port = self.port == 0
@@ -119,7 +142,8 @@ class HostServer:
     async def _start_udp(self, warn: bool = True) -> None:
         loop = asyncio.get_running_loop()
         try:
-            _, self.udp = await loop.create_datagram_endpoint(HostUdp, local_addr=(self.host, self.port))
+            _, self.udp = await loop.create_datagram_endpoint(lambda: HostUdp(mark=self.optimise),
+                                                              local_addr=(self.host, self.port))
         except OSError as exc:
             if not warn:
                 self.udp = None
@@ -151,6 +175,33 @@ class HostServer:
         conn = self.connections.get(device_id)
         if conn is None:
             return
+        interval = conn.tuning.move_interval_s
+        if t == "move" and interval > 0:
+            # Moves are absolute positions: one held back is simply replaced by
+            # the next, and the newest goes when its turn comes.
+            now = time.monotonic()
+            wait = conn.last_move_at + interval - now
+            if wait > 0:
+                conn.pending_move = data
+                if conn.flush_handle is None:
+                    conn.flush_handle = asyncio.get_running_loop().call_later(wait, self._flush_move, conn)
+                return
+            conn.last_move_at = now
+            conn.pending_move = None
+        elif conn.pending_move is not None:
+            self._flush_move(conn)  # a click, key or leave happens after the move before it
+        self._send_now(conn, t, data)
+
+    def _flush_move(self, conn: AgentConnection) -> None:
+        if conn.flush_handle is not None:
+            conn.flush_handle.cancel()
+            conn.flush_handle = None
+        data, conn.pending_move = conn.pending_move, None
+        if data is not None and self.connections.get(conn.device_id) is conn:
+            conn.last_move_at = time.monotonic()
+            self._send_now(conn, "move", data)
+
+    def _send_now(self, conn: AgentConnection, t: str, data: dict) -> None:
         transport = conn.writer.transport
         if transport.is_closing():
             return
@@ -196,7 +247,8 @@ class HostServer:
         return send
 
     # ------------------------------------------------------------ internals
-    async def handle_streams(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    async def handle_streams(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+                             relay: bool = False) -> None:
         """Serve one agent connection that is already end-to-end encrypted
         (accepted on the LAN listener, or paired through a relay)."""
         peer = writer.get_extra_info("peername")
@@ -234,7 +286,11 @@ class HostServer:
                 camera=hello.get("camera") is True,
                 features=frozenset(f for f in (hello.get("features") or []) if isinstance(f, str)),
                 ping_s=_ping_interval(hello.get("ping_s")),
+                relay=relay,
+                optimiser=quality.Optimiser(self.optimise),
             )
+            if self.optimise:
+                quality.mark_low_latency(quality.transport_socket(writer))
             self.connections[device_id] = conn
             welcome = {"device_id": device_id, "features": list(HOST_FEATURES)}
             # Only for an agent that asked: older ones would drop the connection
@@ -246,6 +302,7 @@ class HostServer:
             log.info("agent %s (%s, %s) connected from %s", device_id, conn.name, conn.platform, peer)
             self.on_connect(conn)
             pinger = asyncio.create_task(self._ping(conn))
+            tuner = asyncio.create_task(self._tune(conn)) if self.optimise else None
             try:
                 while True:
                     msg = await read_message(reader)
@@ -255,6 +312,11 @@ class HostServer:
                     self._on_message(conn, msg)
             finally:
                 pinger.cancel()
+                if tuner is not None:
+                    tuner.cancel()
+                if conn.flush_handle is not None:
+                    conn.flush_handle.cancel()
+                    conn.flush_handle = None
         except (asyncio.TimeoutError, ProtocolError) as exc:
             log.warning("rejecting %s: %s", peer, exc)
             if conn is None and isinstance(exc, ProtocolError):
@@ -281,8 +343,14 @@ class HostServer:
             conn.writer.close()
         elif msg.t == "pong":
             ts = msg.get("ts")
-            if isinstance(ts, (int, float)) and not isinstance(ts, bool) and len(conn.rtts) < 1000:
-                conn.rtts.append(max(0.0, time.monotonic() - ts / 1000.0))
+            if isinstance(ts, (int, float)) and not isinstance(ts, bool):
+                rtt = max(0.0, time.monotonic() - ts / 1000.0)
+                conn.rtt.add(rtt)
+                if len(conn.rtts) < 1000:
+                    conn.rtts.append(rtt)
+        elif msg.t == "netstats":
+            conn.netstats = dict(msg.data)
+            conn.netstats_at = time.monotonic()
         elif msg.t == "facing":
             conn.facing = msg.data["facing"]
             self.on_facing(conn.device_id, conn.facing)
@@ -301,6 +369,57 @@ class HostServer:
             if reply and not conn.writer.transport.is_closing():
                 conn.writer.write(reply)
 
+    # ------------------------------------------------------- link quality
+    def link_report(self, device_id: str) -> dict | None:
+        """How the link to that agent is doing, for the app's Network
+        settings and the optimiser: the path, the round trip and jitter of
+        pings over TLS, packet loss by UDP (the worse of the agent's view of
+        our datagrams and ours of its probes) and what the optimiser does."""
+        conn = self.connections.get(device_id)
+        if conn is None:
+            return None
+        path = conn.udp
+        udp_up = path is not None and self.udp is not None and path.usable(self.udp.clock())
+        stats = conn.netstats if time.monotonic() - conn.netstats_at < NETSTATS_STALE_S else None
+        losses = [v for v in ((stats or {}).get("loss_pct"), path.probes.stats()["loss_pct"] if path else None)
+                  if v is not None]
+        return {
+            "device_id": device_id,
+            "name": conn.name,
+            "platform": conn.platform,
+            "path": "relay" if conn.relay else ("udp" if udp_up else "tcp"),
+            "udp_offered": path is not None,
+            "rtt": conn.rtt.stats(),
+            "loss_pct": max(losses) if losses else None,
+            "agent": stats,
+            "optimise": self.optimise,
+            # The agent goes direct by itself once it sees us on the LAN (not the Android app).
+            "upgrades": NETSTATS_FEATURE in conn.features,
+            "tuning": conn.tuning.as_dict(),
+            "local": _sockname(conn.writer),
+        }
+
+    def retune(self, conn: AgentConnection) -> None:
+        report = self.link_report(conn.device_id)
+        if report is None:
+            return
+        before = conn.tuning
+        after = conn.optimiser.update(report["rtt"], report["loss_pct"], report["path"] == "udp",
+                                      copies_ok=NETSTATS_FEATURE in conn.features)
+        if conn.udp is not None:
+            conn.udp.copies = after.copies
+        if after != before:
+            if after.reason:
+                log.info("network: tuning the link to %s: %s", conn.device_id, after.reason)
+            else:
+                log.info("network: the link to %s recovered; back to normal", conn.device_id)
+            self.on_tuning(conn.device_id, after)
+
+    async def _tune(self, conn: AgentConnection) -> None:
+        while True:
+            await asyncio.sleep(TUNE_EVERY_S)
+            self.retune(conn)
+
     async def _ping(self, conn: AgentConnection) -> None:
         loop = asyncio.get_running_loop()
         n = 0
@@ -311,13 +430,29 @@ class HostServer:
                 conn.writer.transport.abort()
                 return
             n += 1
-            self.send(conn.device_id, "ping", n=n, ts=round(time.monotonic() * 1000.0, 2))
+            extra = {}
+            if NETSTATS_FEATURE in conn.features:
+                # So the agent's Network settings can show the round trip too
+                # (only the host can time it: the ts is on its clock).
+                stats = conn.rtt.stats()
+                extra = {"rtt_ms": stats["p50_ms"], "p95_ms": stats["p95_ms"], "jitter_ms": stats["jitter_ms"],
+                         "tuning": conn.tuning.reason}
+            self.send(conn.device_id, "ping", n=n, ts=round(time.monotonic() * 1000.0, 2), **extra)
 
 
 def _ping_interval(value) -> float:
     if not _is_num(value):
         return PING_INTERVAL_S
     return min(max(float(value), PING_INTERVAL_S), MAX_PING_INTERVAL_S)
+
+
+def _sockname(writer) -> str:
+    """Our end of a connection's address (which interface it went out on)."""
+    try:
+        name = writer.get_extra_info("sockname")
+    except Exception:  # pragma: no cover
+        return ""
+    return str(name[0]) if isinstance(name, tuple) and name else ""
 
 
 def _is_num(value) -> bool:

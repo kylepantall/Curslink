@@ -20,7 +20,11 @@ Host -> agent
     button       {button, pressed}
     scroll       {dx, dy}
     key          {key, pressed}        see :mod:`curslink.inputs.keys`
-    ping         {n, ts}               ts (optional): host monotonic ms
+    ping         {n, ts}               ts (optional): host monotonic ms; to an agent
+                                       whose hello.features has "netstats" also
+                                       rtt_ms, p95_ms, jitter_ms (the host's measure
+                                       of the round trip, or null) and tuning (what
+                                       the network optimiser is doing, in words)
     drag         {card} | {hide: true} a file drag is being carried onto this
                                        device: show (or take down) the
                                        placeholder that follows the pointer
@@ -73,6 +77,13 @@ Agent -> host
     mirror_tune {id, mx, my} | {id, grow, ax, ay}
                                        the mirror being adjusted was dragged or zoomed
     mirror_ack   {id}                  a frame of a mirror it shows was shown
+    netstats     {udp, loss_pct, rtt_ms, jitter_ms}
+                                       how the link looks from the agent (every few
+                                       seconds; only to a host whose welcome.features
+                                       has "netstats"): whether its UDP path is up,
+                                       the share of the host's datagrams lost on the
+                                       way, and the UDP round trip (see
+                                       curslink.net.quality). Numbers may be null
 
 ``hello.camera`` is true when the agent runs its own camera to confirm
 gaze switches (see :mod:`curslink.gaze.confirm`). An agent only sends
@@ -125,6 +136,7 @@ MESSAGE_TYPES = frozenset(
         "mirror_frame",
         "mirror_pointer",
         "mirror_ack",
+        "netstats",
         "mirror_tune",
         "edge",
         "bye",
@@ -148,7 +160,7 @@ MESSAGE_TYPES = frozenset(
 BUTTONS = frozenset({"left", "right", "middle", "x1", "x2"})
 EFFECTS = frozenset({"pop", "blink", "none"})
 # What this host understands beyond the base protocol, sent in welcome.features.
-HOST_FEATURES = ("facing", "popups", "mirror")
+HOST_FEATURES = ("facing", "popups", "mirror", "netstats")
 # What this agent understands beyond the base protocol, sent in hello.features.
 # An agent without "look" would reject a look frame as unknown and drop the
 # connection, so the host only sends one to agents that list it.
@@ -185,6 +197,10 @@ MIRROR_FEATURE = "mirror"
 # Listed with "mirror" by an agent whose captures already show its pointer
 # (a phone, which draws its own): the host sends no mirror_pointer for them.
 MIRROR_CURSOR_FEATURE = "mirror_cursor"
+# An agent that reports how the link looks from its end (netstats) and
+# takes a move sent twice on a lossy link (MOVE2 datagrams, see
+# curslink.net.udp); a host that lists it takes netstats frames.
+NETSTATS_FEATURE = "netstats"
 FILE_FRAMES = frozenset({"file_begin", "file_item", "file_data", "file_end", "file_cancel", "file_result",
                          "file_ack"})
 
@@ -287,6 +303,13 @@ def _validate(msg: Message) -> None:
             for key in ("a", "b", "at", "near"):
                 if not _is_number(d.get(key)):
                     raise ProtocolError(f"edge.{key} must be a number")
+    elif t == "netstats":
+        if not isinstance(msg.data.get("udp"), bool):
+            raise ProtocolError("netstats.udp must be a boolean")
+        for key in ("loss_pct", "rtt_ms", "jitter_ms"):
+            value = msg.data.get(key)
+            if value is not None and not _is_number(value):
+                raise ProtocolError(f"netstats.{key} must be a number or null")
     elif t == "drag":
         if msg.data.get("hide") is not True and not isinstance(msg.data.get("card"), dict):
             raise ProtocolError("drag needs a card, or hide")

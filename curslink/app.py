@@ -253,6 +253,7 @@ async def run_host(cfg: HostConfig) -> None:
         port=cfg.port,
         verify_hello=HelloVerifier(cfg.secret, store.key),
         udp=cfg.udp,
+        optimise=cfg.optimise,
     )
     if not cfg.secret and not store.peers("agent"):
         log.info("no devices paired yet: run `curslink pair` here or on an agent")
@@ -293,7 +294,8 @@ async def run_host(cfg: HostConfig) -> None:
     await pairing.start()
     relay = None
     if cfg.relay:
-        relay = HostRelays(cfg.relay, cfg.device_id, cfg.secret is not None, store, tls, server.handle_streams)
+        relay = HostRelays(cfg.relay, cfg.device_id, cfg.secret is not None, store, tls,
+                           lambda reader, writer: server.handle_streams(reader, writer, relay=True))
         relay.start()
         log.info("waiting for agents via relay %s", cfg.relay.address)
     handoff = start_file_drags(cfg, router, server, overlay, capture, loop) if cfg.files else None
@@ -302,6 +304,7 @@ async def run_host(cfg: HostConfig) -> None:
     bridge = LoopBridge(loop, router, handoff)
     capture.start(bridge)
     reporter = loop.create_task(report_capture(bridge, capture, server, router))
+    network = loop.create_task(report_network_host(server, cfg.optimise)) if events.channel.enabled else None
     router.blocked = input_blocked_reason()
 
     # Gaze can come from this computer's camera, the agents' own cameras,
@@ -358,6 +361,10 @@ async def run_host(cfg: HostConfig) -> None:
             router.picker = lambda data: events.emit("picked", **data)
         elif line == "pick off":
             router.picker = None
+        elif line == "netcheck":
+            from curslink.net.check import emit_check
+
+            loop.create_task(emit_check(events.emit, cfg.device_id, remote_ids))
         else:
             host_command(router, stop, line)
 
@@ -367,6 +374,8 @@ async def run_host(cfg: HostConfig) -> None:
         await stop.wait()
     finally:
         reporter.cancel()
+        if network is not None:
+            network.cancel()
         camera.stop()
         capture.stop()
         if isolink is not None:
@@ -649,6 +658,68 @@ async def report_capture(bridge: LoopBridge, capture, server: HostServer, router
             log.info("%s", line)
         if router.is_local:
             target = None
+
+
+NETWORK_EVERY_S = 2.0
+
+
+async def report_network_host(server: HostServer, optimise: bool, every_s: float = NETWORK_EVERY_S) -> None:
+    """Every few seconds, how each agent's link is doing (a ``network`` event
+    for Settings > Network)."""
+    from curslink.net.check import InterfaceCache, network_event
+
+    ifaces = InterfaceCache()
+    while True:
+        await asyncio.sleep(every_s)
+        links = [r for r in (server.link_report(d) for d in list(server.connections)) if r is not None]
+        events.emit("network", **network_event("host", links, optimise, ifaces.get()))
+
+
+async def report_network_agent(client: AgentClient, optimise: bool, mdns: dict,
+                               every_s: float = NETWORK_EVERY_S) -> None:
+    """The agent's ``network`` event: its link to the host, as seen from here."""
+    from curslink.net.check import InterfaceCache, network_event
+
+    ifaces = InterfaceCache()
+    while True:
+        await asyncio.sleep(every_s)
+        links = [client.link_report()] if client.path else []
+        events.emit("network", **network_event("agent", links, optimise, ifaces.get(), mdns.get("seen")))
+
+
+UPGRADE_EVERY_S = 30.0
+
+
+async def upgrade_path(cfg: AgentConfig, store: PairingStore, client: AgentClient, session: AgentSession,
+                       every_s: float = UPGRADE_EVERY_S, find=None, reachable=None) -> None:
+    """The optimiser's agent half: while connected through the relay, look
+    for the host on the LAN now and then, and reconnect directly once it
+    answers there (when input isn't on this device, so nothing is cut off).
+    A relay link is far slower, and takes no moves by UDP."""
+    if find is None or reachable is None:
+        from curslink.pairing import discovery
+
+        find = find or discovery.find
+        reachable = reachable or discovery.reachable
+    while True:
+        await asyncio.sleep(every_s)
+        if client.path != "relay" or session.active or cfg.host:
+            continue
+        try:
+            peer = paired_host(cfg, store)
+            if peer is None:
+                continue
+            found = await find(peer.device_id, timeout=3.0)
+            if found is None or not found.control_port:
+                continue
+            address = await reachable(list(found.addresses), found.control_port, ssl=client.ssl_context)
+        except (OSError, NotReady, ValueError) as exc:
+            log.debug("network: looking for a direct path: %s", exc)
+            continue
+        if address is not None and client.path == "relay" and not session.active:
+            log.info("network: %s answers on the LAN at %s; switching from the relay to a direct link",
+                     peer.name, address)
+            client.reconnect()
 
 
 def input_blocked_reason():
@@ -979,10 +1050,12 @@ async def run_agent(cfg: AgentConfig) -> None:
     )
     native = receive_files(cfg, session, overlay) if cfg.files.enabled and overlay is not None else None
     store = PairingStore(cfg.pairing.store)
+    mdns: dict = {}  # "seen": whether the last lookup found the host by mDNS (None: not looked up)
     client = AgentClient(
         cfg.device_id, cfg.name, cfg.host, cfg.port, None, session,
-        resolve=lambda: resolve_host(cfg, store),
+        resolve=lambda: resolve_host(cfg, store, mdns),
         udp=cfg.udp,
+        optimise=cfg.optimise,
     )
     session.on_look = lambda data: events.emit("look", **data)
     if native is not None:
@@ -1022,16 +1095,33 @@ async def run_agent(cfg: AgentConfig) -> None:
     await pairing.start()
     stop = asyncio.Event()
     if events.channel.enabled:
-        events.read_commands(asyncio.get_running_loop(), lambda command: agent_command(session, stop, command))
+        def command(line: str) -> None:
+            if line == "netcheck":
+                from curslink.net.check import emit_check
+
+                try:
+                    peers = {p.device_id for p in store.peers("host")}
+                except ValueError:  # unreadable pairing store
+                    peers = set()
+                asyncio.get_running_loop().create_task(emit_check(events.emit, cfg.device_id, peers))
+            else:
+                agent_command(session, stop, line)
+
+        events.read_commands(asyncio.get_running_loop(), command)
     events.emit("running", role="agent", device_id=cfg.device_id, name=cfg.name)
     runner = asyncio.create_task(client.run_forever())
     stopper = asyncio.create_task(stop.wait())
+    helpers = []
+    if cfg.optimise and cfg.relay:
+        helpers.append(asyncio.create_task(upgrade_path(cfg, store, client, session)))
+    if events.channel.enabled:
+        helpers.append(asyncio.create_task(report_network_agent(client, cfg.optimise, mdns)))
     try:
         await asyncio.wait({runner, stopper}, return_when=asyncio.FIRST_COMPLETED)
         if runner.done():
             runner.result()  # raise what stopped it
     finally:
-        for task in (runner, stopper):
+        for task in (runner, stopper, *helpers):
             task.cancel()
         if camera:
             camera.stop()
@@ -1226,8 +1316,10 @@ def paired_host(cfg: AgentConfig, store: PairingStore):
     return hosts[0] if hosts else None
 
 
-async def resolve_host(cfg: AgentConfig, store: PairingStore) -> ConnectTarget:
-    """Which key to use and where the host is, worked out again before every connection."""
+async def resolve_host(cfg: AgentConfig, store: PairingStore, mdns: dict | None = None) -> ConnectTarget:
+    """Which key to use and where the host is, worked out again before every
+    connection. ``mdns["seen"]``: whether this lookup found the host by mDNS."""
+    mdns = {} if mdns is None else mdns
     peer = paired_host(cfg, store)
     relay = cfg.relay
     if peer is not None:
@@ -1244,6 +1336,7 @@ async def resolve_host(cfg: AgentConfig, store: PairingStore) -> ConnectTarget:
         from curslink.pairing.discovery import find
 
         found = await find(peer.device_id, timeout=5.0)
+        mdns["seen"] = found is not None
         if found is not None and found.control_port:
             from curslink.pairing.discovery import reachable
 
