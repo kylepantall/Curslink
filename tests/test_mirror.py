@@ -440,3 +440,103 @@ def test_macos_asks_for_screen_recording_only_with_mirror_mode(monkeypatch):
     assert not macperms.mirror_on({"layout": {"allow_overlap": False, "mirror": True}})
     assert not macperms.mirror_on({"layout": {"allow_overlap": True}})
     assert macperms.PERMISSIONS[macperms.SCREEN_RECORDING].title == "Screen Recording"
+
+
+# -- lining up an overlap (Fit) ------------------------------------------------------------
+
+
+def _fit_layout(fits=()):
+    from curslink.layout import Fit  # noqa: F401
+
+    return Layout.from_devices([
+        Device("mac", "Mac", (Screen("screen2", "mac", 0, 0, 3440, 1440),)),
+        Device("pc", "PC", (Screen("main", "pc", 1000, 1200, 2880, 1536, z=1),)),
+    ], allow_overlap=True, pointer_through=True, mirror=True, fits=fits)
+
+
+def test_without_a_fit_the_layout_overlap_is_mirrored_as_is():
+    lay = _fit_layout()
+    (front, behind, there), = lay.covered_parts(lay.screen("mac", "screen2"))
+    assert front.device_id == "pc" and behind == there == (1000, 1200, 2440, 240)
+
+
+def test_a_fit_says_what_is_really_covered_and_where_it_shows():
+    from curslink.layout import Fit
+
+    # The PC's top-left corner really sits at (1200, 1100) on the Mac, and
+    # one PC pixel is 0.5 Mac pixels: it spans 1440 x 768 Mac pixels there.
+    lay = _fit_layout([Fit(("mac", "screen2"), ("pc", "main"), 1200, 1100, 0.5)])
+    mac = lay.screen("mac", "screen2")
+    (front, behind, there), = lay.covered_parts(mac)
+    assert behind == (1200, 1100, 1440, 340)              # down to the Mac's bottom edge
+    assert there == (1000, 1200, 2880, 680)               # the PC's whole width, its top 680 px
+    stream, = streams_for(lay, mac)
+    states = device_states([stream], {"mac": "Mac"}, 15)
+    assert states["mac"]["captures"][0]["os"] == [1200, 1100, 1440, 340]
+    assert states["pc"]["shows"][0]["os"] == [0, 0, 2880, 680]
+    assert states["pc"]["shows"][0]["edges"] == ["bottom"]
+    assert stream.pointer(1200 + 720, 1100 + 170) == (0.5, 0.5)
+
+
+def test_a_fit_that_misses_the_screen_behind_mirrors_nothing():
+    from curslink.layout import Fit
+
+    lay = _fit_layout([Fit(("mac", "screen2"), ("pc", "main"), 1200, 1500, 0.5)])
+    assert lay.covered_parts(lay.screen("mac", "screen2")) == []
+
+
+def test_fits_are_read_from_the_config_and_checked():
+    from curslink.config import ConfigError, parse_fits
+
+    devices = list(_fit_layout().devices.values())
+    fits = parse_fits([{"behind": "mac/screen2", "front": "pc/main", "x": 1200, "y": 1100.5, "scale": 0.5},
+                       {"behind": "gone/main", "front": "pc/main", "x": 0, "y": 0, "scale": 1}], devices)
+    assert [(f.behind, f.front, f.x, f.y, f.scale) for f in fits] == [(("mac", "screen2"), ("pc", "main"), 1200, 1100.5, 0.5)]
+    with pytest.raises(ConfigError):
+        parse_fits([{"behind": "mac/screen2", "front": "pc/main", "x": 0, "y": 0, "scale": 0}], devices)
+
+
+def test_two_clicked_corners_give_the_fit():
+    pytest.importorskip("PySide6.QtCore")
+    from curslink.gui.fitcalib import solve
+
+    assert solve([(2640, 1100), (1200, 1102)], "top", (2880, 1536)) == (1200, 1101, 0.5)
+    x, y, k = solve([(1200, 900), (2640, 900)], "bottom", (2880, 1536))
+    assert (x, k) == (1200, 0.5) and y == 900 - 768
+    assert solve([(1200, 900), (1210, 900)], "top", (2880, 1536)) is None  # too close
+
+
+def test_lining_up_on_another_computer_goes_by_its_clicks(qapp):
+    from curslink.gui.fitcalib import FitCalibration
+
+    sent = []
+    behind = {"device": "mac", "name": "Mac", "screen": {"id": "screen2", "os_x": 0, "os_y": 0,
+                                                          "width": 3440, "height": 1440}}
+    cal = FitCalibration(behind, {"name": "PC", "width": 2880, "height": 1536}, "pc", sent.append)
+    got = []
+    cal.finished.connect(got.append)
+    assert cal.start() and sent[0] == "pick on"
+    hint = json.loads(sent[1].partition(" ")[2])
+    assert hint["devices"]["mac"]["screens"][0]["fit"]["corners"] == "top"
+    cal.on_event({"event": "picked", "key": "tab"})
+    assert cal.corners == "bottom"
+    cal.on_event({"event": "picked", "key": "tab"})
+    cal.on_event({"event": "picked", "device": "mac", "screen": "screen2", "x": 1200, "y": 1100})
+    cal.on_event({"event": "picked", "device": "other", "screen": "screen2", "x": 5, "y": 5})  # not that screen
+    cal.on_event({"event": "picked", "device": "mac", "screen": "screen2", "x": 2640, "y": 1100})
+    assert got == [(1200, 1100, 0.5)] and sent[-2:] == ["pick off", 'hint {"devices":{}}']
+
+
+def test_the_fit_layer_paints(qapp):
+    from PySide6.QtCore import QPointF
+    from PySide6.QtGui import QImage, QPainter
+
+    from curslink.gui.fitcalib import FitState, frame_for, paint_fit
+
+    st = FitState("PC", 2880 / 1536, "top", [QPointF(100, 300)], QPointF(500, 302))
+    frame = frame_for(st)
+    assert round(frame.width()) == 400 and round(frame.height()) == round(400 / (2880 / 1536))
+    img = QImage(800, 600, QImage.Format.Format_ARGB32)
+    p = QPainter(img)
+    paint_fit(p, img.rect().toRectF(), st)
+    p.end()

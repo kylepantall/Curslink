@@ -21,6 +21,13 @@ part still belongs to the device behind as far as that device is concerned:
 the pointer on the screen behind carries on into it (the screen in front
 shows it there), and only leaves for the screen in front past the covered
 part. The screen in front still owns the area for its own pointer.
+
+Screens are laid out in their own pixels, which aren't the same size on
+every monitor, so where a screen in front covers one behind, the layout
+only roughly says which part. A :class:`Fit` (calibrated on the real
+screens, see :mod:`curslink.gui.fitcalib`) says exactly where the screen in
+front stands on the one behind and how big it is there; mirror mode uses it
+for what to capture and where to show it (:meth:`Layout.covered_parts`).
 """
 
 from __future__ import annotations
@@ -155,6 +162,20 @@ class Crossing:
     y: float
 
 
+@dataclass(frozen=True)
+class Fit:
+    """Where the screen in front really stands on the screen behind it:
+    its top-left corner at (``x``, ``y``) in the screen behind's own pixels
+    (from that screen's top-left), and ``scale`` of that screen's pixels to
+    one of its own (the two monitors' pixel sizes compared)."""
+
+    behind: tuple[str, str]  # (device, screen)
+    front: tuple[str, str]
+    x: float
+    y: float
+    scale: float
+
+
 def overlap_message(a: Screen, b: Screen) -> str:
     return f"screens {a.device_id}/{a.id} and {b.device_id}/{b.id} overlap"
 
@@ -168,12 +189,14 @@ class Layout:
     pointer_through: bool = False
     # Mirror mode (curslink.mirror): screens in front show what they cover.
     mirror: bool = False
+    # Calibrated overlaps: see Fit.
+    fits: tuple[Fit, ...] = ()
 
     @classmethod
     def from_devices(cls, devices: Iterable[Device], allow_overlap: bool = False,
                      links: Iterable[EdgeLink] = (), pointer_through: bool = False,
-                     mirror: bool = False) -> "Layout":
-        layout = cls({d.id: d for d in devices}, allow_overlap, tuple(links), pointer_through, mirror)
+                     mirror: bool = False, fits: Iterable[Fit] = ()) -> "Layout":
+        layout = cls({d.id: d for d in devices}, allow_overlap, tuple(links), pointer_through, mirror, tuple(fits))
         layout.validate()
         return layout
 
@@ -207,6 +230,35 @@ class Layout:
                 out.append((front, rect))
         return out
 
+    def fit(self, behind: Screen, front: Screen) -> Fit | None:
+        for f in self.fits:
+            if f.behind == (behind.device_id, behind.id) and f.front == (front.device_id, front.id):
+                return f
+        return None
+
+    def covered_parts(self, screen: Screen) -> list[tuple[Screen, tuple[int, int, int, int], tuple[int, int, int, int]]]:
+        """Like :meth:`covering`, as ``(front, part behind, part in front)``,
+        both in layout pixels: the part of ``screen`` that ``front`` covers,
+        and where that part is on ``front``. The same rectangle twice unless
+        the pair is calibrated (a :class:`Fit`)."""
+        out = []
+        for front, rect in self.covering(screen):
+            f = self.fit(screen, front)
+            if f is None:
+                out.append((front, rect, rect))
+                continue
+            k = f.scale
+            fx, fy = screen.x + f.x, screen.y + f.y
+            x0, y0 = max(screen.x, fx), max(screen.y, fy)
+            x1, y1 = min(screen.right, fx + front.width * k), min(screen.bottom, fy + front.height * k)
+            if x1 - x0 < 1 or y1 - y0 < 1:
+                continue  # it doesn't really cover any of it
+            behind = (round(x0), round(y0), round(x1 - x0), round(y1 - y0))
+            there = (round(front.x + (x0 - fx) / k), round(front.y + (y0 - fy) / k),
+                     max(1, round((x1 - x0) / k)), max(1, round((y1 - y0) / k)))
+            out.append((front, behind, there))
+        return out
+
     def in_front(self, a: Screen, b: Screen) -> bool:
         """Is ``a`` drawn in front of ``b``?"""
         stack = self._stack()
@@ -231,6 +283,14 @@ class Layout:
                     raise ValueError(f"edge link names an unknown screen {end.device_id}/{end.screen_id}") from None
             if link.a.device_id == link.b.device_id:
                 raise ValueError("an edge link joins screens of two different devices")
+        for f in self.fits:
+            for ref in (f.behind, f.front):
+                try:
+                    self.screen(*ref)
+                except KeyError:
+                    raise ValueError(f"an overlap fit names an unknown screen {ref[0]}/{ref[1]}") from None
+            if not f.scale > 0:
+                raise ValueError("an overlap fit's scale must be more than 0")
         pairs = self.overlaps()
         if pairs and not self.allow_overlap:
             raise ValueError(overlap_message(*pairs[0]))

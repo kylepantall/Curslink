@@ -132,8 +132,8 @@ class Router:
         # Where the pointer is now (device, global x, y), after each move: the
         # edge indicator (curslink.edgehint) follows it.
         self.on_position: Callable[[str, float, float], None] = lambda device_id, x, y: None
-        # While the Layout page calibrates an edge: left clicks (and Esc,
-        # Backspace) on another computer come here instead of going to it.
+        # While the Layout page calibrates an edge or an overlap: left clicks
+        # (and Esc, Backspace, Tab) on another computer come here instead of going to it.
         self.picker: Callable[[dict], None] | None = None
         # After arriving by gaze or a hotkey (home or on another device) the pointer may land right on
         # the edge it left by; it has to leave that edge before an edge push
@@ -326,7 +326,7 @@ class Router:
         if self.is_local:
             (self._local_keys.add if pressed else self._local_keys.discard)(key)
             return
-        if self.picker is not None and key in ("esc", "backspace") and key not in self._remote_keys:
+        if self.picker is not None and key in ("esc", "backspace", "tab") and key not in self._remote_keys:
             if pressed:
                 self.picker({"key": key})
             return

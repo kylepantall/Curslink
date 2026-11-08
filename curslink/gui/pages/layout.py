@@ -693,6 +693,55 @@ class LayoutPage(Page):
         self.refresh_edges()
         self._say_edge("Edge calibrated. The pointer now crosses along the stretches you clicked.")
 
+    def calibrate_fit(self, behind: str, front: str) -> None:
+        """On the screen behind, click where the screen in front's corners
+        really are (see curslink.gui.fitcalib), for mirror mode."""
+        from curslink.gui.fitcalib import FitCalibration
+        from curslink.gui.service import RUNNING
+
+        if self.calibration is not None:
+            return
+        if self.dirty:
+            self._say_edge("Save the layout first, then line up the overlap.")
+            return
+        items = {i.key: i for i in self.items}
+        b, f = items.get(behind), items.get(front)
+        if b is None or f is None:
+            return
+        me = self.app.config().get("host", "device_id")
+        if b.device_id != me and self.app.service.state != RUNNING:
+            self._say_edge("Start linking first: you'll click on the other computer's screen.")
+            return
+        _x, _y, bw, bh = b.layout_rect()
+        _x, _y, fw, fh = f.layout_rect()
+        end = {"device": b.device_id, "name": b.device_name, "screen": {**b.screen, "width": bw, "height": bh}}
+        self.calibration = FitCalibration(end, {"name": f.device_name, "width": fw, "height": fh}, me,
+                                          self.app.service.send)
+        self.calibration.finished.connect(lambda fit, b=behind, f=front: self.fit_calibrated(b, f, fit))
+        self._say_edge(f"On {b.device_name}'s screen, click where {f.device_name}'s top corners sit.")
+        if not self.calibration.start():
+            self.calibration = None
+            self._say_edge("Couldn't find that screen on this computer.")
+
+    def fit_calibrated(self, behind: str, front: str, fit) -> None:
+        self.calibration = None
+        if fit is None:
+            self._say_edge("")
+            return
+        cfg = self.app.config()
+        cfg.set_fit(behind, front, *fit)
+        cfg.save()
+        self.app.config_saved()
+        self.refresh_edges()
+        self._say_edge("Overlap lined up. Mirror mode now shows exactly what the screen in front covers.")
+
+    def reset_fit(self, behind: str, front: str) -> None:
+        cfg = self.app.config()
+        if cfg.remove_fit(behind, front):
+            cfg.save()
+            self.app.config_saved()
+        self.refresh_edges()
+
     def reset_edge(self, a: str, b: str) -> None:
         cfg = self.app.config()
         if cfg.remove_link(a, b):
@@ -842,11 +891,24 @@ class LayoutPage(Page):
         self.edge_note.hide()
         self.edges_box.addWidget(self.edge_note)
         if self.allow_overlap:
+            fitted = set()
+            if self.app.has_config():
+                fitted = {(t.get("behind"), t.get("front")) for t in self.app.config().fits()}
             for behind, front, _shared in self.overlap_pairs():
                 if behind.device_id != front.device_id:
                     seen.add((front.key, behind.key))
-                    self.edges_box.addWidget(label(f"{front.device_name} / {front.screen['id']}  in front of  "
-                                                   f"{behind.device_name} / {behind.screen['id']}", wrap=True))
+                self.edges_box.addWidget(label(f"{front.device_name} / {front.screen['id']}  in front of  "
+                                               f"{behind.device_name} / {behind.screen['id']}", wrap=True))
+                # Mirror mode: where the screen in front really stands on the one behind.
+                row = QHBoxLayout()
+                done = (behind.key, front.key) in fitted
+                row.addWidget(pill("Lined up" if done else "By layout", "on" if done else "off"))
+                row.addStretch(1)
+                row.addWidget(button("Line up again…" if done else "Line up overlap…", None,
+                                     lambda _=False, b=behind.key, f=front.key: self.calibrate_fit(b, f)))
+                if done:
+                    row.addWidget(button("Reset", None, lambda _=False, b=behind.key, f=front.key: self.reset_fit(b, f)))
+                self.edges_box.addLayout(row)
         if not seen:
             w = label("No screens of different devices touch, so the pointer can't cross by the edges. "
                       "Move a screen next to another device's.", "warn", wrap=True)

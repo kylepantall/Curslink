@@ -121,8 +121,12 @@ def mac_screen_recording(ask: bool = False) -> bool:
     return _recording
 
 
+_listed_ok = True
+
+
 def mac_grab(x: float, y: float, w: float, h: float) -> QImage | None:
-    """macOS: the screen in a rectangle of points, through Quartz, or None."""
+    """macOS: the screen in a rectangle of points, through Quartz, without
+    this process's own windows (the edge indicator, mirrors), or None."""
     try:
         import Quartz
     except ImportError:  # pragma: no cover - macOS only
@@ -131,8 +135,27 @@ def mac_grab(x: float, y: float, w: float, h: float) -> QImage | None:
     if create is None:  # pragma: no cover - macOS only
         return None
     try:
-        cg = create(Quartz.CGRectMake(x, y, w, h), Quartz.kCGWindowListOptionOnScreenOnly,
-                    Quartz.kCGNullWindowID, Quartz.kCGWindowImageDefault)
+        rect = Quartz.CGRectMake(x, y, w, h)
+        cg = None
+        listed = getattr(Quartz, "CGWindowListCreateImageFromArray", None)
+        global _listed_ok
+        if listed is not None and _listed_ok:
+            try:
+                import os
+
+                me = os.getpid()
+                infos = Quartz.CGWindowListCopyWindowInfo(Quartz.kCGWindowListOptionOnScreenOnly,
+                                                          Quartz.kCGNullWindowID) or []
+                ids = [int(i["kCGWindowNumber"]) for i in infos
+                       if int(i.get("kCGWindowOwnerPID", -1)) != me and "kCGWindowNumber" in i]
+                if ids:
+                    cg = listed(rect, ids, Quartz.kCGWindowImageDefault)
+            except Exception:  # pragma: no cover - macOS only
+                log.warning("mirror: couldn't leave Curslink's own windows out of the capture", exc_info=True)
+                _listed_ok = False
+        if cg is None:
+            cg = create(rect, Quartz.kCGWindowListOptionOnScreenOnly, Quartz.kCGNullWindowID,
+                        Quartz.kCGWindowImageDefault)
         if cg is None:
             return None
         return cgimage_to_qimage(Quartz, cg)
@@ -179,7 +202,6 @@ class Capture:
         self.last_sent = 0.0
         self.failed = False
         self.why = ""
-        self.said_quartz = False
         self.timer = QTimer()
         self.timer.timeout.connect(self.grab)
         self.set(spec)
@@ -201,6 +223,12 @@ class Capture:
         if sys.platform == "darwin" and not mac_screen_recording(ask=True):
             self.why = MAC_NO_RECORDING
             return None
+        if sys.platform == "darwin":
+            # Through Quartz first: it can leave out this process's own
+            # windows (the edge indicator), which would show up twice.
+            img = mac_grab(lx, ly, lw, lh)
+            if img is not None:
+                return img
         qscreen = QGuiApplication.screens()[index]
         g = qscreen.geometry()
         # Relative to the screen, in Qt's logical pixels; the pixmap comes
@@ -208,15 +236,6 @@ class Capture:
         pix = qscreen.grabWindow(0, round(lx - g.x()), round(ly - g.y()), max(1, round(lw)), max(1, round(lh)))
         if not pix.isNull() and pix.width() > 0:
             return pix.toImage()
-        if sys.platform == "darwin":
-            # Qt's grab comes back empty on recent macOS: ask Quartz directly
-            # (macOS points, the same as Qt's logical pixels there).
-            img = mac_grab(lx, ly, lw, lh)
-            if img is not None:
-                if not self.said_quartz:
-                    log.info("mirror: capturing through Quartz (Qt's screen grab came back empty)")
-                    self.said_quartz = True
-                return img
         self.why = "the screen grab came back empty"
         return None
 
@@ -268,6 +287,9 @@ class MirrorWindow(QWidget):
                      Qt.WidgetAttribute.WA_TransparentForMouseEvents, Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow):
             self.setAttribute(attr, True)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        from curslink.capturehide import exclude_from_capture
+
+        exclude_from_capture(self)  # a mirror never ends up in another one
         self.pixmap: QPixmap | None = None
         self.pointer: tuple[float, float] | None = None
         self.spec: dict = {}

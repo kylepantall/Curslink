@@ -251,6 +251,38 @@ class ConfigFile:
             del layout["links"]
         return True
 
+    def fits(self) -> list[dict[str, Any]]:
+        return list(self.raw().get("layout", {}).get("fit", []))
+
+    def set_fit(self, behind: str, front: str, x: float, y: float, scale: float) -> None:
+        """Calibrate where screen ``front`` really stands on ``behind``
+        ("device/screen", see curslink.layout.Fit); replaces an earlier one."""
+        self.remove_fit(behind, front)
+        layout = self._table("layout", create=True)
+        if "fit" not in layout:
+            layout["fit"] = tomlkit.aot()
+        t = tomlkit.table()
+        t["behind"], t["front"] = behind, front
+        t["x"], t["y"], t["scale"] = round(x, 1), round(y, 1), round(scale, 4)
+        layout["fit"].append(t)
+
+    def remove_fit(self, behind: str, front: str) -> bool:
+        layout = self._table("layout", create=False)
+        if layout is None or "fit" not in layout:
+            return False
+        aot = layout["fit"]
+        keep = [t for t in aot if (t.get("behind"), t.get("front")) != (behind, front)]
+        if len(keep) == len(aot):
+            return False
+        if keep:
+            new = tomlkit.aot()
+            for t in keep:
+                new.append(t)
+            layout["fit"] = new
+        else:
+            del layout["fit"]
+        return True
+
     # -- the layout -----------------------------------------------------------
     def devices(self) -> list[dict[str, Any]]:
         return list(self.raw().get("devices", []))
