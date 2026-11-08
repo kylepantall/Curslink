@@ -643,7 +643,7 @@ def test_fine_tune_dialog_sends_nudges_and_saves_what_the_service_says(qapp):
     d = FitTuneDialog(b, f, None, sent.append)
     d.saved.connect(saved.append)
     last = lambda: json.loads(sent[-1][4:])  # noqa: E731
-    assert last() == {"behind": "pc/main", "front": "lap/main", "hold": True}
+    assert last() == {"behind": "pc/main", "front": "lap/main", "hold": True, "tune": True}
     d.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Right, Qt.KeyboardModifier.NoModifier))
     assert last()["dx"] == 1 and last()["dy"] == 0
     d.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Down, Qt.KeyboardModifier.ShiftModifier))
@@ -779,16 +779,153 @@ def test_crossing_between_fitted_screens_lands_where_the_screens_really_meet():
     assert lay.find_crossing("pc", 900, 599, 0, 2).y == 603
 
 
-def test_edge_glow_and_label_follow_the_fit():
+def test_no_edge_glow_or_label_between_mirrored_screens():
     from curslink.edgehint import find_hint
-    from curslink.layout import Fit
 
-    lay = desk()
-    lay.fits = (Fit(("pc", "main"), ("lap", "main"), 850, 500, 0.5),)
-    hint = find_hint(lay, "pc", 900, 590, lambda device: True)
-    assert hint.side == "bottom" and hint.target.device_id == "lap"
-    # The bar on the PC spans where the laptop really is along its bottom edge...
-    assert (hint.a, hint.b) == pytest.approx((850, 1000))
-    # ...and the one on the laptop sits on the mirror's bottom edge, 200 px down.
-    assert hint.target_side == "top" and hint.trect[1] == 600
-    assert (hint.ta, hint.tb) == pytest.approx((0, 300))
+    # The laptop shows what it covers of the PC: the pointer visibly carries
+    # on across, so there's no edge to mark between them.
+    assert find_hint(desk(), "pc", 900, 590, lambda device: True) is None
+    assert find_hint(desk(mirror=False), "pc", 790, 500, lambda device: True) is not None  # as before
+
+
+def test_adjusting_a_mirror_on_itself_moves_and_zooms_the_fit():
+    lines = []
+    transport = Transport({"lap"}, {"lap"})
+    host, router, local = make_host(desk(), transport, lines)
+    assert router.layout.pointer_through
+    host.fit({"behind": "pc/main", "front": "lap/main", "hold": True, "tune": True})
+    show, = transport.of("mirror", "lap")[-1]["shows"]
+    assert show["tune"] is True
+    assert not router.layout.pointer_through  # the pointer can reach the mirror
+    sid = show["id"]
+    pc, lap = router.layout.screen("pc", "main"), router.layout.screen("lap", "main")
+    # Dragged right by a tenth of its 200 px: the picture moves 20 px right.
+    host.on_message("lap", "mirror_tune", {"id": sid, "mx": 0.1, "my": 0})
+    f = router.layout.fit(pc, lap)
+    assert (f.x, f.y, f.scale) == pytest.approx((780, 400, 1.0))
+    # Zoomed 2x about its top-left corner: that corner stays where it is.
+    host.on_message("lap", "mirror_tune", {"id": sid, "grow": 2, "ax": 0, "ay": 0})
+    f = router.layout.fit(pc, lap)
+    assert f.scale == pytest.approx(0.5)
+    # The mirror's top-left (the laptop's own top-left now) still shows PC (780, 400).
+    assert (f.x, f.y) == pytest.approx((780, 400))
+    # From a mirror not being adjusted: nothing.
+    host.on_message("lap", "mirror_tune", {"id": "other", "mx": 1})
+    # Done: the pointer goes through again, and the mirror lets it.
+    host.fit({"behind": "pc/main", "front": "lap/main", "dx": 0, "hold": False})
+    assert router.layout.pointer_through and host.tuning is None
+
+
+def test_the_peer_passes_a_mirrors_adjustments_to_the_host():
+    sent = []
+    peer = MirrorPeer(lambda line: None, lambda t, **d: sent.append((t, d)))
+    peer.handle("mirror", {"captures": [], "shows": [{"id": "s", "screen": "main", "os": [0, 0, 10, 10]}]})
+    assert peer.helper_line('mirror_tune {"id": "s", "mx": 0.5, "my": 0}')
+    assert peer.helper_line('mirror_tune {"id": "gone", "mx": 0.5}')
+    assert sent == [("mirror_tune", {"id": "s", "mx": 0.5, "my": 0})]
+
+
+def test_a_mirror_being_adjusted_takes_drags_and_the_wheel(qapp):
+    from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+    from PySide6.QtGui import QMouseEvent, QWheelEvent
+
+    from curslink.mirror.helper import MirrorHelper
+
+    out = []
+    helper = MirrorHelper(out.append)
+    spec = {"id": "s", "screen": "main", "os": [200, 150, 200, 100], "label": "PC", "edges": []}
+    helper.handle("mirror " + json.dumps({"captures": [], "shows": [spec]}))
+    plain = helper.windows["s"]
+    assert not plain.tune and plain.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+    helper.handle("mirror " + json.dumps({"captures": [], "shows": [{**spec, "tune": True}]}))
+    window = helper.windows["s"]
+    assert window is not plain and window.tune
+    assert not window.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+
+    def mouse(kind, x, y, button=Qt.MouseButton.LeftButton):
+        local = QPointF(x, y)
+        glob = QPointF(window.mapToGlobal(QPoint(x, y)))
+        return QMouseEvent(kind, local, glob, button, button, Qt.KeyboardModifier.NoModifier)
+
+    # Drag from the middle: it moves.
+    window.mousePressEvent(mouse(QEvent.Type.MouseButtonPress, 100, 50))
+    window.mouseMoveEvent(mouse(QEvent.Type.MouseMove, 120, 40))
+    window.mouseReleaseEvent(mouse(QEvent.Type.MouseButtonRelease, 120, 40))
+    tune = json.loads(out[-1].partition(" ")[2])
+    assert out[-1].startswith("mirror_tune ") and tune == {"id": "s", "mx": 0.1, "my": -0.1}
+    # Drag the right side out by 20 px: 10% bigger, about the left side.
+    window.mousePressEvent(mouse(QEvent.Type.MouseButtonPress, 195, 50))
+    window.mouseMoveEvent(mouse(QEvent.Type.MouseMove, 215, 50))
+    window.mouseReleaseEvent(mouse(QEvent.Type.MouseButtonRelease, 215, 50))
+    assert json.loads(out[-1].partition(" ")[2]) == {"id": "s", "grow": 1.1, "ax": 0.0, "ay": 0.5}
+    # One wheel notch: 5% bigger about the pointer.
+    window.wheelEvent(QWheelEvent(QPointF(50, 25), QPointF(window.mapToGlobal(QPoint(50, 25))), QPoint(0, 0),
+                                  QPoint(0, 120), Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+                                  Qt.ScrollPhase.NoScrollPhase, False))
+    assert json.loads(out[-1].partition(" ")[2]) == {"id": "s", "grow": 1.05, "ax": 0.25, "ay": 0.25}
+    window.grab()  # paints the outline and hint without trouble
+    helper.handle('mirror {"captures": [], "shows": []}')
+    qapp.processEvents()
+
+
+def test_adjusting_puts_guides_on_both_screens_that_stay_put_behind():
+    transport = Transport({"lap"}, {"lap"})
+    host, router, local = make_host(desk(), transport, [])
+    host.fit({"behind": "pc/main", "front": "lap/main", "hold": True, "tune": True})
+    show, = transport.of("mirror", "lap")[-1]["shows"]
+    assert show["guides"] == show["src"]
+    start = list(show["guides"])
+    sid = show["id"]
+    host.on_message("lap", "mirror_tune", {"id": sid, "mx": 0.1, "my": 0})
+    show, = transport.of("mirror", "lap")[-1]["shows"]
+    assert show["guides"] == start and show["src"] != start  # the lines behind don't follow the mirror
+    host.fit({"behind": "pc/main", "front": "lap/main", "dx": 0, "hold": False})
+    assert all("guides" not in s for s in transport.of("mirror", "lap")[-1]["shows"])
+
+
+def test_guides_cross_every_side_of_the_covered_area():
+    from PySide6.QtCore import QRectF
+
+    from curslink.mirror.helper import guide_shapes
+
+    c = QRectF(100, 50, 300, 200)
+    shapes = guide_shapes(c)
+    kinds = [k for k, _a, _b in shapes]
+    assert kinds.count("h") == 3 and kinds.count("v") == 3 and kinds.count("d") == 2
+    (_, centre, radius), = [s for s in shapes if s[0] == "o"]
+    assert centre == c.center()
+    assert 100 < radius.x() < (300 ** 2 + 200 ** 2) ** 0.5 / 2  # inside the corners, outside the short sides
+    for kind, a, b in shapes:
+        if kind != "o":
+            assert min(a.x(), b.x()) < c.left() - 1000 or min(a.y(), b.y()) < c.top() - 1000  # carried on far past
+
+
+def test_the_mirror_draws_the_guides_where_they_are_behind(qapp):
+    from PySide6.QtCore import QRectF
+
+    from curslink.mirror.helper import GuideOverlay, MirrorHelper
+
+    helper = MirrorHelper(lambda line: None)
+    spec = {"id": "s", "screen": "main", "os": [200, 150, 200, 100], "label": "PC", "edges": [], "tune": True,
+            "src": [1000, 500, 400, 200], "guides": [1100, 500, 400, 200]}
+    helper.handle("mirror " + json.dumps({"captures": [], "shows": [spec]}))
+    window = helper.windows["s"]
+    # The guides' area starts a quarter of the picture to the right, same size.
+    assert window.guide_rect(QRectF(0, 0, 200, 100)) == QRectF(50, 0, 200, 100)
+    window.grab()
+    g = QGuiApplication_screen_os()
+    capture_spec = {"id": "s", "screen": "main", "os": [10, 10, 50, 40], "screen_os": g, "fps": 1,
+                    "tune": True, "guides": [20, 20, 50, 40]}
+    overlay = GuideOverlay(capture_spec)
+    assert overlay.ok and overlay.covered.width() > 0
+    overlay.grab()
+    overlay.deleteLater()
+    helper.handle('mirror {"captures": [], "shows": []}')
+    qapp.processEvents()
+
+
+def QGuiApplication_screen_os():  # noqa: N802
+    from PySide6.QtGui import QGuiApplication
+
+    g = QGuiApplication.primaryScreen().geometry()
+    return [g.x(), g.y(), g.width(), g.height()]
