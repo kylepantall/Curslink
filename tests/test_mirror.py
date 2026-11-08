@@ -929,3 +929,31 @@ def QGuiApplication_screen_os():  # noqa: N802
 
     g = QGuiApplication.primaryScreen().geometry()
     return [g.x(), g.y(), g.width(), g.height()]
+
+
+def test_the_helpers_adjustments_reach_the_mirror_peer():
+    import asyncio
+
+    from curslink.app import chain_helper_lines
+
+    class Overlay:
+        on_line = None
+
+    got, other = [], []
+    overlay = Overlay()
+    overlay.on_line = other.append
+
+    class Peer:
+        def helper_line(self, line):
+            got.append(line)
+
+    loop = asyncio.new_event_loop()
+    try:
+        chain_helper_lines(overlay, loop, Peer())
+        overlay.on_line('mirror_tune {"id": "s", "mx": 0.1, "my": 0}')
+        overlay.on_line('mirror_frame {"id": "s", "jpg": "QUJD"}')
+        overlay.on_line("drag_end {}")
+        loop.run_until_complete(asyncio.sleep(0))
+    finally:
+        loop.close()
+    assert [g.split()[0] for g in got] == ["mirror_tune", "mirror_frame"] and other == ["drag_end {}"]

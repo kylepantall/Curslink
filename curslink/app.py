@@ -361,6 +361,10 @@ async def run_host(cfg: HostConfig) -> None:
             router.picker = lambda data: events.emit("picked", **data)
         elif line == "pick off":
             router.picker = None
+        elif line in ("setup on", "setup off"):
+            # The Layout page is open: no crossing animations or edge glow meanwhile.
+            router.setup_quiet = line == "setup on"
+            edges.pause(router.setup_quiet)
         elif line == "netcheck":
             from curslink.net.check import emit_check
 
@@ -525,12 +529,12 @@ def qt_available() -> bool:
 
 
 def chain_helper_lines(overlay, loop: asyncio.AbstractEventLoop, peer) -> None:
-    """Mirror frames the overlay helper prints go to ``peer`` on the loop;
-    every other line to whoever took them before (file drags)."""
+    """Mirror frames and adjustments the overlay helper prints go to
+    ``peer`` on the loop; every other line to whoever took them before (file drags)."""
     before = overlay.on_line
 
     def on_line(line: str) -> None:  # the helper's reader thread
-        if line.startswith("mirror_frame "):
+        if line.startswith(("mirror_frame ", "mirror_tune ")):
             loop.call_soon_threadsafe(peer.helper_line, line)
         else:
             before(line)

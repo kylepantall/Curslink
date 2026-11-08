@@ -185,3 +185,41 @@ def dock_icon_visible() -> bool:
         return policy == AppKit.NSApplicationActivationPolicyRegular
     except Exception:
         return True  # can't tell: assume it is, so a click still opens the window
+
+
+def bring_to_front(window) -> None:
+    """Put ``window`` in front with the keyboard focus, even when another
+    app is in front (setup and line-up steps need to be seen and typed in).
+    Windows only lets the foreground app hand the foreground on, so this
+    joins the foreground window's input queue for a moment; macOS needs the
+    app activated first."""
+    window.show()
+    window.raise_()
+    if sys.platform == "darwin":
+        try:
+            import AppKit
+
+            AppKit.NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+        except Exception:  # noqa: BLE001
+            log.debug("couldn't activate the app", exc_info=True)
+    elif sys.platform == "win32":
+        try:
+            import ctypes
+            from ctypes import wintypes as wt
+
+            u, k = ctypes.windll.user32, ctypes.windll.kernel32
+            hwnd = wt.HWND(int(window.winId()))
+            fg = u.GetForegroundWindow()
+            mine, theirs = k.GetCurrentThreadId(), u.GetWindowThreadProcessId(fg, None)
+            joined = bool(fg) and theirs != mine and u.AttachThreadInput(theirs, mine, True)
+            try:
+                u.ShowWindow(hwnd, 5)  # SW_SHOW
+                u.BringWindowToTop(hwnd)
+                u.SetForegroundWindow(hwnd)
+                u.SetFocus(hwnd)
+            finally:
+                if joined:
+                    u.AttachThreadInput(theirs, mine, False)
+        except Exception:  # noqa: BLE001
+            log.debug("couldn't bring the window to the front", exc_info=True)
+    window.activateWindow()

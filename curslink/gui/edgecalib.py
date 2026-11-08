@@ -308,8 +308,9 @@ class EdgeCalibration(QObject):
                 window.key.connect(self.on_key)
                 self.windows[i] = window
                 window.show()
-                window.raise_()
-                window.activateWindow()
+                from curslink.gui.native import bring_to_front
+
+                bring_to_front(window)
             else:
                 window.set_state(state_from(window.screen(), entry))
         if remote:

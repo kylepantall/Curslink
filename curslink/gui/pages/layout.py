@@ -34,6 +34,7 @@ from curslink.gui import theme
 from curslink.gui.widgets import Card, Page, Toggle, button, label
 
 SCALE = 0.1  # scene units per layout pixel
+CLICK_SLOP_PX = 3  # a press and release this close on screen is a click, not a drag
 SNAP_VIEW_PX = 8  # a dragged screen snaps to edges this close, in on-screen pixels
 
 
@@ -201,7 +202,7 @@ class ScreenItem(QGraphicsRectItem):
         press = getattr(self, "_press", None)
         self._press = None
         travel = (event.screenPos() - event.buttonDownScreenPos(Qt.MouseButton.LeftButton)).manhattanLength()
-        if press is not None and travel < QApplication.startDragDistance():
+        if press is not None and travel < CLICK_SLOP_PX:
             # A click, not a drag: put it back exactly where it was (a hand
             # shakes a pixel or two, which is many layout pixels), and don't
             # snap it anywhere. A click on an overlapping screen brings it
@@ -831,8 +832,9 @@ class LayoutPage(Page):
         self.calibration = dialog
         dialog.finished.connect(lambda _code: setattr(self, "calibration", None))
         dialog.show()
-        dialog.raise_()
-        dialog.activateWindow()
+        from curslink.gui.native import bring_to_front
+
+        bring_to_front(dialog)
 
     def fit_tuned(self, behind: str, front: str, fit) -> None:
         cfg = self.app.config()
@@ -864,6 +866,9 @@ class LayoutPage(Page):
     def _on_service_state(self, state: str) -> None:
         from curslink.gui.service import RUNNING
 
+        if state == RUNNING and self.isVisible():
+            self.tell_setup(True)
+
         if state == RUNNING and (self.pending_lineups or self.pending_tune):
             from PySide6.QtCore import QTimer
 
@@ -872,9 +877,20 @@ class LayoutPage(Page):
             calibration, self.calibration = self.calibration, None
             calibration.stop()
 
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self.tell_setup(True)
+
     def hideEvent(self, event) -> None:  # noqa: N802
         super().hideEvent(event)
         self.update_hint([])
+        self.tell_setup(False)
+
+    def tell_setup(self, on: bool) -> None:
+        """While this page is open the service plays no crossing animations
+        and shows no edge glow: they only get in the way of arranging."""
+        if self.app.role == "host" and self.app.service.is_alive():
+            self.app.service.send("setup on" if on else "setup off")
 
     @staticmethod
     def _restyle(w) -> None:

@@ -277,8 +277,9 @@ class LookHere:
                     layer.skip_button.setEnabled(False)
             layer.show()
             if s is target:
-                layer.raise_()
-                layer.activateWindow()
+                from curslink.gui.native import bring_to_front
+
+                bring_to_front(layer)
                 layer.setFocus()
             self.layers.append(layer)
         log.debug("look-here overlay on %s", screen_id)
