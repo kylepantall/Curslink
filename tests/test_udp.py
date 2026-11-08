@@ -135,3 +135,23 @@ async def test_forged_probes_are_ignored():
     assert path.addr is None
     transport.close()
     await stop(server, task)
+
+
+async def test_a_picked_port_taken_for_udp_is_swapped_for_another(monkeypatch):
+    from curslink.net import server as server_mod
+
+    loop = asyncio.get_running_loop()
+    real = loop.create_datagram_endpoint
+    tries = []
+
+    async def flaky(*a, **kw):
+        tries.append(kw.get("local_addr"))
+        if len(tries) == 1:
+            raise OSError(10048, "only one usage of each socket address")  # Windows: UDP twin taken
+        return await real(*a, **kw)
+
+    monkeypatch.setattr(loop, "create_datagram_endpoint", flaky)
+    server = server_mod.HostServer({"laptop"}, server_context(SECRET), host="127.0.0.1", port=0)
+    await server.start()
+    assert len(tries) == 2 and server.udp is not None and server.udp.port == server.port
+    await server.close()
