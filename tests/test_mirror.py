@@ -662,6 +662,10 @@ def test_fine_tune_dialog_sends_nudges_and_saves_what_the_service_says(qapp):
     d3 = FitTuneDialog(b, f, None, sent.append)
     d3.reject()
     assert last() == {"behind": "pc/main", "front": "lap/main", "reset": True, "hold": False}
+    import shiboken6
+
+    for dialog in (d, d2, d3):  # gone before the app is, or Qt crashes on the way out
+        shiboken6.delete(dialog)
 
 
 def test_real_sizes_give_the_mirror_its_size_without_lining_up():
