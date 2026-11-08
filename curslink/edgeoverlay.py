@@ -248,7 +248,9 @@ class Label(_Overlay):
 
     # -- macOS vibrancy
     def _mac_glass(self) -> None:
-        if self.look != "mac" or sys.platform != "darwin":
+        # Only a real Cocoa window has an NSView behind winId(); under another
+        # Qt platform (offscreen, in tests) it's not one, and using it crashes.
+        if self.look != "mac" or sys.platform != "darwin" or QGuiApplication.platformName() != "cocoa":
             return
         try:
             import AppKit
