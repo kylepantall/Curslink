@@ -25,6 +25,7 @@ from curslink.inputs.keys import (
     KEY_LABELS, OS_KINDS, OS_LABELS, family, guided_steps, key_label, learned_fix, os_kind, pair_key,
     preset_map,
 )
+from curslink.gui import theme
 from curslink.gui.widgets import button, clear_layout, label
 
 # Qt key -> key name on the wire (pynput's). Ctrl and Meta are filled in by
@@ -253,96 +254,354 @@ class PairMapDialog(QDialog):
         self.accept()
 
 
+# The drawn keyboard: rows of (key name, width in key units).
+_ROWS = [
+    [("`", 1), *[(c, 1) for c in "1234567890-="], ("backspace", 2)],
+    [("tab", 1.5), *[(c, 1) for c in "qwertyuiop[]"], ("\\", 1.5)],
+    [("caps_lock", 1.8), *[(c, 1) for c in "asdfghjkl;'"], ("enter", 2.2)],
+    [("shift_l", 2.4), *[(c, 1) for c in "zxcvbnm,./"], ("shift_r", 2.6)],
+]
+_BOTTOM = {
+    "windows": [("ctrl_l", 1.5), ("cmd_l", 1.3), ("alt_l", 1.3), ("space", 6), ("alt_gr", 1.3), ("cmd_r", 1.3),
+                ("menu", 1.3), ("ctrl_r", 1.5)],
+    "mac": [("fn", 1.1), ("ctrl_l", 1.3), ("alt_l", 1.3), ("cmd_l", 1.6), ("space", 6), ("cmd_r", 1.6), ("alt_r", 1.3)],
+    "linux": [("ctrl_l", 1.5), ("cmd_l", 1.3), ("alt_l", 1.3), ("space", 6), ("alt_gr", 1.3), ("menu", 1.3),
+              ("ctrl_r", 1.5)],
+}
+_SHORT = {"Windows key": "Win", "Backspace": "⌫", "Caps Lock": "Caps", "Control": "Ctrl", "Option": "Opt"}
+
+
+class KeyboardView(QWidget):
+    """A keyboard for one system, drawn, with keys lit: the one to press
+    (``target``, a family), the last one heard (``hit``: name, arrived right)
+    and taught ones."""
+
+    def __init__(self, kind: str, compact: bool = False):
+        super().__init__()
+        self.kind = kind if kind in _BOTTOM else "windows"
+        self.compact = compact
+        self.target = ""
+        self.hit: tuple[str, bool] | None = None
+        self.taught = ""
+        self.dimmed = False
+        self.setMinimumHeight(150 if compact else 210)
+
+    def rows(self) -> list[list[tuple[str, float]]]:
+        return [*_ROWS, _BOTTOM[self.kind]]
+
+    def show_keys(self, target: str = "", hit: tuple[str, bool] | None = None, taught: str = "") -> None:
+        self.target, self.hit, self.taught = target, hit, taught
+        self.update()
+
+    def caption(self, key: str) -> str:
+        if key == "space":
+            return ""
+        if key == "fn":
+            return "fn"
+        text = key_label(key, self.kind).replace(" (left)", "").replace(" (right)", "")
+        if self.compact:
+            return {"AltGr": "Gr", "Menu": "☰", "Enter": "↵", "Tab": "⇥"}.get(text, _SHORT.get(text, text))
+        return _SHORT.get(text, text) if len(text) > 8 else text
+
+    def state(self, key: str) -> str:
+        fam = family(key) if key != "alt_gr" else "alt"
+        if self.target and fam == self.target and not key.endswith("_r") and key != "alt_gr":
+            return "target"
+        if self.hit is not None and self.hit[0] == key:
+            return "good" if self.hit[1] else "warn"
+        if self.taught and fam == self.taught:
+            return "taught"
+        return ""
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt
+        from PySide6.QtCore import QRectF
+        from PySide6.QtGui import QFont, QPainter, QPen
+
+        from curslink.gui import theme
+
+        t = theme.current()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if self.dimmed:
+            p.setOpacity(0.45)
+        rows = self.rows()
+        gap = 4.0 if self.compact else 5.0
+        pad = 8.0
+        w, h = self.width() - 2 * pad, self.height() - 2 * pad
+        key_h = (h - gap * (len(rows) - 1)) / len(rows)
+        p.setPen(QPen(t.solid("stroke"), 1))
+        p.setBrush(t.solid("card2"))
+        p.drawRoundedRect(QRectF(0.5, 0.5, self.width() - 1, self.height() - 1), 10, 10)
+        font = QFont(self.font())
+        font.setPixelSize(10 if self.compact else 11)
+        p.setFont(font)
+        colours = {
+            "": (t.solid("card"), t.solid("stroke"), t.solid("ink")),
+            "target": (t.solid("accent", "card"), t.solid("accent"), t.solid("accent_ink")),
+            "good": (t.solid("good_bg"), t.solid("good"), t.solid("good")),
+            "warn": (t.solid("warn_bg"), t.solid("warn"), t.solid("warn")),
+            "taught": (t.solid("accent"), t.solid("accent"), t.solid("accent_ink")),
+        }
+        y = pad
+        for row in rows:
+            units = sum(width for _, width in row)
+            unit = (w - gap * (len(row) - 1)) / units
+            x = pad
+            for key, width in row:
+                kw = unit * width
+                fill, edge, ink = colours[self.state(key)]
+                p.setPen(QPen(edge, 1.5 if self.state(key) else 1))
+                p.setBrush(fill)
+                p.drawRoundedRect(QRectF(x, y, kw, key_h), 5, 5)
+                p.setPen(ink)
+                p.drawText(QRectF(x + 2, y, kw - 4, key_h), Qt.AlignmentFlag.AlignCenter, self.caption(key))
+                x += kw + gap
+            y += key_h + gap
+        p.end()
+
+
 class KeyboardCheckDialog(QDialog):
-    """Agent: find and fix keys that arrive wrong from the host's keyboard."""
+    """Agent: "My keyboard is set up wrong". A step-by-step window: get
+    ready, check my keys (the key to press lights up on a drawn keyboard for
+    this system), teach a key (shared keyboard, then this computer's own),
+    review and save. Fixes are saved on this computer."""
+
+    STEPS = (("Get ready", "Pointer on this device"), ("Check my keys", ""),
+             ("Teach a key", "Optional"), ("Review and save", "Saved on this device"))
 
     def __init__(self, app, parent=None):
+        from PySide6.QtWidgets import QFrame, QStackedWidget
+
         super().__init__(parent)
         self.app = app
         self.kind = this_kind()
+        self.os_name = OS_LABELS.get(self.kind, "computer")
         self.setWindowTitle("Fix my keyboard")
-        self.setMinimumWidth(520)
+        self.setMinimumSize(760, 520)
         self.fixes: dict[str, str] = dict(app.config().get("agent", "modifier_map", {}) or {})
         self.steps = guided_steps(self.kind)
-        self.step = -1           # guided check: which step; -1 = not running
+        self.step = -1           # guided check: which key; -1 = not running
+        self.results: list[bool | None] = [None] * len(self.steps)
         self.teach_sent: str | None = None
         self.mode = ""           # "", "check" or "teach"
-        v = QVBoxLayout(self)
-        v.addWidget(label(
-            f"Use the keyboard shared from your other computer, with this {OS_LABELS.get(self.kind, 'computer')} "
-            "in control (move the pointer here first). While this is open its keys are only listened to, "
-            "not typed.", "small", wrap=True))
+        self.page = 0
+
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        rail = QFrame()
+        rail.setObjectName("sidebar")
+        rail.setFixedWidth(210)
+        self.rail = QVBoxLayout(rail)
+        self.rail.setContentsMargins(14, 18, 14, 18)
+        self.rail.setSpacing(6)
+        self.rail_labels = []
+        for i, (title, detail) in enumerate(self.STEPS):
+            lab = label("", None, wrap=True)
+            lab.setTextFormat(Qt.TextFormat.RichText)
+            self.rail_labels.append(lab)
+            self.rail.addWidget(lab)
+        self.rail.addStretch(1)
+        self.listening = label("● Listening to the shared keyboard", "small", wrap=True)
+        self.rail.addWidget(self.listening)
+        outer.addWidget(rail)
+
+        right = QVBoxLayout()
+        right.setContentsMargins(24, 20, 24, 18)
+        right.setSpacing(12)
+        self.title = label("", "h1", wrap=True)
+        right.addWidget(self.title)
+        self.lead = label("", "muted", wrap=True)
+        right.addWidget(self.lead)
+        self.chips = label("", "small", wrap=True)
+        self.chips.setTextFormat(Qt.TextFormat.RichText)
+        right.addWidget(self.chips)
         self.prompt = label("", "h2", wrap=True)
-        v.addWidget(self.prompt)
+        right.addWidget(self.prompt)
         self.detail = label("", "small", wrap=True)
-        v.addWidget(self.detail)
-        go = QHBoxLayout()
-        self.check_button = button("Check my keys", "primary", self.start_check)
-        self.teach_button = button("Teach one key", None, self.start_teach)
-        self.skip_button = button("Skip", None, self.skip)
-        go.addWidget(self.check_button)
-        go.addWidget(self.teach_button)
-        go.addWidget(self.skip_button)
-        go.addStretch(1)
-        v.addLayout(go)
-        v.addWidget(label("Fixes saved on this computer", "small"))
-        self.rows = MapRows(dst_kind=self.kind)
-        v.addWidget(self.rows)
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
-        buttons.accepted.connect(self.save)
-        buttons.rejected.connect(self.reject)
-        v.addWidget(buttons)
+        right.addWidget(self.detail)
+
+        self.stack = QStackedWidget()
+        self.board = KeyboardView(self.kind)
+        ready = KeyboardView(self.kind)
+        ready.dimmed = True
+        self.stack.addWidget(ready)                        # 0 ready: this system's keyboard, waiting
+        self.stack.addWidget(self.board)                   # 1 check
+        teach = QWidget()
+        two = QHBoxLayout(teach)
+        two.setContentsMargins(0, 0, 0, 0)
+        two.setSpacing(14)
+        self.shared_board = KeyboardView(self.kind, compact=True)
+        self.local_board = KeyboardView(self.kind, compact=True)
+        for title, board in (("Shared keyboard", self.shared_board), ("This computer's keyboard", self.local_board)):
+            col = QVBoxLayout()
+            col.setSpacing(6)
+            col.addWidget(label(title, "small"))
+            col.addWidget(board)
+            col.addStretch(1)
+            two.addLayout(col)
+        self.stack.addWidget(teach)                        # 2 teach
+        self.rows = MapRows(self.kind, self.kind)
+        review = QWidget()
+        review_layout = QVBoxLayout(review)
+        review_layout.setContentsMargins(0, 0, 0, 0)
+        review_layout.addWidget(self.rows)
+        review_layout.addStretch(1)
+        self.stack.addWidget(review)                       # 3 review
+        right.addWidget(self.stack, 1)
+        self.result = label("", None, wrap=True)
+        self.result.setTextFormat(Qt.TextFormat.RichText)
+        right.addWidget(self.result)
+
+        nav = QHBoxLayout()
+        self.back_button = button("Back", None, self.back)
+        self.skip_button = button("Skip this key", None, self.skip)
+        self.again_button = button("Check again", None, self.start_check)
+        self.cancel_button = button("Cancel", None, self.reject)
+        self.next_button = button("Start the check", "primary", self.next)
+        for b in (self.back_button, self.skip_button, self.again_button):
+            nav.addWidget(b)
+        nav.addStretch(1)
+        nav.addWidget(self.cancel_button)
+        nav.addWidget(self.next_button)
+        right.addLayout(nav)
+        outer.addLayout(right, 1)
+
         self.rows.set_mapping(self.fixes)
-        self.set_mode("")
         app.service.event.connect(self.on_event)
         app.service.send("keys learn on")
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.show_page(0)
 
-    # -- modes ----------------------------------------------------------------
-    def set_mode(self, mode: str) -> None:
-        self.mode = mode
-        self.skip_button.setVisible(mode == "check")
+    # -- pages ------------------------------------------------------------------
+    def show_page(self, page: int) -> None:
+        self.page = page
+        self.mode = {1: "check", 2: "teach"}.get(page, "")
+        self.stack.setCurrentIndex(page)
+        self.result.setText("")
         running = self.app.service.is_alive()
-        self.check_button.setEnabled(running)
-        self.teach_button.setEnabled(running)
-        if not running:
-            self.prompt.setText("Start linking first")
-            self.detail.setText("Curslink needs to be running and connected to your host to hear its keyboard.")
-        elif mode == "":
-            self.prompt.setText("What's wrong?")
-            self.detail.setText("Check my keys asks for a few keys this computer has and fixes any that arrive "
-                                "as something else. Teach one key: press it on the shared keyboard, then the "
-                                "key it should be on this computer's own keyboard.")
+        self.lead.setVisible(page != 1)
+        for i, ((title, detail), lab) in enumerate(zip(self.STEPS, self.rail_labels)):
+            detail = detail or f"{len(self.steps)} quick presses"
+            mark = "✓" if i < page else str(i + 1)
+            weight = "600" if i == page else "400"
+            lab.setText(f"<span style='font-weight:{weight}'>{mark}&nbsp;&nbsp;{title}</span><br>"
+                        f"<span style='font-size:small'>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{detail}</span>")
+        self.listening.setVisible(running)
+        self.back_button.setVisible(page > 0)
+        self.skip_button.setVisible(page == 1)
+        self.again_button.setVisible(page == 3)
+        self.chips.setVisible(page == 1)
+        self.next_button.setText({0: "Start the check", 1: "Skip the rest", 2: "Review and save", 3: "Save"}[page])
+        if page == 0:
+            self.title.setText("Let's check the keys from your shared keyboard")
+            self.lead.setText(f"Use the keyboard plugged into your host, with this {self.os_name} device in control. "
+                              "Each key to press lights up on a keyboard, and any that arrives as the wrong key gets "
+                              "fixed here. While this window is open the shared keyboard's keys are only listened "
+                              "to, not typed.")
+            if running:
+                self.prompt.setText("Press any key on the shared keyboard to start")
+                self.detail.setText("If nothing happens, move the pointer onto this device first.")
+            else:
+                self.prompt.setText("Start linking first")
+                self.detail.setText("Curslink needs to be running and connected to your host to hear its keyboard.")
+            self.next_button.setEnabled(running)
+        elif page == 1:
+            self.title.setText("Check my keys")
+            self.lead.setText("")
+            self.next_button.setEnabled(True)
+            self.show_step()
+        elif page == 2:
+            self.title.setText("Teach a key")
+            self.lead.setText("For a key the check didn't cover. Press it on the shared keyboard, then press the key "
+                              "it should be on this computer's own keyboard.")
+            self.teach_sent = None
+            self.show_teach()
+            self.setFocus()
+        else:
+            self.title.setText("Review and save")
+            self.lead.setText(f"These fixes are saved on this {self.os_name} device only, on top of the host's "
+                              "mapping. Change or remove any of them here or later in Settings > Keyboard.")
+            self.prompt.setText("")
+            self.detail.setText("")
 
+    def next(self) -> None:
+        if self.page == 3:
+            self.save()
+        elif self.page == 0:
+            self.start_check()
+        else:
+            self.show_page(self.page + 1)
+
+    def back(self) -> None:
+        if self.page > 0:
+            self.show_page(self.page - 1)
+
+    # -- check my keys -----------------------------------------------------------
     def start_check(self) -> None:
-        self.mode, self.step = "check", 0
-        self.set_mode("check")
-        self.show_step()
+        self.step = 0
+        self.results = [None] * len(self.steps)
+        self.show_page(1)
+
+    def show_chips(self) -> None:
+        t = theme.current()
+        parts = []
+        for i, (want, _) in enumerate(self.steps):
+            text = key_label(want, self.kind)
+            r = self.results[i]
+            if i == self.step:
+                parts.append(f"<b style='color:{t.css('accent')}'>[{text}]</b>")
+            elif r is True:
+                parts.append(f"<span style='color:{t.css('good')}'>✓ {text}</span>")
+            elif r is False:
+                parts.append(f"<span style='color:{t.css('warn')}'>⚠ {text}</span>")
+            else:
+                parts.append(text)
+        self.chips.setText("&nbsp;&nbsp; ".join(parts))
 
     def show_step(self) -> None:
-        if self.step >= len(self.steps):
+        self.show_chips()
+        if self.step < 0 or self.step >= len(self.steps):
             self.step = -1
-            self.set_mode("")
+            fixed = sum(1 for r in self.results if r is False)
             self.prompt.setText("All done")
-            self.detail.setText("Save to keep the fixes below.")
+            self.detail.setText(f"{fixed} key{'s' if fixed != 1 else ''} fixed. Teach another key, or review and "
+                                "save." if fixed else "Every key arrived right. You can still teach a key.")
+            self.board.show_keys(hit=self.board.hit)
+            self.skip_button.setVisible(False)
+            self.next_button.setText("Next: teach a key")
             return
-        _, ask = self.steps[self.step]
+        want, ask = self.steps[self.step]
         self.prompt.setText(ask)
-        self.detail.setText(f"Step {self.step + 1} of {len(self.steps)}, on the shared keyboard.")
+        self.detail.setText(f"Key {self.step + 1} of {len(self.steps)}, on the shared keyboard.")
+        self.board.show_keys(target=want, hit=self.board.hit)
 
     def skip(self) -> None:
-        if self.mode == "check":
+        if self.page == 1 and self.step >= 0:
             self.step += 1
+            self.board.hit = None
             self.show_step()
 
+    # -- teach a key -------------------------------------------------------------
     def start_teach(self) -> None:
-        self.teach_sent = None
-        self.set_mode("teach")
-        self.prompt.setText("Press the key on the shared keyboard")
-        self.detail.setText("The one that does the wrong thing here.")
-        self.setFocus()
+        self.show_page(2)
 
-    # -- keys -----------------------------------------------------------------
+    def show_teach(self) -> None:
+        if self.teach_sent is None:
+            self.prompt.setText("1. Press the key on the shared keyboard")
+            self.detail.setText("The one that does the wrong thing here.")
+            self.local_board.dimmed = True
+            self.shared_board.show_keys()
+            self.local_board.show_keys()
+        else:
+            self.prompt.setText(f"2. Now press what {key_label(self.teach_sent, self.kind)} should be, on this "
+                                "computer's own keyboard")
+            self.detail.setText("")
+            self.local_board.dimmed = False
+            self.shared_board.show_keys(taught=family(self.teach_sent))
+            self.local_board.show_keys()
+
+    # -- keys ------------------------------------------------------------------
     def on_event(self, event: dict) -> None:
         if event.get("event") != "key_learned" or not event.get("pressed"):
             return
@@ -352,15 +611,27 @@ class KeyboardCheckDialog(QDialog):
         """A key pressed on the shared keyboard, as the host sent it."""
         if not sent:
             return
-        if self.mode == "check" and 0 <= self.step < len(self.steps):
+        t = theme.current()
+        if self.page == 0:
+            self.start_check()
+        elif self.mode == "check" and 0 <= self.step < len(self.steps):
             wanted, _ = self.steps[self.step]
-            self.add_fix(sent, wanted)
+            changed = self.add_fix(sent, wanted)
+            self.results[self.step] = not changed
+            self.board.hit = (sent, not changed)
+            if changed:
+                self.result.setText(f"<b style='color:{t.css('warn')}'>{key_label(wanted, self.kind)} arrived as "
+                                    f"{key_label(family(sent), self.kind)}.</b> It will type {key_label(wanted, self.kind)} "
+                                    "from now on.")
+            else:
+                self.result.setText(f"<b style='color:{t.css('good')}'>✓ {key_label(wanted, self.kind)} arrived "
+                                    "right.</b>")
             self.step += 1
             self.show_step()
         elif self.mode == "teach" and self.teach_sent is None:
             self.teach_sent = sent
-            self.prompt.setText("Now press the key it should be, on this computer's own keyboard")
-            self.detail.setText(f"The shared keyboard sent {key_label(sent, self.kind)}.")
+            self.result.setText("")
+            self.show_teach()
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802 - Qt
         # The host's keys aren't typed while this is open, so a key here is
@@ -370,18 +641,22 @@ class KeyboardCheckDialog(QDialog):
             if local:
                 self.taught(local)
             return
-        if event.key() == Qt.Key.Key_Escape and self.mode:
-            self.set_mode("")
-            return
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            return  # Enter mustn't press Save or Cancel by accident
         super().keyPressEvent(event)
 
     def taught(self, local: str) -> None:
+        t = theme.current()
         sent, self.teach_sent = self.teach_sent or "", None
         changed = self.add_fix(sent, local)
-        self.set_mode("")
-        self.prompt.setText("Got it" if changed else "That key already arrives right")
-        self.detail.setText(f"{key_label(sent, self.kind)} from the shared keyboard now types "
-                            f"{key_label(local, self.kind)} here. Save to keep it." if changed else "")
+        self.show_teach()
+        self.local_board.show_keys(taught=family(local))
+        if changed:
+            self.result.setText(f"<b style='color:{t.css('good')}'>✓ Learned: {key_label(family(sent), self.kind)} from the "
+                                f"shared keyboard now types {key_label(family(local), self.kind)}.</b> Teach another, or "
+                                "review and save.")
+        else:
+            self.result.setText(f"✓ {key_label(sent, self.kind)} already arrives right.")
 
     def add_fix(self, sent: str, wanted: str) -> bool:
         fix = learned_fix(sent, wanted)

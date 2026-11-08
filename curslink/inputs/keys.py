@@ -189,11 +189,15 @@ def key_label(name: str, kind: str = "") -> str:
         "linux": {"cmd": "Super", "ctrl": "Ctrl", "alt": "Alt"},
         "android": {"cmd": "Meta", "ctrl": "Ctrl", "alt": "Alt"},
     }.get(kind, {})
+    if name == "alt_gr":
+        return "AltGr"
     if fam in words:
         return words[fam] + side
     if len(name) == 1:
         return name.upper() if name.isalpha() else name
-    return KEY_LABELS.get(name, name)
+    if name in KEY_LABELS:
+        return KEY_LABELS[name]
+    return KEY_LABELS[fam] + side if fam in KEY_LABELS else name
 
 
 def guided_steps(kind: str) -> list[tuple[str, str]]:

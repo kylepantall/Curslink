@@ -927,20 +927,27 @@ def test_my_keyboard_is_set_up_wrong(desktop, qapp, monkeypatch):
     assert sent == ["keys learn on"]
 
     # The guided check: the host sends Cmd where Ctrl was meant and the other way round.
-    dialog.start_check()
+    assert dialog.page == 0
+    desktop.service.event.emit({"event": "key_learned", "key": "space", "pressed": True})  # any key starts
+    assert dialog.page == 1 and dialog.board.target == "ctrl"
     arrives = {"ctrl": "cmd_l", "cmd": "ctrl_l"}
     for wanted, _ in guided_steps("windows"):
         desktop.service.event.emit({"event": "key_learned", "key": arrives.get(wanted, wanted), "pressed": True})
     assert dialog.rows.mapping() == {"cmd": "ctrl", "ctrl": "cmd"}
     assert dialog.prompt.text() == "All done"
+    assert dialog.results[:2] == [False, False] and all(dialog.results[2:])
 
     # Teach one key: Caps Lock on the shared keyboard should be Esc here.
-    dialog.start_teach()
+    dialog.next()
+    assert dialog.page == 2
     dialog.heard("caps_lock")
+    assert dialog.shared_board.taught == "caps_lock"
     dialog.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Escape, Qt.KeyboardModifier.NoModifier))
     assert dialog.rows.mapping()["caps_lock"] == "esc"
 
-    dialog.save()
+    dialog.next()
+    assert dialog.page == 3 and dialog.next_button.text() == "Save"
+    dialog.next()
     assert desktop.config().get("agent", "modifier_map") == {"cmd": "ctrl", "ctrl": "cmd", "caps_lock": "esc"}
     assert sent[-2:] == ["keys learn off", "saved"]
 
