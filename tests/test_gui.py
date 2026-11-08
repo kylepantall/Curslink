@@ -783,7 +783,10 @@ def test_pair_a_phone_by_qr_code_and_pick_its_edge(desktop, qapp):
     assert desktop.config().side_of("pixel", me) == "left"
 
 
-def test_switching_between_host_and_agent(desktop, qapp):
+def test_switching_between_host_and_agent(desktop, qapp, monkeypatch):
+    from curslink import macperms
+
+    monkeypatch.setattr(macperms, "missing", lambda role=None: [])  # macOS CI lacks them; Status would ask first
     desktop.window.pages["setup"].create()
     store = desktop.window.pages["devices"].store()
     store.add("laptop", "Work laptop", "agent", b"k" * 32)
