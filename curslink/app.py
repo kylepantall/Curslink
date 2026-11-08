@@ -297,6 +297,7 @@ async def run_host(cfg: HostConfig) -> None:
         log.info("waiting for agents via relay %s", cfg.relay.address)
     handoff = start_file_drags(cfg, router, server, overlay, capture, loop) if cfg.files else None
     isolink = start_popups(router, server, capture) if cfg.isolink else None
+    mirror = start_mirror(cfg, router, server, overlay, loop)
     bridge = LoopBridge(loop, router, handoff)
     capture.start(bridge)
     reporter = loop.create_task(report_capture(bridge, capture, server, router))
@@ -367,6 +368,8 @@ async def run_host(cfg: HostConfig) -> None:
         capture.stop()
         if isolink is not None:
             await isolink.stop()
+        if mirror is not None:
+            mirror.stop()
         overlay.close()
         await pairing.close()
         if relay:
@@ -457,6 +460,62 @@ def start_file_drags(cfg: HostConfig, router: Router, server: HostServer, overla
     server.on_drag_out = handoff.on_drag_out
     server.on_files = handoff.on_files
     return handoff
+
+
+def qt_available() -> bool:
+    """Can the overlay helper draw with Qt (and so capture and show mirrors)?"""
+    import importlib.util
+
+    try:
+        return importlib.util.find_spec("PySide6") is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def chain_helper_lines(overlay, loop: asyncio.AbstractEventLoop, peer) -> None:
+    """Mirror frames the overlay helper prints go to ``peer`` on the loop;
+    every other line to whoever took them before (file drags)."""
+    before = overlay.on_line
+
+    def on_line(line: str) -> None:  # the helper's reader thread
+        if line.startswith("mirror_frame "):
+            loop.call_soon_threadsafe(peer.helper_line, line)
+        else:
+            before(line)
+
+    overlay.on_line = on_line
+
+
+def start_mirror(cfg: HostConfig, router: Router, server: HostServer, overlay, loop: asyncio.AbstractEventLoop):
+    """Mirror mode (see curslink.mirror), when the layout has it on."""
+    if not cfg.layout.mirror:
+        return None
+    from curslink.mirror import LatestWriter, MirrorHost, MirrorPeer
+
+    local = None
+    if qt_available():
+        writer = LatestWriter(overlay.command)
+        local = MirrorPeer(overlay.command, lambda t, **data: host.local_send(t, **data), writer.put)
+        chain_helper_lines(overlay, loop, local)
+    else:
+        log.warning("mirror mode: this computer can't capture or show mirrors without Qt (PySide6)")
+    host = MirrorHost(cfg.layout, router, server, local, cfg.mirror_fps)
+    server.on_mirror = host.on_message
+    router.on_moved = host.update
+    connected, disconnected = server.on_connect, server.on_disconnect
+
+    def on_connect(conn) -> None:
+        connected(conn)
+        loop.call_soon(host.refresh)
+
+    def on_disconnect(device_id: str) -> None:
+        disconnected(device_id)
+        host.refresh()
+
+    server.on_connect, server.on_disconnect = on_connect, on_disconnect
+    host.refresh()
+    log.info("mirror mode on (%d fps)", host.fps)
+    return host
 
 
 def start_popups(router: Router, server: HostServer, capture):
@@ -811,7 +870,8 @@ async def run_agent(cfg: AgentConfig) -> None:
 
     # The helper draws the switch animation and, for dropped files, the
     # placeholder that follows the pointer and the "Receiving..." popup.
-    overlay = OverlayProcess() if cfg.animations or cfg.files.enabled else None
+    mirror_on = cfg.mirror and qt_available()
+    overlay = OverlayProcess() if cfg.animations or cfg.files.enabled or mirror_on else None
     if overlay:
         overlay.start()
     from curslink.smoothing import PointerSmoother
@@ -841,6 +901,14 @@ async def run_agent(cfg: AgentConfig) -> None:
     if native is not None:
         send_files_home(cfg, session, client, overlay, native, asyncio.get_running_loop())
     session.on_hint = lambda data: events.emit("hint", **data)
+    mirror = None
+    if mirror_on and overlay is not None:
+        from curslink.mirror import LatestWriter, MirrorPeer
+
+        writer = LatestWriter(overlay.command)
+        mirror = MirrorPeer(overlay.command, client.send, writer.put)
+        session.mirror = mirror
+        chain_helper_lines(overlay, asyncio.get_running_loop(), mirror)
 
     def on_state(state: str, detail: str) -> None:
         if state == "connected" and client.host and not detail.startswith("relay"):
@@ -850,6 +918,8 @@ async def run_agent(cfg: AgentConfig) -> None:
         if state != "connected":
             events.emit("look", hide=True)  # the host can't take it down now
             events.emit("hint", hide=True)
+            if mirror is not None:
+                mirror.stop()
         events.emit("host", state=state, detail=detail)
 
     client.on_state = on_state

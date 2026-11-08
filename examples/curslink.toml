@@ -95,6 +95,18 @@ confirm_with_agents = true   # agents running their own camera ([agent.gaze])
 # [layout]
 # allow_overlap = false
 #
+# Mirror mode (with allow_overlap): while you use the screen behind, every
+# screen in front of it shows the part of it that it covers, live, like
+# looking through the laptop. The pointer stays on the screen in use inside
+# the covered part and is drawn in the mirror (mirror_pointer = false sends
+# it to the screen in front instead, as without mirror mode). Any overlap
+# works, between any devices, phones included (Android asks once to share
+# its screen). On a Mac, the screen behind needs Screen Recording for
+# Curslink. An agent can opt out with [agent] mirror = false.
+# mirror = false
+# mirror_pointer = true
+# mirror_fps = 15
+#
 # Calibrated edges (Layout > Calibrate edge… writes these): where two screens
 # of different devices really join, clicked on the monitors themselves. The
 # pointer leaves along a_span and comes out the same fraction along b_span,

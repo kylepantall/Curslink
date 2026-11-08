@@ -353,6 +353,9 @@ def _run_qt_helper() -> None:
         return native_to_logical(screens, x, y, sys.platform == "win32")
 
     files = FilesOverlay(to_logical)
+    from curslink.mirror.helper import MirrorHelper
+
+    mirror = MirrorHelper()
 
     def poll() -> None:
         while True:
@@ -372,6 +375,11 @@ def _run_qt_helper() -> None:
                     continue
                 alive.append(w)
                 w.destroyed.connect(lambda *_a, w=w: alive.remove(w) if w in alive else None)
+            elif parts and parts[0].startswith("mirror"):
+                try:
+                    mirror.handle(line)
+                except Exception:  # pragma: no cover - never take the helper down
+                    log.exception("overlay command %s", parts[0])
             elif parts:
                 try:
                     files.handle(line)

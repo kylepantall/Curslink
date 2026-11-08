@@ -123,6 +123,9 @@ class Router:
         # move input mid-drag.
         self.carries_drag: Callable[[str, str], bool] = lambda from_device, to_device: False
         self._blocked_said = ""
+        # After every change of where the pointer is (any device, any
+        # screen): mirror mode follows the screen in use and the pointer on it.
+        self.on_moved: Callable[[], None] = lambda: None
         # While the Layout page calibrates an edge: left clicks (and Esc,
         # Backspace) on another computer come here instead of going to it.
         self.picker: Callable[[dict], None] | None = None
@@ -220,6 +223,7 @@ class Router:
                 return
         self._set_screen(screen)
         self.x, self.y = x, y
+        self.on_moved()
         if not self.settings.edge_switching:
             return
         pushes = self.layout.edge_pushes(self.local_id, self.x, self.y)
@@ -243,7 +247,7 @@ class Router:
         if dx or dy:
             self._moved_at = self.clock()
         nx, ny = self.x + dx, self.y + dy
-        here = self.layout.screen_at(nx, ny, self.active_device)
+        here = self.layout.screen_at(nx, ny, self.active_device, prefer=self.screen)
         if here is None and self.settings.edge_switching:
             crossing = self.layout.find_crossing(
                 self.active_device, self.x, self.y, dx, dy, self.settings.gap_tolerance_px
@@ -262,6 +266,7 @@ class Router:
                 return
         self._set_screen(here)
         self.x, self.y = nx, ny
+        self.on_moved()
         if not self._edge_armed:
             self._edge_armed = not self.layout.edge_pushes(self.active_device, nx, ny, ARM_PX)
         ox, oy = here.to_os(nx, ny)
@@ -452,6 +457,7 @@ class Router:
 
         log.info("input -> %s/%s (%s): left %s at (%.0f, %.0f), lands at (%.0f, %.0f)",
                  new, screen.id, reason, old, left_at[0], left_at[1], ox, oy)
+        self.on_moved()
         event = SwitchEvent(old, new, screen, reason)
         for listener in self.listeners:
             listener(event)

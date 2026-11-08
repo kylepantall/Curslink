@@ -82,6 +82,9 @@ class HostServer:
         # whether it opened a floating chat carried to it (popup_result).
         self.on_isolink: Callable[[str, dict], None] = lambda device_id, data: None
         self.on_popup_result: Callable[[str, dict], None] = lambda device_id, data: None
+        # (device_id, frame type, frame data): mirror_frame and mirror_ack
+        # from an agent taking part in mirror mode (see curslink.mirror).
+        self.on_mirror: Callable[[str, str, dict], None] = lambda device_id, t, data: None
         self.host = host
         self.port = port
         # (device_id, hello.auth, TLS channel binding) -> allowed? See security.HelloVerifier.
@@ -288,6 +291,8 @@ class HostServer:
             self.on_isolink(conn.device_id, dict(msg.data))
         elif msg.t == "popup_result":
             self.on_popup_result(conn.device_id, dict(msg.data))
+        elif msg.t in ("mirror_frame", "mirror_ack"):
+            self.on_mirror(conn.device_id, msg.t, dict(msg.data))
         elif msg.t.startswith("file_"):
             reply = self.on_files(conn.device_id, msg)
             if reply and not conn.writer.transport.is_closing():

@@ -15,6 +15,12 @@ a laptop standing in front of part of a monitor. Then the screen in front
 (higher ``z``; on a tie, the one listed later) owns the shared area, and the
 covered part of the screen behind is blocked out: the pointer can't rest
 there, and pushing into it crosses to the screen in front.
+
+With ``pointer_through`` (mirror mode, see :mod:`curslink.mirror`) a covered
+part still belongs to the device behind as far as that device is concerned:
+the pointer on the screen behind carries on into it (the screen in front
+shows it there), and only leaves for the screen in front past the covered
+part. The screen in front still owns the area for its own pointer.
 """
 
 from __future__ import annotations
@@ -158,11 +164,16 @@ class Layout:
     devices: dict[str, Device] = field(default_factory=dict)
     allow_overlap: bool = False
     links: tuple[EdgeLink, ...] = ()
+    # Mirror mode's pointer: see the module docstring.
+    pointer_through: bool = False
+    # Mirror mode (curslink.mirror): screens in front show what they cover.
+    mirror: bool = False
 
     @classmethod
     def from_devices(cls, devices: Iterable[Device], allow_overlap: bool = False,
-                     links: Iterable[EdgeLink] = ()) -> "Layout":
-        layout = cls({d.id: d for d in devices}, allow_overlap, tuple(links))
+                     links: Iterable[EdgeLink] = (), pointer_through: bool = False,
+                     mirror: bool = False) -> "Layout":
+        layout = cls({d.id: d for d in devices}, allow_overlap, tuple(links), pointer_through, mirror)
         layout.validate()
         return layout
 
@@ -180,6 +191,21 @@ class Layout:
         """All screens, back to front."""
         order = list(self.screens())
         return [s for _, s in sorted(enumerate(order), key=lambda p: (p[1].z, p[0]))]
+
+    def covering(self, screen: Screen) -> list[tuple[Screen, tuple[int, int, int, int]]]:
+        """Every screen standing in front of ``screen``, with the part of it
+        that one covers (layout pixels), front most last."""
+        if not self.allow_overlap:
+            return []
+        stack = self._stack()
+        if screen not in stack:
+            return []
+        out = []
+        for front in stack[stack.index(screen) + 1 :]:
+            rect = screen.overlap(front)
+            if rect is not None:
+                out.append((front, rect))
+        return out
 
     def in_front(self, a: Screen, b: Screen) -> bool:
         """Is ``a`` drawn in front of ``b``?"""
@@ -227,15 +253,26 @@ class Layout:
                 return s
         raise KeyError(f"{device_id}/{screen_id}")
 
-    def screen_at(self, x: float, y: float, device_id: str | None = None) -> Screen | None:
+    def screen_at(self, x: float, y: float, device_id: str | None = None,
+                  prefer: Screen | None = None) -> Screen | None:
         """The screen you'd see at a point: the front one where screens overlap.
 
         With ``device_id``, only if that device's screen is the one in front
-        there, so a covered (blocked out) area belongs to nobody behind it.
+        there, so a covered (blocked out) area belongs to nobody behind it;
+        with ``pointer_through``, that device's front most screen there.
+        ``prefer``: with ``pointer_through``, that screen if it's one of the
+        device's there (the pointer stays on the screen it's on).
         """
         if not self.allow_overlap:
             for s in self.screens(device_id):
                 if s.contains(x, y):
+                    return s
+            return None
+        if device_id is not None and self.pointer_through:
+            if prefer is not None and prefer.device_id == device_id and prefer.contains(x, y):
+                return prefer
+            for s in reversed(self._stack()):
+                if s.device_id == device_id and s.contains(x, y):
                     return s
             return None
         for s in reversed(self._stack()):
@@ -245,7 +282,7 @@ class Layout:
 
     def covered_by(self, device_id: str, x: float, y: float) -> Screen | None:
         """Another device's screen standing in front of ``device_id`` at a point."""
-        if not self.allow_overlap:
+        if not self.allow_overlap or self.pointer_through:
             return None
         front = self.screen_at(x, y)
         if front is None or front.device_id == device_id:

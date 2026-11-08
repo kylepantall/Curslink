@@ -137,6 +137,27 @@ class SettingsPage(Page):
         self.keyboard_card.add_row(text_block("Swap Cmd and Ctrl between Mac and PC", detail), self.swap_keys)
         self.add(self.keyboard_card)
 
+        # -- overlapping screens (host) -------------------------------------------
+        self.mirror_card = Card("Overlapping screens", rows=True)
+        self.mirror = Toggle("Mirror the covered area")
+        self.mirror.clicked.connect(lambda on: self.set_config("layout", "mirror", on))
+        self.mirror_card.add_row(text_block(
+            "Mirror the covered area",
+            "Where a screen stands in front of another, like a laptop in front of a monitor's corner, it "
+            "shows the part it covers while you use the screen behind, so you can see the clock, "
+            "notifications and windows there. Works with any overlap, phones included."), self.mirror)
+        self.mirror_pointer = Toggle("Keep the pointer on the screen in use")
+        self.mirror_pointer.clicked.connect(lambda on: self.set_config("layout", "mirror_pointer", on))
+        self.mirror_pointer_row = self.mirror_card.add_row(text_block(
+            "Keep the pointer on the screen in use",
+            "The pointer can go into the covered part of the screen behind and is drawn in the mirror, so "
+            "you can click there. It moves to the screen in front once it leaves the covered part."),
+            self.mirror_pointer)
+        self.mirror_note = label("Turn on Allow overlap on the Layout page and put one screen in front of "
+                                 "another to use this.", "small", wrap=True)
+        self.mirror_card.body.addWidget(self.mirror_note)
+        self.add(self.mirror_card)
+
         # -- per-monitor jumps (host) ---------------------------------------------
         self.jump_card = Card("Jump to the monitor you look at", rows=True)
         self.jump_all_on = button("Turn all on", None, lambda: self.set_all_jumps(True))
@@ -278,6 +299,14 @@ class SettingsPage(Page):
             self.switching.setVisible(role == "host")
             self.jump_card.setVisible(role == "host")
             self.keyboard_card.setVisible(role == "host")
+            self.mirror_card.setVisible(role == "host")
+            layout_raw = raw.get("layout", {}) if isinstance(raw.get("layout", {}), dict) else {}
+            overlap = bool(layout_raw.get("allow_overlap", False))
+            self.mirror.setChecked(bool(layout_raw.get("mirror", False)))
+            self.mirror.setEnabled(overlap)
+            self.mirror_pointer.setChecked(bool(layout_raw.get("mirror_pointer", True)))
+            self.mirror_pointer_row.setVisible(overlap and self.mirror.isChecked())
+            self.mirror_note.setVisible(not overlap)
             if role == "host":
                 self.load_jumps(raw)
             self.agent_card.setVisible(role == "agent")

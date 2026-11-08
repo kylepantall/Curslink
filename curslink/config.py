@@ -80,6 +80,8 @@ class HostConfig:
     files: bool = True
     # Carry Isolink's floating chats to other devices ([isolink] enabled; see curslink.popups).
     isolink: bool = True
+    # Mirror mode's frames a second ([layout] mirror_fps; on with [layout] mirror, see curslink.mirror).
+    mirror_fps: int = 15
 
     @property
     def name(self) -> str:
@@ -114,6 +116,8 @@ class AgentConfig:
     files: AgentFilesConfig = field(default_factory=AgentFilesConfig)
     # Open and close Isolink's floating chats the host carries here ([agent.isolink] enabled).
     isolink: bool = True
+    # Take part in mirror mode: show and capture covered screen areas ([agent] mirror).
+    mirror: bool = True
 
 
 def _enabled(raw: Any, where: str) -> bool:
@@ -258,8 +262,14 @@ def parse_layout(raw: dict[str, Any]) -> Layout:
     if not isinstance(allow_overlap, bool):
         raise ConfigError("[layout].allow_overlap must be true or false")
     links = parse_links(raw.get("layout", {}).get("links", []), devices)
+    mirror = raw.get("layout", {}).get("mirror", False)
+    mirror_pointer = raw.get("layout", {}).get("mirror_pointer", True)
+    if not isinstance(mirror, bool) or not isinstance(mirror_pointer, bool):
+        raise ConfigError("[layout].mirror and mirror_pointer must be true or false")
+    mirror = mirror and allow_overlap
     try:
-        return Layout.from_devices(devices, allow_overlap, links)
+        return Layout.from_devices(devices, allow_overlap, links, pointer_through=mirror and mirror_pointer,
+                                   mirror=mirror)
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
 
@@ -383,6 +393,7 @@ def host_config(raw: dict[str, Any], base_dir: Path = Path(".")) -> HostConfig:
         pairing=pairing_config(raw, base_dir),
         files=bool(raw.get("files", {}).get("enabled", True)) if isinstance(raw.get("files", {}), dict) else True,
         isolink=_enabled(raw.get("isolink", {}), "[isolink]"),
+        mirror_fps=max(1, min(30, _int(raw.get("layout", {}), "mirror_fps", 15))),
     )
 
 
@@ -408,6 +419,7 @@ def agent_config(raw: dict[str, Any], base_dir: Path = Path(".")) -> AgentConfig
         gaze=agent_gaze_config(agent.get("gaze", {})),
         files=agent_files_config(agent.get("files", {})),
         isolink=_enabled(agent.get("isolink", {}), "[agent.isolink]"),
+        mirror=bool(agent.get("mirror", True)),
     )
     if not cfg.host and not cfg.relay and not cfg.pairing.enabled:
         raise ConfigError("set [agent].host (LAN), a [relay] (internet), or leave [pairing] enabled")

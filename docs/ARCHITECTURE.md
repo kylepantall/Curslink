@@ -190,6 +190,32 @@ agent, into the same real-drop machinery on the host. Gaze may carry a
 drag home this way too (otherwise it never moves the pointer mid-drag). Agents list `files` in `hello.features`
 (`[agent.files] enabled = false` turns it off); others never see these frames.
 
+### Mirror mode: seeing behind a screen in front
+
+With overlapping screens a laptop on the desk hides part of the monitor
+behind it, often the corner with the clock, the tray and notifications. With
+`[layout] mirror = true`, while you use the screen behind, every screen in
+front of it shows the part it covers, live (`curslink.mirror`).
+
+- The host plans it: from the layout and the screen in use it works out one
+  stream per screen in front (`Layout.covering`), for any pair of devices,
+  including the host itself and two screens of one computer, and sends each
+  device the whole of what it should capture and show (`mirror` frames).
+- The device behind captures only the covered rectangle in its overlay
+  helper (`QScreen.grabWindow`), skips unchanged frames, and sends JPEGs
+  sized to fit one protocol frame (`mirror_frame`). The host passes them to
+  the device in front, which draws them in a click-through window over the
+  same part of its screen and answers `mirror_ack`; the answer goes back to
+  the device capturing, which keeps at most two frames on their way, so a
+  slow link drops frames instead of queueing them in front of the pointer.
+- The pointer: with `mirror_pointer` (on by default) the layout lets the
+  device behind keep the covered part (`Layout.pointer_through`), so the
+  pointer stays on the screen in use there; the host sends where it is in
+  the mirror (`mirror_pointer`) and the mirror draws it.
+- Phones take part like any agent that lists the `mirror` feature: the app
+  draws mirrors in its pointer overlay, and captures with Android's screen
+  capture (MediaProjection), which asks the first time it's needed.
+
 ### Carrying Isolink's floating chats
 
 Isolink, the messenger, floats chats in small windows of their own on a
