@@ -53,21 +53,28 @@ class Stream:
 
     source: Screen
     target: Screen
-    rect: tuple[int, int, int, int]  # layout pixels
+    rect: tuple[int, int, int, int]  # layout pixels, on the screen behind
+    # Where that is on the screen in front (layout pixels): ``rect`` unless
+    # the overlap is calibrated (curslink.layout.Fit).
+    front: tuple[int, int, int, int] | None = None
+
+    @property
+    def shown(self) -> tuple[int, int, int, int]:
+        return self.front or self.rect
 
     @property
     def id(self) -> str:
         return f"{self.source.device_id}:{self.source.id}>{self.target.device_id}:{self.target.id}"
 
     def os_rect(self, screen: Screen) -> list[int]:
-        x, y, w, h = self.rect
+        x, y, w, h = self.shown if screen == self.target else self.rect
         ox, oy = screen.to_os(x, y)
         return [ox, oy, w, h]
 
     def edges(self) -> list[str]:
         """The sides of the mirror that lie inside the screen in front (not
         on its border): where it ends, which the mirror marks."""
-        x, y, w, h = self.rect
+        x, y, w, h = self.shown
         t = self.target
         out = []
         if x > t.x:
@@ -93,7 +100,8 @@ def streams_for(layout: Layout, screen: Screen, can: Callable[[str], bool] = lam
     screen in front of it, on devices that take part (``can``)."""
     if not layout.mirror or not layout.allow_overlap or not can(screen.device_id):
         return []
-    return [Stream(screen, front, rect) for front, rect in layout.covering(screen) if can(front.device_id)]
+    return [Stream(screen, front, rect, None if there == rect else there)
+            for front, rect, there in layout.covered_parts(screen) if can(front.device_id)]
 
 
 def device_states(streams: list[Stream], names: dict[str, str], fps: int) -> dict[str, dict]:
@@ -104,7 +112,7 @@ def device_states(streams: list[Stream], names: dict[str, str], fps: int) -> dic
         src = out.setdefault(s.source.device_id, {"captures": [], "shows": []})
         src["captures"].append({"id": s.id, "screen": s.source.id, "os": s.os_rect(s.source), "fps": fps})
         dst = out.setdefault(s.target.device_id, {"captures": [], "shows": []})
-        dst["shows"].append({"id": s.id, "screen": s.target.id, "os": s.os_rect(s.target), "size": list(s.rect[2:]),
+        dst["shows"].append({"id": s.id, "screen": s.target.id, "os": s.os_rect(s.target), "size": list(s.shown[2:]),
                              "label": names.get(s.source.device_id, s.source.device_id), "edges": s.edges()})
     return out
 

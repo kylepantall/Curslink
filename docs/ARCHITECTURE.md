@@ -212,6 +212,18 @@ front of it shows the part it covers, live (`curslink.mirror`).
   device behind keep the covered part (`Layout.pointer_through`), so the
   pointer stays on the screen in use there; the host sends where it is in
   the mirror (`mirror_pointer`) and the mirror draws it.
+- Lining up: screens are laid out in their own pixels, which aren't the
+  same size on every monitor, so the layout's overlap is only roughly what's
+  covered. "Line up overlap…" on the Layout page dims the screen behind and
+  has you click where the screen in front's top (or, with Tab, bottom)
+  corners sit (`curslink.gui.fitcalib`, on another computer through the
+  same `pick`/`hint` path as edge calibration). That gives a `Fit`: the
+  screen in front's real position and size on the one behind, saved as
+  `[[layout.fit]]`; `Layout.covered_parts` then says what to capture behind
+  and where it shows in front.
+- Curslink's own overlay windows (the edge indicator, mirrors) are kept out
+  of captures (`curslink.capturehide`; on macOS the capture also leaves out
+  the helper's own windows), so they don't show up twice.
 - Phones take part like any agent that lists the `mirror` feature: the app
   draws mirrors in its pointer overlay, and captures with Android's screen
   capture (MediaProjection), which asks the first time it's needed.
