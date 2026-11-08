@@ -21,6 +21,13 @@ part still belongs to the device behind as far as that device is concerned:
 the pointer on the screen behind carries on into it (the screen in front
 shows it there), and only leaves for the screen in front past the covered
 part. The screen in front still owns the area for its own pointer.
+
+Screens are laid out in their own pixels, which aren't the same size on
+every monitor, so where a screen in front covers one behind, the layout
+only roughly says which part. A :class:`Fit` (calibrated on the real
+screens, see :mod:`curslink.gui.fitcalib`) says exactly where the screen in
+front stands on the one behind and how big it is there; mirror mode uses it
+for what to capture and where to show it (:meth:`Layout.covered_parts`).
 """
 
 from __future__ import annotations
@@ -155,6 +162,20 @@ class Crossing:
     y: float
 
 
+@dataclass(frozen=True)
+class Fit:
+    """Where the screen in front really stands on the screen behind it:
+    its top-left corner at (``x``, ``y``) in the screen behind's own pixels
+    (from that screen's top-left), and ``scale`` of that screen's pixels to
+    one of its own (the two monitors' pixel sizes compared)."""
+
+    behind: tuple[str, str]  # (device, screen)
+    front: tuple[str, str]
+    x: float
+    y: float
+    scale: float
+
+
 def overlap_message(a: Screen, b: Screen) -> str:
     return f"screens {a.device_id}/{a.id} and {b.device_id}/{b.id} overlap"
 
@@ -168,12 +189,18 @@ class Layout:
     pointer_through: bool = False
     # Mirror mode (curslink.mirror): screens in front show what they cover.
     mirror: bool = False
+    # Calibrated overlaps: see Fit.
+    fits: tuple[Fit, ...] = ()
+    # Each screen's real size in mm, where its OS says (curslink.screensize):
+    # (device, screen) -> (width_mm, height_mm). Not in the config: filled in
+    # while running, for overlaps that aren't calibrated.
+    physical: dict[tuple[str, str], tuple[float, float]] = field(default_factory=dict)
 
     @classmethod
     def from_devices(cls, devices: Iterable[Device], allow_overlap: bool = False,
                      links: Iterable[EdgeLink] = (), pointer_through: bool = False,
-                     mirror: bool = False) -> "Layout":
-        layout = cls({d.id: d for d in devices}, allow_overlap, tuple(links), pointer_through, mirror)
+                     mirror: bool = False, fits: Iterable[Fit] = ()) -> "Layout":
+        layout = cls({d.id: d for d in devices}, allow_overlap, tuple(links), pointer_through, mirror, tuple(fits))
         layout.validate()
         return layout
 
@@ -207,6 +234,74 @@ class Layout:
                 out.append((front, rect))
         return out
 
+    def fit(self, behind: Screen, front: Screen) -> Fit | None:
+        for f in self.fits:
+            if f.behind == (behind.device_id, behind.id) and f.front == (front.device_id, front.id):
+                return f
+        return None
+
+    def set_physical(self, device_id: str, sizes: list[dict]) -> bool:
+        """Take ``device_id``'s monitors' real sizes (as
+        curslink.screensize.physical_sizes gives them, from that computer).
+        True if any of its screens' sizes changed."""
+        from curslink.screensize import match
+
+        changed = False
+        for screen in self.screens(device_id):
+            key = (device_id, screen.id)
+            mm = match(sizes or [], screen.os_x, screen.os_y, screen.width, screen.height)
+            if self.physical.get(key) != mm:
+                changed = True
+                if mm is None:
+                    self.physical.pop(key, None)
+                else:
+                    self.physical[key] = mm
+        return changed
+
+    def sized_fit(self, behind: Screen, front: Screen) -> Fit | None:
+        """Without a calibrated :class:`Fit`, one from the two screens' real
+        sizes (``physical``): ``front`` keeps its middle where the layout has
+        it, at its real size on ``behind``. None if either size is unknown."""
+        a = self.physical.get((behind.device_id, behind.id))
+        b = self.physical.get((front.device_id, front.id))
+        if a is None or b is None:
+            return None
+        try:
+            # behind's pixels per mm over front's: behind's pixels per front pixel.
+            kx = (behind.width / a[0]) / (front.width / b[0])
+            ky = (behind.height / a[1]) / (front.height / b[1])
+        except ZeroDivisionError:
+            return None
+        k = (kx + ky) / 2
+        if not k > 0:
+            return None
+        cx, cy = front.center
+        return Fit((behind.device_id, behind.id), (front.device_id, front.id),
+                   cx - behind.x - k * front.width / 2, cy - behind.y - k * front.height / 2, k)
+
+    def covered_parts(self, screen: Screen) -> list[tuple[Screen, tuple[int, int, int, int], tuple[int, int, int, int]]]:
+        """Like :meth:`covering`, as ``(front, part behind, part in front)``,
+        both in layout pixels: the part of ``screen`` that ``front`` covers,
+        and where that part is on ``front``. The same rectangle twice unless
+        the pair is calibrated (a :class:`Fit`)."""
+        out = []
+        for front, rect in self.covering(screen):
+            f = self.fit(screen, front) or self.sized_fit(screen, front)
+            if f is None:
+                out.append((front, rect, rect))
+                continue
+            k = f.scale
+            fx, fy = screen.x + f.x, screen.y + f.y
+            x0, y0 = max(screen.x, fx), max(screen.y, fy)
+            x1, y1 = min(screen.right, fx + front.width * k), min(screen.bottom, fy + front.height * k)
+            if x1 - x0 < 1 or y1 - y0 < 1:
+                continue  # it doesn't really cover any of it
+            behind = (round(x0), round(y0), round(x1 - x0), round(y1 - y0))
+            there = (round(front.x + (x0 - fx) / k), round(front.y + (y0 - fy) / k),
+                     max(1, round((x1 - x0) / k)), max(1, round((y1 - y0) / k)))
+            out.append((front, behind, there))
+        return out
+
     def in_front(self, a: Screen, b: Screen) -> bool:
         """Is ``a`` drawn in front of ``b``?"""
         stack = self._stack()
@@ -231,6 +326,14 @@ class Layout:
                     raise ValueError(f"edge link names an unknown screen {end.device_id}/{end.screen_id}") from None
             if link.a.device_id == link.b.device_id:
                 raise ValueError("an edge link joins screens of two different devices")
+        for f in self.fits:
+            for ref in (f.behind, f.front):
+                try:
+                    self.screen(*ref)
+                except KeyError:
+                    raise ValueError(f"an overlap fit names an unknown screen {ref[0]}/{ref[1]}") from None
+            if not f.scale > 0:
+                raise ValueError("an overlap fit's scale must be more than 0")
         pairs = self.overlaps()
         if pairs and not self.allow_overlap:
             raise ValueError(overlap_message(*pairs[0]))

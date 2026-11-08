@@ -351,6 +351,8 @@ async def run_host(cfg: HostConfig) -> None:
             look_command(server, line[5:])
         elif line.startswith("hint "):
             hint_command(server, line[5:])
+        elif line.startswith("fit "):
+            fit_command(mirror, line[4:])
         elif line == "pick on":
             # The Layout page is calibrating an edge: clicks on other computers are for it.
             router.picker = lambda data: events.emit("picked", **data)
@@ -475,12 +477,16 @@ def start_file_drags(cfg: HostConfig, router: Router, server: HostServer, overla
 
     # A real drag of files arriving from an agent needs the real button-up
     # held back until they're all here, which the Mac's event tap can do.
-    native_press = None
+    native_press = follow = None
     if sys.platform == "darwin":
+        from curslink.files.macfocus import FocusFollower
         from curslink.inputs.pynput_backend import press_left_here as native_press
+
+        # Apps under a drag from another computer take it only once in front.
+        follow = FocusFollower(lambda: {overlay.pid} if getattr(overlay, "pid", None) else set())
     handoff = DragHandoff(router, server, overlay.command, capture.inject_drag_end, cfg.name, emit=events.emit,
                           drag_source=drag_source, native_press=native_press,
-                          release_held=getattr(capture, "release_held", lambda: None))
+                          release_held=getattr(capture, "release_held", lambda: None), follow=follow)
     if hasattr(capture, "hold_left_up"):
         capture.hold_left_up = handoff.native.holding
     clean_old()
@@ -537,12 +543,15 @@ def start_mirror(cfg: HostConfig, router: Router, server: HostServer, overlay, l
     else:
         log.warning("mirror mode: this computer can't capture or show mirrors without Qt (PySide6)")
     host = MirrorHost(cfg.layout, router, server, local, cfg.mirror_fps)
+    host.on_fit = lambda fit: events.emit("fit", **fit)
     server.on_mirror = host.on_message
     router.on_moved = host.update
     connected, disconnected = server.on_connect, server.on_disconnect
 
     def on_connect(conn) -> None:
         connected(conn)
+        if cfg.layout.set_physical(conn.device_id, getattr(conn, "screen_mm", [])):
+            log_sizes(cfg.layout, conn.device_id)
         loop.call_soon(host.refresh)
 
     def on_disconnect(device_id: str) -> None:
@@ -550,9 +559,21 @@ def start_mirror(cfg: HostConfig, router: Router, server: HostServer, overlay, l
         host.refresh()
 
     server.on_connect, server.on_disconnect = on_connect, on_disconnect
+    from curslink.screensize import physical_sizes
+
+    if cfg.layout.set_physical(router.local_id, physical_sizes()):
+        log_sizes(cfg.layout, router.local_id)
     host.refresh()
     log.info("mirror mode on (%d fps)", host.fps)
     return host
+
+
+def log_sizes(layout, device_id: str) -> None:
+    for screen in layout.screens(device_id):
+        mm = layout.physical.get((device_id, screen.id))
+        if mm is not None:
+            log.info("mirror: %s/%s is %.0f x %.0f mm (%.2f px per mm)", device_id, screen.id, mm[0], mm[1],
+                     screen.width / mm[0])
 
 
 def start_popups(router: Router, server: HostServer, capture):
@@ -668,6 +689,23 @@ def host_command(router: Router, stop: asyncio.Event, command: str) -> None:
         router.set_gaze_paused(not router.gaze_paused)
     else:
         log.debug("unknown command %r", command)
+
+
+def fit_command(mirror, payload: str) -> None:
+    """``fit {"behind": ..., "front": ..., "x", "y", "scale", "hold"}``: the
+    Layout page fine-tuning an overlap; mirror mode follows at once."""
+    import json
+
+    if mirror is None:
+        return
+    try:
+        data = json.loads(payload)
+        if not isinstance(data, dict):
+            raise ValueError("not an object")
+    except ValueError as exc:
+        log.debug("bad fit command %r: %s", payload, exc)
+        return
+    mirror.fit(data)
 
 
 def look_command(server: HostServer, payload: str) -> None:

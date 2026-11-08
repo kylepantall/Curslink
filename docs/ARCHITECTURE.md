@@ -168,7 +168,10 @@ placeholders with the real names go in a temp folder, the overlay helper
 puts a small window under the pointer and starts a real OS drag of those
 paths with the file card as its image (on a Mac straight away through
 AppKit, as the button is held already; elsewhere once the device presses
-the button on it). Let go on the desktop or in a
+the button on it). Such a drag has no mouse-down of the Mac's own, so apps
+under it see no mouse-dragged events and many only take the drop once in
+front: while it's held, the window the pointer rests over for a quarter of a
+second is brought forward (`curslink/files/macfocus.py`). Let go on the desktop or in a
 folder and the file manager copies them there; on an app, it gets the temp
 paths. If you let go before every byte has arrived, the button-up waits
 (the agent simply doesn't send it yet; a Mac host's event tap holds the
@@ -212,6 +215,26 @@ front of it shows the part it covers, live (`curslink.mirror`).
   device behind keep the covered part (`Layout.pointer_through`), so the
   pointer stays on the screen in use there; the host sends where it is in
   the mirror (`mirror_pointer`) and the mirror draws it.
+- Lining up: screens are laid out in their own pixels, which aren't the
+  same size on every monitor, so the layout's overlap is only roughly what's
+  covered. "Line up overlap…" on the Layout page takes one click on each
+  screen (`curslink.gui.fitcalib`, on another computer through the same
+  `pick`/`hint` path as edge calibration): on the screen behind, where a
+  corner of the screen in front sits; on the screen in front, where a corner
+  of the screen behind sits behind it. Two corners from opposite sides of
+  the covered area give a `Fit`: how big one's pixels are against the
+  other's, and where it stands, saved as `[[layout.fit]]`;
+  `Layout.covered_parts` then says what to capture behind and where it
+  shows in front.
+- Fine-tuning: what lines up depends on where you sit (the screen in front
+  is nearer to you), so "Fine-tune…" (`curslink.gui.fittune`) holds the
+  mirror up and moves or resizes it with the arrow keys and +/- while you
+  look. Each change goes to the service as `fit {...}`
+  (`curslink.mirror.apply_fit`), so it shows at once; Save writes the
+  `[[layout.fit]]` without a restart.
+- Curslink's own overlay windows (the edge indicator, mirrors) are kept out
+  of captures (`curslink.capturehide`; on macOS the capture also leaves out
+  the helper's own windows), so they don't show up twice.
 - Phones take part like any agent that lists the `mirror` feature: the app
   draws mirrors in its pointer overlay, and captures with Android's screen
   capture (MediaProjection), which asks the first time it's needed.

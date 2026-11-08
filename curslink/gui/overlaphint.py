@@ -117,15 +117,17 @@ class OverlapHint:
             self.hide()
             return
         # Entries with an ``edge``: the host is calibrating an edge (see curslink.gui.edgecalib).
+        # Or one with a ``fit``: lining up an overlap (see curslink.gui.fitcalib).
         edges = [e for e in hint.get("screens", []) if isinstance(e, dict) and isinstance(e.get("screen"), str)
-                 and isinstance(e.get("edge"), dict)]
+                 and (isinstance(e.get("edge"), dict) or isinstance(e.get("fit"), dict))]
         if edges or self.edges is not None:
             if self.edges is None:
                 from curslink.gui.edgecalib import RemoteEdges
 
                 self.edges = RemoteEdges()
             self.edges.show(edges)
-        hint = {**hint, "screens": [e for e in hint.get("screens", []) if not (isinstance(e, dict) and "edge" in e)]}
+        hint = {**hint, "screens": [e for e in hint.get("screens", [])
+                                if not (isinstance(e, dict) and ("edge" in e or "fit" in e))]}
         wanted: dict[str, list[tuple[QRectF, str, bool]]] = {}
         screens: dict[str, object] = {}
         for entry in hint.get("screens", []):

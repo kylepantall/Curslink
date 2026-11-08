@@ -299,6 +299,9 @@ class LayoutPage(Page):
         self.dirty = False
         self.allow_overlap = False
         self.calibration = None  # EdgeCalibration, while calibrating an edge
+        # Overlaps to line up once the layout is saved and the service is back:
+        # [(behind key, front key)], see save().
+        self.pending_lineups: list[tuple[str, str]] = []
         self.edge_note = None
         app.service.event.connect(self._on_service_event)
         app.service.state_changed.connect(self._on_service_state)
@@ -494,6 +497,17 @@ class LayoutPage(Page):
             cfg.set("layout", "allow_overlap", True)
         else:
             cfg.remove("layout", "allow_overlap")
+        # A line-up goes with its two screens still overlapping that way round;
+        # new overlaps are lined up straight after saving, as part of placing them.
+        pairs = {(b.key, f.key) for b, f, _shared in self.overlap_pairs()} if self.allow_overlap else set()
+        fitted = set()
+        for t in cfg.fits():
+            pair = (t.get("behind"), t.get("front"))
+            if pair in pairs:
+                fitted.add(pair)
+            else:
+                cfg.remove_fit(*pair)
+        lineups = sorted(pairs - fitted) if cfg.get("layout", "mirror", False) else []
         try:
             parse_layout(cfg.raw())
         except ConfigError as exc:
@@ -508,6 +522,29 @@ class LayoutPage(Page):
         self.set_dirty(False)
         self.update_hint([])
         self.app.config_saved()
+        self.pending_lineups = lineups
+        if lineups:
+            from PySide6.QtCore import QTimer
+
+            self._say_edge("Saved. Next, line up where the screens really overlap: a click on each screen.")
+            if not self.app.service.is_alive():
+                QTimer.singleShot(0, self.next_lineup)
+            # Otherwise the service restarts with the new layout first (_on_service_state).
+
+    def next_lineup(self) -> None:
+        """Line up the next overlap left from save(), once the service is
+        running (when another computer's screen takes part)."""
+        from curslink.gui.service import RUNNING
+
+        if not self.pending_lineups or self.calibration is not None or self.dirty:
+            return
+        me = self.app.config().get("host", "device_id")
+        behind, front = self.pending_lineups[0]
+        local = {behind.split("/", 1)[0], front.split("/", 1)[0]} == {me}
+        if not local and self.app.service.state != RUNNING:
+            return  # _on_service_state brings us back
+        self.pending_lineups.pop(0)
+        self.calibrate_fit(behind, front)
 
     def set_dirty(self, dirty: bool) -> None:
         self.dirty = dirty
@@ -693,6 +730,105 @@ class LayoutPage(Page):
         self.refresh_edges()
         self._say_edge("Edge calibrated. The pointer now crosses along the stretches you clicked.")
 
+    def calibrate_fit(self, behind: str, front: str) -> None:
+        """Click where the two screens' corners really are, one on each
+        (see curslink.gui.fitcalib), for mirror mode."""
+        from curslink.gui.fitcalib import FitCalibration
+        from curslink.gui.service import RUNNING
+
+        if self.calibration is not None:
+            return
+        if self.dirty:
+            self._say_edge("Save the layout first, then line up the overlap.")
+            return
+        items = {i.key: i for i in self.items}
+        b, f = items.get(behind), items.get(front)
+        if b is None or f is None:
+            return
+        me = self.app.config().get("host", "device_id")
+        if {b.device_id, f.device_id} != {me} and self.app.service.state != RUNNING:
+            self._say_edge("Start linking first: you'll click on the other computer's screen too.")
+            return
+
+        def end(item) -> dict:
+            x, y, w, h = item.layout_rect()
+            return {"device": item.device_id, "name": item.device_name, "rect": [x, y, w, h],
+                    "screen": {**item.screen, "width": w, "height": h}}
+
+        self.calibration = FitCalibration(end(b), end(f), me, self.app.service.send)
+        self.calibration.finished.connect(lambda fit, b=behind, f=front: self.fit_calibrated(b, f, fit))
+        self._say_edge(f"Click on {b.device_name}'s screen first, then on {f.device_name}'s.")
+        if not self.calibration.start():
+            self.calibration = None
+            self._say_edge("Couldn't find that screen on this computer.")
+
+    def fit_calibrated(self, behind: str, front: str, fit) -> None:
+        self.calibration = None
+        if fit is None:
+            self.pending_lineups = []
+            self._say_edge("Not lined up: mirrors go by the screens' real sizes. "
+                           "Use \u201cLine up overlap\u2026\u201d below to do it later.")
+            return
+        cfg = self.app.config()
+        cfg.set_fit(behind, front, *fit)
+        cfg.save()
+        self.app.config_saved()
+        self.refresh_edges()
+        self._say_edge("Overlap lined up. Mirror mode now shows exactly what the screen in front covers.")
+
+    def tune_fit(self, behind: str, front: str) -> None:
+        """Nudge the mirror by eye while it's showing (see curslink.gui.fittune)."""
+        from curslink.gui.fittune import FitTuneDialog
+        from curslink.gui.service import RUNNING
+
+        if self.calibration is not None:
+            return
+        if self.dirty:
+            self._say_edge("Save the layout first, then fine-tune the overlap.")
+            return
+        cfg = self.app.config()
+        if not cfg.get("layout", "mirror", False):
+            self._say_edge("Turn on mirror mode first (Settings › Overlapping screens), then fine-tune it here.")
+            return
+        if self.app.service.state != RUNNING:
+            self._say_edge("Start linking first: you fine-tune the mirror while it's showing.")
+            return
+        items = {i.key: i for i in self.items}
+        b, f = items.get(behind), items.get(front)
+        if b is None or f is None:
+            return
+        saved = None
+        for t in cfg.fits():
+            if (t.get("behind"), t.get("front")) == (behind, front):
+                try:
+                    saved = (float(t["x"]), float(t["y"]), float(t["scale"]))
+                except (KeyError, TypeError, ValueError):
+                    saved = None
+        dialog = FitTuneDialog({"key": behind, "name": b.device_name}, {"key": front, "name": f.device_name},
+                               saved, self.app.service.send, self)
+        dialog.saved.connect(lambda fit, b=behind, f=front: self.fit_tuned(b, f, fit))
+        self.calibration = dialog
+        dialog.finished.connect(lambda _code: setattr(self, "calibration", None))
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def fit_tuned(self, behind: str, front: str, fit) -> None:
+        cfg = self.app.config()
+        cfg.set_fit(behind, front, *fit)
+        cfg.save()
+        # The service already has it (the fit command), so no restart.
+        self.app.config_saved(restart=False)
+        self.refresh_edges()
+        self._say_edge("Overlap fine-tuned and saved.")
+
+    def reset_fit(self, behind: str, front: str) -> None:
+        cfg = self.app.config()
+        if cfg.remove_fit(behind, front):
+            cfg.save()
+            self.app.config_saved()
+        self.refresh_edges()
+
     def reset_edge(self, a: str, b: str) -> None:
         cfg = self.app.config()
         if cfg.remove_link(a, b):
@@ -707,6 +843,10 @@ class LayoutPage(Page):
     def _on_service_state(self, state: str) -> None:
         from curslink.gui.service import RUNNING
 
+        if state == RUNNING and self.pending_lineups:
+            from PySide6.QtCore import QTimer
+
+            QTimer.singleShot(3000, self.next_lineup)  # give the other computers a moment to reconnect
         if state != RUNNING and self.calibration is not None:
             calibration, self.calibration = self.calibration, None
             calibration.stop()
@@ -842,11 +982,26 @@ class LayoutPage(Page):
         self.edge_note.hide()
         self.edges_box.addWidget(self.edge_note)
         if self.allow_overlap:
+            fitted = set()
+            if self.app.has_config():
+                fitted = {(t.get("behind"), t.get("front")) for t in self.app.config().fits()}
             for behind, front, _shared in self.overlap_pairs():
                 if behind.device_id != front.device_id:
                     seen.add((front.key, behind.key))
-                    self.edges_box.addWidget(label(f"{front.device_name} / {front.screen['id']}  in front of  "
-                                                   f"{behind.device_name} / {behind.screen['id']}", wrap=True))
+                self.edges_box.addWidget(label(f"{front.device_name} / {front.screen['id']}  in front of  "
+                                               f"{behind.device_name} / {behind.screen['id']}", wrap=True))
+                # Mirror mode: where the screen in front really stands on the one behind.
+                row = QHBoxLayout()
+                done = (behind.key, front.key) in fitted
+                row.addWidget(pill("Lined up" if done else "By layout", "on" if done else "off"))
+                row.addStretch(1)
+                row.addWidget(button("Line up again…" if done else "Line up overlap…", None,
+                                     lambda _=False, b=behind.key, f=front.key: self.calibrate_fit(b, f)))
+                row.addWidget(button("Fine-tune…", None,
+                                     lambda _=False, b=behind.key, f=front.key: self.tune_fit(b, f)))
+                if done:
+                    row.addWidget(button("Reset", None, lambda _=False, b=behind.key, f=front.key: self.reset_fit(b, f)))
+                self.edges_box.addLayout(row)
         if not seen:
             w = label("No screens of different devices touch, so the pointer can't cross by the edges. "
                       "Move a screen next to another device's.", "warn", wrap=True)

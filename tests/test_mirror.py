@@ -132,10 +132,11 @@ def test_device_states_say_what_to_capture_and_show_in_each_ones_own_pixels():
     lay = desk()
     stream, = streams_for(lay, lay.screen("pc", "main"))
     states = device_states([stream], {"pc": "WKS82261"}, 15)
-    assert states["pc"] == {"captures": [{"id": stream.id, "screen": "main", "os": [800, 400, 200, 200], "fps": 15}],
-                            "shows": []}
+    assert states["pc"] == {"captures": [{"id": stream.id, "screen": "main", "os": [800, 400, 200, 200],
+                                          "screen_os": [0, 0, 1000, 600], "fps": 15}], "shows": []}
     show, = states["lap"]["shows"]
     assert show["os"] == [0, 0, 200, 200] and show["label"] == "WKS82261"
+    assert show["screen_os"] == [0, 0, 500, 300]
     assert set(show["edges"]) == {"right", "bottom"}  # where it ends inside the laptop
 
 
@@ -440,3 +441,319 @@ def test_macos_asks_for_screen_recording_only_with_mirror_mode(monkeypatch):
     assert not macperms.mirror_on({"layout": {"allow_overlap": False, "mirror": True}})
     assert not macperms.mirror_on({"layout": {"allow_overlap": True}})
     assert macperms.PERMISSIONS[macperms.SCREEN_RECORDING].title == "Screen Recording"
+
+
+# -- lining up an overlap (Fit) ------------------------------------------------------------
+
+
+def _fit_layout(fits=()):
+    from curslink.layout import Fit  # noqa: F401
+
+    return Layout.from_devices([
+        Device("mac", "Mac", (Screen("screen2", "mac", 0, 0, 3440, 1440),)),
+        Device("pc", "PC", (Screen("main", "pc", 1000, 1200, 2880, 1536, z=1),)),
+    ], allow_overlap=True, pointer_through=True, mirror=True, fits=fits)
+
+
+def test_without_a_fit_the_layout_overlap_is_mirrored_as_is():
+    lay = _fit_layout()
+    (front, behind, there), = lay.covered_parts(lay.screen("mac", "screen2"))
+    assert front.device_id == "pc" and behind == there == (1000, 1200, 2440, 240)
+
+
+def test_a_fit_says_what_is_really_covered_and_where_it_shows():
+    from curslink.layout import Fit
+
+    # The PC's top-left corner really sits at (1200, 1100) on the Mac, and
+    # one PC pixel is 0.5 Mac pixels: it spans 1440 x 768 Mac pixels there.
+    lay = _fit_layout([Fit(("mac", "screen2"), ("pc", "main"), 1200, 1100, 0.5)])
+    mac = lay.screen("mac", "screen2")
+    (front, behind, there), = lay.covered_parts(mac)
+    assert behind == (1200, 1100, 1440, 340)              # down to the Mac's bottom edge
+    assert there == (1000, 1200, 2880, 680)               # the PC's whole width, its top 680 px
+    stream, = streams_for(lay, mac)
+    states = device_states([stream], {"mac": "Mac"}, 15)
+    assert states["mac"]["captures"][0]["os"] == [1200, 1100, 1440, 340]
+    assert states["pc"]["shows"][0]["os"] == [0, 0, 2880, 680]
+    assert states["pc"]["shows"][0]["edges"] == ["bottom"]
+    assert stream.pointer(1200 + 720, 1100 + 170) == (0.5, 0.5)
+
+
+def test_a_fit_that_misses_the_screen_behind_mirrors_nothing():
+    from curslink.layout import Fit
+
+    lay = _fit_layout([Fit(("mac", "screen2"), ("pc", "main"), 1200, 1500, 0.5)])
+    assert lay.covered_parts(lay.screen("mac", "screen2")) == []
+
+
+def test_fits_are_read_from_the_config_and_checked():
+    from curslink.config import ConfigError, parse_fits
+
+    devices = list(_fit_layout().devices.values())
+    fits = parse_fits([{"behind": "mac/screen2", "front": "pc/main", "x": 1200, "y": 1100.5, "scale": 0.5},
+                       {"behind": "gone/main", "front": "pc/main", "x": 0, "y": 0, "scale": 1}], devices)
+    assert [(f.behind, f.front, f.x, f.y, f.scale) for f in fits] == [(("mac", "screen2"), ("pc", "main"), 1200, 1100.5, 0.5)]
+    with pytest.raises(ConfigError):
+        parse_fits([{"behind": "mac/screen2", "front": "pc/main", "x": 0, "y": 0, "scale": 0}], devices)
+
+
+def test_a_corner_clicked_on_each_screen_gives_the_fit():
+    pytest.importorskip("PySide6.QtCore")
+    from curslink.gui.fitcalib import solve
+
+    # Kyle's desk: the laptop (2880 x 1536) stands in front of the Mac's
+    # bottom-left, its left side past the Mac's left edge. Truth: its
+    # top-left corner at (-700, 1100) on the Mac, 0.5 Mac px per laptop px.
+    k, x, y = 0.5, -700.0, 1100.0
+    top_right_on_mac = (x + 2880 * k, y)                       # the laptop's top-right corner, on the Mac
+    mac_bottom_left_on_laptop = ((0 - x) / k, (1440 - y) / k)  # the Mac's bottom-left corner, behind the laptop
+    got = solve((2880, 0), top_right_on_mac, (0, 1440), mac_bottom_left_on_laptop)
+    assert got == pytest.approx((x, y, k))
+    # Corners too close together along both sides: no answer.
+    assert solve((2880, 0), (100, 100), (0, 1440), (2870, 10)) is None
+
+
+def test_the_corner_asked_for_is_one_on_that_screen():
+    pytest.importorskip("PySide6.QtCore")
+    from curslink.gui.fitcalib import guess_corner
+
+    mac, laptop = (0, 0, 3440, 1440), (-1000, 1200, 2880, 1536)
+    assert guess_corner(laptop, mac) == "top-right"     # the laptop's corner on the Mac
+    assert guess_corner(mac, laptop) == "bottom-left"   # the Mac's corner behind the laptop
+
+
+def test_lining_up_goes_by_a_click_on_each_computer(qapp):
+    from curslink.gui.fitcalib import FitCalibration
+
+    sent = []
+    behind = {"device": "mac", "name": "Mac", "rect": [0, 0, 3440, 1440],
+              "screen": {"id": "screen2", "os_x": 0, "os_y": 0, "width": 3440, "height": 1440}}
+    front = {"device": "pc", "name": "Laptop", "rect": [-1000, 1200, 2880, 1536],
+             "screen": {"id": "main", "os_x": 0, "os_y": 0, "width": 2880, "height": 1536}}
+    cal = FitCalibration(behind, front, "host", sent.append)
+    got = []
+    cal.finished.connect(got.append)
+    assert cal.start() and sent[0] == "pick on"
+    hint = json.loads(sent[1].partition(" ")[2])
+    mac, pc = hint["devices"]["mac"]["screens"][0]["fit"], hint["devices"]["pc"]["screens"][0]["fit"]
+    assert (mac["role"], mac["corner"], "waiting" in mac) == ("behind", "top-right", False)
+    assert (pc["role"], pc["corner"], "waiting" in pc) == ("front", "bottom-left", True)
+    cal.on_event({"event": "picked", "key": "tab"})                      # another corner, and back round
+    assert cal.corners[0] == "bottom-right"
+    for _ in range(3):
+        cal.on_event({"event": "picked", "key": "tab"})
+    cal.on_event({"event": "picked", "device": "pc", "screen": "main", "x": 5, "y": 5})  # not its turn
+    cal.on_event({"event": "picked", "device": "mac", "screen": "screen2", "x": 740, "y": 1100})
+    assert cal.active == 1
+    cal.on_event({"event": "picked", "device": "pc", "screen": "main", "x": 1400, "y": 680})
+    assert got and got[0] == pytest.approx((-700, 1100, 0.5)) and sent[-2:] == ["pick off", 'hint {"devices":{}}']
+
+
+def test_the_fit_layer_paints(qapp):
+    from PySide6.QtCore import QPointF
+    from PySide6.QtGui import QImage, QPainter
+
+    from curslink.gui.fitcalib import FitState, paint_fit
+
+    img = QImage(800, 600, QImage.Format.Format_ARGB32)
+    for st in (FitState("behind", "Laptop", "top-right", pointer=QPointF(400, 300)),
+               FitState("front", "Mac", "bottom-left", point=QPointF(10, 10), step=2),
+               FitState("front", "Mac", "bottom-left", waiting="Next, on Laptop")):
+        p = QPainter(img)
+        paint_fit(p, img.rect().toRectF(), st)
+        p.end()
+
+
+def test_a_fit_hanging_off_the_side_mirrors_into_the_right_corner():
+    from curslink.layout import Fit
+
+    # The laptop's left part sticks out past the Mac's left edge: what it
+    # covers is the Mac's bottom-left, shown in the laptop's top-right.
+    lay = _fit_layout([Fit(("mac", "screen2"), ("pc", "main"), -700, 1100, 0.5)])
+    (front, behind, there), = lay.covered_parts(lay.screen("mac", "screen2"))
+    assert behind == (0, 1100, 740, 340)
+    assert there == (front.x + 1400, front.y, 1480, 680)
+
+
+def test_fine_tuning_changes_the_mirror_at_once_and_holds_it_up():
+    lines = []
+    transport = Transport({"lap"}, {"lap"})
+    host, router, _local = make_host(desk(), transport, lines)
+    # Using the laptop: nothing mirrored, until fine-tuning holds the PC's screen up.
+    router.switch_to(router.layout.screen("lap", "main"), 1200, 600, "edge")
+    assert transport.of("mirror", "lap")[-1]["shows"] == []
+    host.fit({"behind": "pc/main", "front": "lap/main", "x": 850, "y": 450, "scale": 1, "hold": True})
+    state = json.loads(lines[-1].partition(" ")[2])
+    assert [c["os"] for c in state["captures"]] == [[850, 450, 150, 150]]
+    # A nudge without "hold" keeps it held.
+    host.fit({"behind": "pc/main", "front": "lap/main", "x": 860, "y": 450, "scale": 1})
+    assert [c["os"] for c in json.loads(lines[-1].partition(" ")[2])["captures"]] == [[860, 450, 140, 150]]
+    # Letting go goes back to the screen in use: the laptop.
+    host.fit({"behind": "pc/main", "front": "lap/main", "x": 860, "y": 450, "scale": 1, "hold": False})
+    assert transport.of("mirror", "lap")[-1]["shows"] == []
+    assert router.layout.fit(router.layout.screen("pc", "main"), router.layout.screen("lap", "main")).x == 860
+
+
+def test_bad_fit_commands_change_nothing():
+    from curslink.mirror import apply_fit
+
+    lay = desk()
+    assert apply_fit(lay, {"behind": "pc/nope", "front": "lap/main", "x": 1, "y": 1, "scale": 1}) is None
+    assert apply_fit(lay, {"behind": "pc/main", "front": "lap/main", "x": 1, "y": 1, "scale": 0}) is None
+    assert apply_fit(lay, {"behind": "pc", "front": "lap/main", "x": 1, "y": 1, "scale": 1}) is None
+    assert lay.fits == ()
+    assert apply_fit(lay, {"behind": "pc/main", "front": "lap/main", "x": 1, "y": 2, "scale": 0.5}) == (1, 2, 0.5)
+    # Without a calibrated fit it goes back to the layout's.
+    assert apply_fit(lay, {"behind": "pc/main", "front": "lap/main", "reset": True}) == (800, 400, 1.0)
+    assert lay.fits == ()
+
+
+def test_fine_tuning_moves_and_grows_from_the_fit_in_use():
+    from curslink.mirror import apply_fit
+
+    lay = desk()
+    # Picture right by 5 and down by 2: the laptop sits that much up-left on the PC.
+    assert apply_fit(lay, {"behind": "pc/main", "front": "lap/main", "dx": 5, "dy": 2}) == (795, 398, 1.0)
+    x, y, k = apply_fit(lay, {"behind": "pc/main", "front": "lap/main", "grow": 2})
+    assert k == 0.5
+    # The middle of the covered part (897.5, 499) stays put on the laptop.
+    assert (round(x + k * (897.5 - 795)), round(y + k * (499 - 398))) == (898, 499)
+
+
+def test_nudging_and_growing_keep_the_covered_middle_in_place():
+    from curslink.mirror import grow, nudge
+
+    assert nudge((100, 50, 2.0), 3, -1) == (97, 51, 2.0)
+    behind, front = (1000, 600), (500, 300)
+    x, y, k = 800, 400, 1.0  # covers 800..1000 x 400..600; middle (900, 500) is (100, 100) on the front
+    x2, y2, k2 = grow((x, y, k), 2.0, behind, front)
+    assert k2 == 0.5
+    assert (x2 + k2 * 100, y2 + k2 * 100) == (900, 500)
+
+
+def test_fine_tune_dialog_sends_nudges_and_saves_what_the_service_says(qapp):
+    from PySide6.QtCore import QEvent, Qt
+    from PySide6.QtGui import QKeyEvent
+
+    from curslink.gui.fittune import FitTuneDialog
+
+    sent, saved = [], []
+    b = {"key": "pc/main", "name": "PC"}
+    f = {"key": "lap/main", "name": "Laptop"}
+    d = FitTuneDialog(b, f, None, sent.append)
+    d.saved.connect(saved.append)
+    last = lambda: json.loads(sent[-1][4:])  # noqa: E731
+    assert last() == {"behind": "pc/main", "front": "lap/main", "hold": True}
+    d.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Right, Qt.KeyboardModifier.NoModifier))
+    assert last()["dx"] == 1 and last()["dy"] == 0
+    d.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Down, Qt.KeyboardModifier.ShiftModifier))
+    assert last()["dy"] == 10
+    d.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Plus, Qt.KeyboardModifier.NoModifier))
+    assert last()["grow"] > 1
+    d.on_event({"event": "fit", "behind": "pc/main", "front": "lap/main", "x": 799, "y": 390, "scale": 0.99})
+    d.on_event({"event": "fit", "behind": "other/main", "front": "lap/main", "x": 1, "y": 1, "scale": 1})
+    d.accept()
+    assert last()["hold"] is False and saved == [(799, 390, 0.99)]
+    # Cancel puts the calibrated fit back (or drops the one being tried).
+    d2 = FitTuneDialog(b, f, (800, 400, 1.0), sent.append)
+    d2.move_by(5, 5)
+    d2.reject()
+    assert last() == {"behind": "pc/main", "front": "lap/main", "x": 800, "y": 400, "scale": 1.0, "hold": False}
+    d3 = FitTuneDialog(b, f, None, sent.append)
+    d3.reject()
+    assert last() == {"behind": "pc/main", "front": "lap/main", "reset": True, "hold": False}
+    import shiboken6
+
+    for dialog in (d, d2, d3):  # gone before the app is, or Qt crashes on the way out
+        shiboken6.delete(dialog)
+
+
+def test_real_sizes_give_the_mirror_its_size_without_lining_up():
+    # Kyle's desk: a 34" 3440x1440 ultrawide behind a 15.6" 1920x1080 laptop.
+    devices = [
+        Device("mac", "Mac", (Screen("wide", "mac", 0, 0, 3440, 1440),)),
+        Device("pc", "Laptop", (Screen("main", "pc", 0, 1000, 1920, 1080, z=1),)),
+    ]
+    lay = Layout.from_devices(devices, allow_overlap=True, mirror=True)
+    wide, lap = lay.screen("mac", "wide"), lay.screen("pc", "main")
+    assert lay.sized_fit(wide, lap) is None
+    assert lay.set_physical("mac", [{"x": 0, "y": 0, "width": 3440, "height": 1440,
+                                     "width_mm": 800, "height_mm": 335}])
+    assert lay.set_physical("pc", [{"x": 0, "y": 0, "width": 1920, "height": 1080,
+                                    "width_mm": 344, "height_mm": 194}])
+    assert not lay.set_physical("pc", [{"x": 0, "y": 0, "width": 1920, "height": 1080,
+                                        "width_mm": 344, "height_mm": 194}])
+    f = lay.sized_fit(wide, lap)
+    # One laptop pixel (0.18 mm) is about 0.77 of the ultrawide's (0.23 mm).
+    assert f.scale == pytest.approx(0.77, abs=0.01)
+    # Its middle stays where the layout has it.
+    assert (f.x + f.scale * 960, f.y + f.scale * 540) == pytest.approx((960, 1540))
+    (front, behind, there), = lay.covered_parts(wide)
+    assert there[2] == 1920  # the whole width of the laptop shows the Mac
+    assert behind[2] == pytest.approx(1920 * f.scale, abs=1)
+    # A calibrated fit still wins.
+    from curslink.layout import Fit
+
+    lay.fits = (Fit(("mac", "wide"), ("pc", "main"), 10, 1100, 0.5),)
+    assert lay.covered_parts(wide)[0][1][:2] == (10, 1100)
+
+
+def test_screen_sizes_are_matched_and_checked():
+    from curslink.screensize import match, plausible
+
+    assert plausible(1920, 1080, 344, 194)
+    assert not plausible(1920, 1080, 0, 0)
+    assert not plausible(1920, 1080, 160, 90 * 3)  # aspect doesn't fit its pixels
+    assert not plausible(1920, 1080, 16, 9)  # 120 px per mm: a made-up EDID
+    sizes = [{"x": 0, "y": 0, "width": 1920, "height": 1080, "width_mm": 344, "height_mm": 194},
+             {"x": 1920, "y": 0, "width": 2560, "height": 1440, "width_mm": 597, "height_mm": 336}]
+    assert match(sizes, 1920, 0, 2560, 1440) == (597, 336)
+    assert match(sizes, -500, 0, 2560, 1440) == (597, 336)  # moved, but the only one that size
+    assert match(sizes + sizes[1:], -500, 0, 2560, 1440) is None
+    assert match(sizes, 0, 0, 1280, 720) is None
+    # One monitor, laid out in logical pixels but measured in physical ones.
+    assert match(sizes[:1], 0, 0, 1280, 720) == (344, 194)
+    assert match(sizes[:1], 0, 0, 1280, 1024) is None
+
+
+async def test_a_mirroring_agent_says_how_big_its_screens_are_in_hello(monkeypatch):
+    import asyncio
+
+    import curslink.screensize
+    from conftest import FakeSink as Sink
+    from curslink.net.client import AgentClient, AgentSession
+    from curslink.net.server import HostServer
+    from curslink.security import client_context, server_context
+
+    sizes = [{"x": 0, "y": 0, "width": 1920, "height": 1080, "width_mm": 344.0, "height_mm": 194.0}]
+    monkeypatch.setattr(curslink.screensize, "physical_sizes", lambda: sizes)
+    server = HostServer({"laptop"}, server_context("correct horse battery staple"), host="127.0.0.1", port=0)
+    await server.start()
+    session = AgentSession(Sink(), lambda e, x, y: None)
+    session.mirror = object()
+    client = AgentClient("laptop", "Laptop", "127.0.0.1", server.port, client_context("correct horse battery staple"), session)
+    task = asyncio.create_task(client.run_once())
+    try:
+        for _ in range(500):
+            if server.is_connected("laptop"):
+                break
+            await asyncio.sleep(0.01)
+        assert server.connections["laptop"].screen_mm == sizes
+    finally:
+        await server.close()
+        await asyncio.wait_for(task, 3)
+
+
+def test_mirror_rects_go_by_fractions_of_the_whole_screen(qapp):
+    # Kyle's laptop: the layout has it at 1920x1080, Qt sees it at another
+    # size (Windows scaling), but the pointer goes by fractions: so must the capture.
+    from PySide6.QtGui import QGuiApplication
+
+    from curslink.mirror.helper import spec_to_logical
+
+    g = QGuiApplication.primaryScreen().geometry()
+    x, y, w, h, index = spec_to_logical({"screen": "main", "os": [960, 540, 480, 270],
+                                          "screen_os": [0, 0, 1920, 1080]})
+    assert (x, y, w, h) == pytest.approx((g.x() + g.width() / 2, g.y() + g.height() / 2, g.width() / 4,
+                                          g.height() / 4))
+    assert QGuiApplication.screens()[index] == QGuiApplication.primaryScreen()

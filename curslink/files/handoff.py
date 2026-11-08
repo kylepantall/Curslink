@@ -92,6 +92,7 @@ class DragHandoff:
         drag_source: Callable[[], tuple[int, list[str]] | None] | None = None,
         native_press: Callable[[], None] | None = None,
         release_held: Callable[[], None] = lambda: None,
+        follow=None,
     ):
         """``helper(line)`` sends a command to the overlay helper;
         ``inject("nudge" | "release")`` (blocking, run off the loop) moves the
@@ -131,7 +132,7 @@ class DragHandoff:
         popups = ReceivePopups(helper, emit)
         self.receiver = FileReceiver(None, popups)
         self.native = NativeDrop(helper, self.receiver, popups, press=native_press, release=release_held,
-                                 cancel=lambda: inject("release"))
+                                 cancel=lambda: inject("release"), follow=follow)
         self.carry_out: Outgoing | None = None  # files on their way to the device carrying the drag
         router.can_drag_out = lambda device_id: server.supports(device_id, FILES_OUT_FEATURE)
         router.drag_out = self.ask_drag_out

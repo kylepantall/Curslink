@@ -10,7 +10,7 @@ from typing import Any
 
 from curslink.gaze.confirm import ConfirmSettings, FacingSettings
 from curslink.gaze.zones import GazeSettings
-from curslink.layout import SIDES, Device, EdgeEnd, EdgeLink, Layout, Screen
+from curslink.layout import SIDES, Device, EdgeEnd, EdgeLink, Fit, Layout, Screen
 from curslink.inputs.keys import OS_KINDS, KeyMaps, expand_map
 from curslink.pairing.service import DEFAULT_PAIRING_PORT
 from curslink.net.relay import (
@@ -272,7 +272,7 @@ def parse_layout(raw: dict[str, Any]) -> Layout:
     mirror = mirror and allow_overlap
     try:
         return Layout.from_devices(devices, allow_overlap, links, pointer_through=mirror and mirror_pointer,
-                                   mirror=mirror)
+                                   mirror=mirror, fits=parse_fits(raw.get("layout", {}).get("fit", []), devices))
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
 
@@ -312,6 +312,39 @@ def parse_links(value: Any, devices: list[Device]) -> list[EdgeLink]:
             ends.append(EdgeEnd(device_id, screen_id, side, float(span[0]), float(span[1])))
         if all((e.device_id, e.screen_id) in known for e in ends):
             out.append(EdgeLink(*ends))
+    return out
+
+
+def parse_fits(value: Any, devices: list[Device]) -> list[Fit]:
+    """``[[layout.fit]]``: calibrated overlaps, where a screen in front
+    really stands on the one behind it (see curslink.layout.Fit)::
+
+        [[layout.fit]]
+        behind = "wks82261/screen2"
+        front = "kyles-pc/main"
+        x = 1210.0      # its top-left corner, px from the top-left of the screen behind
+        y = 1090.0
+        scale = 0.42    # px of the screen behind to one of its own
+
+    One naming a screen no longer in the layout is skipped."""
+    if not isinstance(value, list):
+        raise ConfigError("[layout].fit must be a list of [[layout.fit]] tables")
+    known = {(d.id, s.id) for d in devices for s in d.screens}
+    out = []
+    for i, t in enumerate(value):
+        if not isinstance(t, dict):
+            raise ConfigError("every [[layout.fit]] entry must be a table")
+        refs = []
+        for k in ("behind", "front"):
+            ref = t.get(k)
+            if not isinstance(ref, str) or "/" not in ref:
+                raise ConfigError(f'[[layout.fit]] #{i + 1}: {k} must be "device/screen"')
+            refs.append(tuple(ref.split("/", 1)))
+        nums = [t.get(k) for k in ("x", "y", "scale")]
+        if not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in nums) or not nums[2] > 0:
+            raise ConfigError(f"[[layout.fit]] #{i + 1}: x and y must be numbers and scale more than 0")
+        if all(r in known for r in refs):
+            out.append(Fit(refs[0], refs[1], float(nums[0]), float(nums[1]), float(nums[2])))
     return out
 
 

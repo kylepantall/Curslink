@@ -377,7 +377,8 @@ class EdgeCalibration(QObject):
 
 class RemoteEdges:
     """On a paired computer: the edge layers the host's calibration asks for
-    (through ``hint`` entries with an ``edge``). Click-through: the host
+    (through ``hint`` entries with an ``edge``), or the overlap it's lining
+    up (a ``fit``, see curslink.gui.fitcalib). Click-through: the host
     catches the clicks."""
 
     def __init__(self):
@@ -386,17 +387,27 @@ class RemoteEdges:
     def show(self, entries: list[dict]) -> None:
         from curslink.gui.overlay import find_qscreen
 
+        from curslink.gui.fitcalib import FitWindow
+        from curslink.gui.fitcalib import state_from as fit_state
+
         wanted = {}
         for entry in entries:
             qscreen = find_qscreen(entry["screen"], entry.get("os"))
-            state = state_from(qscreen, entry) if qscreen is not None else None
+            if qscreen is None:
+                continue
+            fit = "fit" in entry
+            state = fit_state(qscreen, entry) if fit else state_from(qscreen, entry)
             if state is None:
                 continue
+            kind = FitWindow if fit else EdgeWindow
             key = qscreen.name() or entry["screen"]
             wanted[key] = state
             window = self.windows.get(key)
+            if window is not None and not isinstance(window, kind):
+                self.windows.pop(key).deleteLater()
+                window = None
             if window is None:
-                window = EdgeWindow(qscreen, state, clickable=False)
+                window = kind(qscreen, state, clickable=False)
                 self.windows[key] = window
                 window.show()
                 window.raise_()
