@@ -32,7 +32,7 @@ for what to capture and where to show it (:meth:`Layout.covered_parts`).
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Iterable
 
 
@@ -279,6 +279,50 @@ class Layout:
         return Fit((behind.device_id, behind.id), (front.device_id, front.id),
                    cx - behind.x - k * front.width / 2, cy - behind.y - k * front.height / 2, k)
 
+    def pair_fit(self, a: Screen, b: Screen) -> tuple[bool, Fit] | None:
+        """In mirror mode, the fit between two overlapping screens either way
+        round (calibrated, or from their real sizes): (``a`` is the one
+        behind, the fit), or None."""
+        if not self.mirror or a.device_id == b.device_id:
+            return None
+        if min(a.right, b.right) <= max(a.x, b.x) or min(a.bottom, b.bottom) <= max(a.y, b.y):
+            return None  # they don't overlap
+        for behind, front, a_behind in ((a, b, True), (b, a, False)):
+            if not self.allow_overlap or not self.in_front(front, behind):
+                continue
+            f = self.fit(behind, front) or self.sized_fit(behind, front)
+            if f is not None:
+                return a_behind, f
+        return None
+
+    def scale_between(self, src: Screen, dst: Screen) -> float:
+        """``src``'s pixels per ``dst`` pixel where they really meet (1 as laid out)."""
+        found = self.pair_fit(src, dst)
+        if found is None:
+            return 1.0
+        src_behind, f = found
+        return f.scale if src_behind else 1 / f.scale
+
+    def map_point(self, src: Screen, dst: Screen, x: float, y: float) -> tuple[float, float]:
+        """A layout point by ``src`` to where it really is in ``dst``'s layout
+        pixels: through their fit in mirror mode, else the same point."""
+        found = self.pair_fit(src, dst)
+        if found is None:
+            return x, y
+        src_behind, f = found
+        if src_behind:  # behind -> front
+            return dst.x + (x - src.x - f.x) / f.scale, dst.y + (y - src.y - f.y) / f.scale
+        return dst.x + f.x + (x - src.x) * f.scale, dst.y + f.y + (y - src.y) * f.scale
+
+    def placed(self, dst: Screen, src: Screen) -> Screen:
+        """``dst`` where it really stands in ``src``'s layout pixels (itself
+        when there's no fit between them)."""
+        if self.pair_fit(src, dst) is None:
+            return dst
+        x0, y0 = self.map_point(dst, src, dst.x, dst.y)
+        x1, y1 = self.map_point(dst, src, dst.right, dst.bottom)
+        return replace(dst, x=round(x0), y=round(y0), width=max(1, round(x1 - x0)), height=max(1, round(y1 - y0)))
+
     def covered_parts(self, screen: Screen) -> list[tuple[Screen, tuple[int, int, int, int], tuple[int, int, int, int]]]:
         """Like :meth:`covering`, as ``(front, part behind, part in front)``,
         both in layout pixels: the part of ``screen`` that ``front`` covers,
@@ -453,7 +497,12 @@ class Layout:
             px, py = nx + ux * step, ny + uy * step
             target = self.screen_at(px, py)
             if target is not None and target.device_id != from_device and (target.device_id, target.id) not in skip:
-                ex, ey = target.clamp(px + ux * entry_inset, py + uy * entry_inset)
+                ex, ey = px + ux * entry_inset, py + uy * entry_inset
+                here = self.screen_at(x, y, from_device)
+                if here is not None:
+                    # Overlapping in mirror mode: where that point really is on the target.
+                    ex, ey = self.map_point(here, target, ex, ey)
+                ex, ey = target.clamp(ex, ey)
                 return Crossing(target, ex, ey)
             if step and (ux, uy) == (0.0, 0.0):
                 break

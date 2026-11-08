@@ -231,9 +231,18 @@ def find_hint(layout: Layout, device_id: str, x: float, y: float,
             continue
         at = _along(here, side, ex, ey)
         target = crossing.screen
-        a, b, target_side, ta, tb = _stretch(layout, here, side, at, target)
+        # Overlapping in mirror mode, the target where it really stands
+        # (curslink.layout.Fit), in here's pixels; k of them per target pixel.
+        placed = layout.placed(target, here)
+        k = layout.scale_between(here, target)
+        a, b, target_side, ta, tb = _stretch(layout, here, side, at, placed)
+        ta, tb = ta / k, tb / k
         if target_side == OPPOSITE[side]:
-            trect, target_side = _entry_rect(target, side, _boundary(here, side))
+            trect, target_side = _entry_rect(placed, side, _boundary(here, side))
+            if placed is not target:
+                rx, ry, rw, rh = trect
+                trect = (round(target.x + (rx - placed.x) / k), round(target.y + (ry - placed.y) / k),
+                         max(1, round(rw / k)), max(1, round(rh / k)))
         else:  # an edge link joining other sides: its own side of the screen
             trect = _whole(target)
         tat = _along(target, target_side, crossing.x, crossing.y)
