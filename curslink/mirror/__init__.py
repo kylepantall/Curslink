@@ -34,7 +34,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable
 
-from curslink.layout import Layout, Screen
+from curslink.layout import Fit, Layout, Screen
 
 log = logging.getLogger(__name__)
 
@@ -102,6 +102,33 @@ def streams_for(layout: Layout, screen: Screen, can: Callable[[str], bool] = lam
         return []
     return [Stream(screen, front, rect, None if there == rect else there)
             for front, rect, there in layout.covered_parts(screen) if can(front.device_id)]
+
+
+def apply_fit(layout: Layout, data: dict) -> bool:
+    """Change one calibrated overlap in ``layout`` right away, for fine-tuning
+    from the Layout page (the ``fit {...}`` command): ``{"behind": "device/screen",
+    "front": "device/screen", "x", "y", "scale"}``, or ``"reset": true`` to drop
+    it. False if it doesn't name two screens of the layout."""
+    try:
+        behind = tuple(str(data["behind"]).split("/", 1))
+        front = tuple(str(data["front"]).split("/", 1))
+        if len(behind) != 2 or len(front) != 2:
+            return False
+        layout.screen(*behind)
+        layout.screen(*front)
+    except (KeyError, ValueError, TypeError):
+        return False
+    keep = tuple(f for f in layout.fits if (f.behind, f.front) != (behind, front))
+    if not data.get("reset"):
+        try:
+            x, y, k = float(data["x"]), float(data["y"]), float(data["scale"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        if not k > 0:
+            return False
+        keep += (Fit(behind, front, x, y, k),)
+    layout.fits = keep
+    return True
 
 
 def device_states(streams: list[Stream], names: dict[str, str], fps: int) -> dict[str, dict]:
@@ -286,6 +313,8 @@ class MirrorHost:
         self._pointer: dict[str, tuple[float, float] | None] = {}
         self._pointer_at = 0.0
         self._logged: set[str] = set()
+        # Fine-tuning an overlap: mirror the screen behind it, wherever the pointer is.
+        self.held: Screen | None = None
 
     def can(self, device_id: str) -> bool:
         if device_id == self.local_id:
@@ -297,8 +326,23 @@ class MirrorHost:
         self._screen = None
         self.update()
 
+    def hold(self, screen: Screen | None) -> None:
+        """Mirror ``screen`` as if it were in use (None: back to the pointer's)."""
+        self.held = screen
+        self.refresh()
+
+    def fit(self, data: dict) -> None:
+        """The ``fit {...}`` command (see :func:`apply_fit`); ``"hold": true``
+        keeps the screen behind mirrored while fine-tuning, ``"hold": false``
+        lets go."""
+        if apply_fit(self.layout, data) and "hold" in data:
+            device, screen_id = str(data["behind"]).split("/", 1)
+            self.hold(self.layout.screen(device, screen_id) if data["hold"] else None)
+        else:
+            self.refresh()
+
     def update(self) -> None:
-        screen = self.router.screen
+        screen = self.held or self.router.screen
         if screen != self._screen:
             self._screen = screen
             self._plan(screen)

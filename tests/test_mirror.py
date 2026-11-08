@@ -572,3 +572,72 @@ def test_a_fit_hanging_off_the_side_mirrors_into_the_right_corner():
     (front, behind, there), = lay.covered_parts(lay.screen("mac", "screen2"))
     assert behind == (0, 1100, 740, 340)
     assert there == (front.x + 1400, front.y, 1480, 680)
+
+
+def test_fine_tuning_changes_the_mirror_at_once_and_holds_it_up():
+    lines = []
+    transport = Transport({"lap"}, {"lap"})
+    host, router, _local = make_host(desk(), transport, lines)
+    # Using the laptop: nothing mirrored, until fine-tuning holds the PC's screen up.
+    router.switch_to(router.layout.screen("lap", "main"), 1200, 600, "edge")
+    assert transport.of("mirror", "lap")[-1]["shows"] == []
+    host.fit({"behind": "pc/main", "front": "lap/main", "x": 850, "y": 450, "scale": 1, "hold": True})
+    state = json.loads(lines[-1].partition(" ")[2])
+    assert [c["os"] for c in state["captures"]] == [[850, 450, 150, 150]]
+    # A nudge without "hold" keeps it held.
+    host.fit({"behind": "pc/main", "front": "lap/main", "x": 860, "y": 450, "scale": 1})
+    assert [c["os"] for c in json.loads(lines[-1].partition(" ")[2])["captures"]] == [[860, 450, 140, 150]]
+    # Letting go goes back to the screen in use: the laptop.
+    host.fit({"behind": "pc/main", "front": "lap/main", "x": 860, "y": 450, "scale": 1, "hold": False})
+    assert transport.of("mirror", "lap")[-1]["shows"] == []
+    assert router.layout.fit(router.layout.screen("pc", "main"), router.layout.screen("lap", "main")).x == 860
+
+
+def test_bad_fit_commands_change_nothing():
+    from curslink.mirror import apply_fit
+
+    lay = desk()
+    assert not apply_fit(lay, {"behind": "pc/nope", "front": "lap/main", "x": 1, "y": 1, "scale": 1})
+    assert not apply_fit(lay, {"behind": "pc/main", "front": "lap/main", "x": 1, "y": 1, "scale": 0})
+    assert not apply_fit(lay, {"behind": "pc", "front": "lap/main", "x": 1, "y": 1, "scale": 1})
+    assert lay.fits == ()
+    assert apply_fit(lay, {"behind": "pc/main", "front": "lap/main", "x": 1, "y": 2, "scale": 0.5})
+    assert apply_fit(lay, {"behind": "pc/main", "front": "lap/main", "reset": True}) and lay.fits == ()
+
+
+def test_nudging_and_growing_keep_the_covered_middle_in_place():
+    from curslink.gui.fittune import grow, nudge
+
+    assert nudge((100, 50, 2.0), 3, -1) == (97, 51, 2.0)
+    behind, front = (1000, 600), (500, 300)
+    x, y, k = 800, 400, 1.0  # covers 800..1000 x 400..600; middle (900, 500) is (100, 100) on the front
+    x2, y2, k2 = grow((x, y, k), 2.0, behind, front)
+    assert k2 == 0.5
+    assert (x2 + k2 * 100, y2 + k2 * 100) == (900, 500)
+
+
+def test_fine_tune_dialog_sends_each_change_and_saves_or_puts_back(qapp):
+    from PySide6.QtCore import QEvent, Qt
+    from PySide6.QtGui import QKeyEvent
+
+    from curslink.gui.fittune import FitTuneDialog
+
+    sent, saved = [], []
+    b = {"key": "pc/main", "name": "PC", "size": (1000, 600)}
+    f = {"key": "lap/main", "name": "Laptop", "size": (500, 300)}
+    d = FitTuneDialog(b, f, (800, 400, 1.0), sent.append)
+    d.saved.connect(saved.append)
+    last = lambda: json.loads(sent[-1][4:])  # noqa: E731
+    assert last()["hold"] is True
+    d.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Right, Qt.KeyboardModifier.NoModifier))
+    assert last()["x"] == 799 and "hold" not in last()
+    d.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Down, Qt.KeyboardModifier.ShiftModifier))
+    assert last()["y"] == 390
+    d.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Plus, Qt.KeyboardModifier.NoModifier))
+    assert last()["scale"] < 1
+    d.accept()
+    assert last()["hold"] is False and saved and saved[0][2] < 1
+    d2 = FitTuneDialog(b, f, (800, 400, 1.0), sent.append)
+    d2.move_by(5, 5)
+    d2.reject()
+    assert last() == {"behind": "pc/main", "front": "lap/main", "x": 800, "y": 400, "scale": 1.0, "hold": False}

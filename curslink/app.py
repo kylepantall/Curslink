@@ -351,6 +351,8 @@ async def run_host(cfg: HostConfig) -> None:
             look_command(server, line[5:])
         elif line.startswith("hint "):
             hint_command(server, line[5:])
+        elif line.startswith("fit "):
+            fit_command(mirror, line[4:])
         elif line == "pick on":
             # The Layout page is calibrating an edge: clicks on other computers are for it.
             router.picker = lambda data: events.emit("picked", **data)
@@ -668,6 +670,23 @@ def host_command(router: Router, stop: asyncio.Event, command: str) -> None:
         router.set_gaze_paused(not router.gaze_paused)
     else:
         log.debug("unknown command %r", command)
+
+
+def fit_command(mirror, payload: str) -> None:
+    """``fit {"behind": ..., "front": ..., "x", "y", "scale", "hold"}``: the
+    Layout page fine-tuning an overlap; mirror mode follows at once."""
+    import json
+
+    if mirror is None:
+        return
+    try:
+        data = json.loads(payload)
+        if not isinstance(data, dict):
+            raise ValueError("not an object")
+    except ValueError as exc:
+        log.debug("bad fit command %r: %s", payload, exc)
+        return
+    mirror.fit(data)
 
 
 def look_command(server: HostServer, payload: str) -> None:

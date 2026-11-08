@@ -737,6 +737,55 @@ class LayoutPage(Page):
         self.refresh_edges()
         self._say_edge("Overlap lined up. Mirror mode now shows exactly what the screen in front covers.")
 
+    def tune_fit(self, behind: str, front: str) -> None:
+        """Nudge the mirror by eye while it's showing (see curslink.gui.fittune)."""
+        from curslink.gui.fittune import FitTuneDialog
+        from curslink.gui.service import RUNNING
+
+        if self.calibration is not None:
+            return
+        if self.dirty:
+            self._say_edge("Save the layout first, then fine-tune the overlap.")
+            return
+        cfg = self.app.config()
+        if not cfg.get("layout", "mirror", False):
+            self._say_edge("Turn on mirror mode first (Settings › Overlapping screens), then fine-tune it here.")
+            return
+        if self.app.service.state != RUNNING:
+            self._say_edge("Start linking first: you fine-tune the mirror while it's showing.")
+            return
+        items = {i.key: i for i in self.items}
+        b, f = items.get(behind), items.get(front)
+        if b is None or f is None:
+            return
+        bx, by, bw, bh = b.layout_rect()
+        fx, fy, fw, fh = f.layout_rect()
+        start = (float(fx - bx), float(fy - by), 1.0)
+        for t in cfg.fits():
+            if (t.get("behind"), t.get("front")) == (behind, front):
+                try:
+                    start = (float(t["x"]), float(t["y"]), float(t["scale"]))
+                except (KeyError, TypeError, ValueError):
+                    pass
+        dialog = FitTuneDialog({"key": behind, "name": b.device_name, "size": (bw, bh)},
+                               {"key": front, "name": f.device_name, "size": (fw, fh)},
+                               start, self.app.service.send, self)
+        dialog.saved.connect(lambda fit, b=behind, f=front: self.fit_tuned(b, f, fit))
+        self.calibration = dialog
+        dialog.finished.connect(lambda _code: setattr(self, "calibration", None))
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def fit_tuned(self, behind: str, front: str, fit) -> None:
+        cfg = self.app.config()
+        cfg.set_fit(behind, front, *fit)
+        cfg.save()
+        # The service already has it (the fit command), so no restart.
+        self.app.config_saved(restart=False)
+        self.refresh_edges()
+        self._say_edge("Overlap fine-tuned and saved.")
+
     def reset_fit(self, behind: str, front: str) -> None:
         cfg = self.app.config()
         if cfg.remove_fit(behind, front):
@@ -908,6 +957,8 @@ class LayoutPage(Page):
                 row.addStretch(1)
                 row.addWidget(button("Line up again…" if done else "Line up overlap…", None,
                                      lambda _=False, b=behind.key, f=front.key: self.calibrate_fit(b, f)))
+                row.addWidget(button("Fine-tune…", None,
+                                     lambda _=False, b=behind.key, f=front.key: self.tune_fit(b, f)))
                 if done:
                     row.addWidget(button("Reset", None, lambda _=False, b=behind.key, f=front.key: self.reset_fit(b, f)))
                 self.edges_box.addLayout(row)
