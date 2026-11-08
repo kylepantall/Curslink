@@ -99,7 +99,7 @@ class NativeDrop:
         real drag (Downloads by default). ``follow``: an object whose
         ``tick(now)`` runs every FOLLOW_EVERY_S while a real drag is held and
         ``reset()`` when one starts (the Mac brings the window under the
-        pointer forward; see curslink.files.macfocus)."""
+        pointer forward; see curslink.files.focus)."""
         self.helper = helper
         self.receiver = receiver
         self.popups = popups

@@ -479,7 +479,7 @@ def start_file_drags(cfg: HostConfig, router: Router, server: HostServer, overla
     # held back until they're all here, which the Mac's event tap can do.
     native_press = follow = None
     if sys.platform == "darwin":
-        from curslink.files.macfocus import FocusFollower
+        from curslink.files.focus import FocusFollower
         from curslink.inputs.pynput_backend import press_left_here as native_press
 
         # Apps under a drag from another computer take it only once in front.
@@ -1095,9 +1095,15 @@ def receive_files(cfg: AgentConfig, session: AgentSession, overlay):
 
     # A real drag needs the injected button-down and moves to drive it, which
     # Windows' drag and drop follows; elsewhere the files go to Downloads.
+    follow = None
+    if sys.platform == "win32":
+        from curslink.files.focus import FocusFollower
+
+        # Bring the window under a held drag forward, as on a Mac host.
+        follow = FocusFollower(lambda: {overlay.pid} if getattr(overlay, "pid", None) else set())
     native = NativeDrop(overlay.command, receiver, popups,
                         press=(lambda: sink.button("left", True)) if sys.platform == "win32" else None,
-                        release=lambda: sink.button("left", False), cancel=cancel_drag)
+                        release=lambda: sink.button("left", False), cancel=cancel_drag, follow=follow)
     clean_old()
 
     def on_drag(data: dict) -> None:
