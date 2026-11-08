@@ -43,8 +43,9 @@ class FitTuneDialog(QDialog):
         self.setWindowTitle("Fine-tune overlap")
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         lay = QVBoxLayout(self)
-        intro = QLabel(f"The mirror on {front['name']} is outlined. Sit where you normally do and adjust it "
-                       f"right there until it carries on from {behind['name']} behind it:\n\n"
+        intro = QLabel(f"Coloured lines and a ring now cross {behind['name']}, and the mirror on {front['name']} "
+                       "draws them too. Sit where you normally do and adjust the mirror right there until every "
+                       "line carries on straight past the bezel and the ring is round:\n\n"
                        "• drag it to move it\n• scroll on it to zoom\n• drag a side or corner to stretch it\n\n"
                        "Then Save here.")
         intro.setWordWrap(True)

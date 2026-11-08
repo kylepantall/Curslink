@@ -235,6 +235,14 @@ front of it shows the part it covers, live (`curslink.mirror`).
   it) and reports drags, side stretches and wheel zooms as `mirror_tune`
   frames; `MirrorHost.tune` turns them into `fit` changes. Save writes the
   `[[layout.fit]]` without a restart.
+- Alignment guides while adjusting: the capture and show specs carry
+  `guides`, the covered area when adjusting began (in the screen behind's
+  OS pixels; it stays put so only the mirror's copy moves), and the show
+  also `src`, what it shows. The helper behind draws coloured lines and a
+  ring across the whole screen there (`GuideOverlay`, kept out of the
+  capture) and the mirror draws the same ones mapped through `src`; it's
+  lined up when they carry on unbroken past the bezel. After the click
+  line-up in mirror mode the Layout page goes straight on to this.
 - Curslink's own overlay windows (the edge indicator, mirrors) are kept out
   of captures (`curslink.capturehide`; on macOS the capture also leaves out
   the helper's own windows), so they don't show up twice.

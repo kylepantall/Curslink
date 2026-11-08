@@ -866,3 +866,66 @@ def test_a_mirror_being_adjusted_takes_drags_and_the_wheel(qapp):
     window.grab()  # paints the outline and hint without trouble
     helper.handle('mirror {"captures": [], "shows": []}')
     qapp.processEvents()
+
+
+def test_adjusting_puts_guides_on_both_screens_that_stay_put_behind():
+    transport = Transport({"lap"}, {"lap"})
+    host, router, local = make_host(desk(), transport, [])
+    host.fit({"behind": "pc/main", "front": "lap/main", "hold": True, "tune": True})
+    show, = transport.of("mirror", "lap")[-1]["shows"]
+    assert show["guides"] == show["src"]
+    start = list(show["guides"])
+    sid = show["id"]
+    host.on_message("lap", "mirror_tune", {"id": sid, "mx": 0.1, "my": 0})
+    show, = transport.of("mirror", "lap")[-1]["shows"]
+    assert show["guides"] == start and show["src"] != start  # the lines behind don't follow the mirror
+    host.fit({"behind": "pc/main", "front": "lap/main", "dx": 0, "hold": False})
+    assert all("guides" not in s for s in transport.of("mirror", "lap")[-1]["shows"])
+
+
+def test_guides_cross_every_side_of_the_covered_area():
+    from PySide6.QtCore import QRectF
+
+    from curslink.mirror.helper import guide_shapes
+
+    c = QRectF(100, 50, 300, 200)
+    shapes = guide_shapes(c)
+    kinds = [k for k, _a, _b in shapes]
+    assert kinds.count("h") == 3 and kinds.count("v") == 3 and kinds.count("d") == 2
+    (_, centre, radius), = [s for s in shapes if s[0] == "o"]
+    assert centre == c.center()
+    assert 100 < radius.x() < (300 ** 2 + 200 ** 2) ** 0.5 / 2  # inside the corners, outside the short sides
+    for kind, a, b in shapes:
+        if kind != "o":
+            assert min(a.x(), b.x()) < c.left() - 1000 or min(a.y(), b.y()) < c.top() - 1000  # carried on far past
+
+
+def test_the_mirror_draws_the_guides_where_they_are_behind(qapp):
+    from PySide6.QtCore import QRectF
+
+    from curslink.mirror.helper import GuideOverlay, MirrorHelper
+
+    helper = MirrorHelper(lambda line: None)
+    spec = {"id": "s", "screen": "main", "os": [200, 150, 200, 100], "label": "PC", "edges": [], "tune": True,
+            "src": [1000, 500, 400, 200], "guides": [1100, 500, 400, 200]}
+    helper.handle("mirror " + json.dumps({"captures": [], "shows": [spec]}))
+    window = helper.windows["s"]
+    # The guides' area starts a quarter of the picture to the right, same size.
+    assert window.guide_rect(QRectF(0, 0, 200, 100)) == QRectF(50, 0, 200, 100)
+    window.grab()
+    g = QGuiApplication_screen_os()
+    capture_spec = {"id": "s", "screen": "main", "os": [10, 10, 50, 40], "screen_os": g, "fps": 1,
+                    "tune": True, "guides": [20, 20, 50, 40]}
+    overlay = GuideOverlay(capture_spec)
+    assert overlay.ok and overlay.covered.width() > 0
+    overlay.grab()
+    overlay.deleteLater()
+    helper.handle('mirror {"captures": [], "shows": []}')
+    qapp.processEvents()
+
+
+def QGuiApplication_screen_os():  # noqa: N802
+    from PySide6.QtGui import QGuiApplication
+
+    g = QGuiApplication.primaryScreen().geometry()
+    return [g.x(), g.y(), g.width(), g.height()]

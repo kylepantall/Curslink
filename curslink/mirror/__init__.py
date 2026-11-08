@@ -189,9 +189,14 @@ def screen_os(screen: Screen) -> list[int]:
 
 
 def device_states(streams: list[Stream], names: dict[str, str], fps: int,
-                  tuning: tuple[str, str] | None = None) -> dict[str, dict]:
+                  tuning: tuple[str, str] | None = None, anchors: dict | None = None) -> dict[str, dict]:
     """What each device should capture and show for ``streams`` (the payload
-    of its ``mirror`` frame). Devices with nothing to do aren't listed."""
+    of its ``mirror`` frame). Devices with nothing to do aren't listed.
+
+    The overlap being adjusted (``tuning``) gets alignment guides: ``guides``,
+    the covered area when adjusting began (kept in ``anchors``, so the lines
+    across the screen behind stay put while the mirror moves), in the screen
+    behind's OS pixels; its mirror also gets ``src``, what it shows of there."""
     out: dict[str, dict] = {}
     for s in streams:
         src = out.setdefault(s.source.device_id, {"captures": [], "shows": []})
@@ -202,7 +207,12 @@ def device_states(streams: list[Stream], names: dict[str, str], fps: int,
                              "screen_os": screen_os(s.target), "size": list(s.shown[2:]),
                              "label": names.get(s.source.device_id, s.source.device_id), "edges": s.edges()})
         if tuning == (f"{s.source.device_id}/{s.source.id}", f"{s.target.device_id}/{s.target.id}"):
-            dst["shows"][-1]["tune"] = True  # the mirror takes the pointer: drag, stretch and zoom it
+            covered = s.os_rect(s.source)
+            at = anchors.setdefault(tuning, covered) if anchors is not None else covered
+            # The mirror takes the pointer (drag, stretch and zoom it), and
+            # guides go across the screen behind and the mirror alike.
+            dst["shows"][-1].update(tune=True, guides=list(at), src=covered)
+            src["captures"][-1].update(tune=True, guides=list(at))
     return out
 
 
@@ -392,6 +402,7 @@ class MirrorHost:
         # and the layout's pointer_through to put back after.
         self.tuning: tuple[str, str] | None = None
         self._through = layout.pointer_through
+        self._anchors: dict = {}  # where its guides are (see device_states)
 
     def can(self, device_id: str) -> bool:
         if device_id == self.local_id:
@@ -435,6 +446,7 @@ class MirrorHost:
         if self.tuning is None:
             self._through = self.layout.pointer_through
         self.tuning = pair
+        self._anchors = {}
         self.layout.pointer_through = False if pair is not None else self._through
         self.sent = {d: {} for d in self.sent}  # send the shows again, with or without "tune"
 
@@ -478,7 +490,7 @@ class MirrorHost:
         streams = streams_for(self.layout, screen, self.can)
         self.streams = {s.id: s for s in streams}
         self._pointer = {sid: p for sid, p in self._pointer.items() if sid in self.streams}
-        states = device_states(streams, self.names, self.fps, self.tuning)
+        states = device_states(streams, self.names, self.fps, self.tuning, self._anchors)
         for device in set(self.sent) | set(states):
             state = states.get(device, EMPTY)
             if self.sent.get(device, EMPTY) == state:

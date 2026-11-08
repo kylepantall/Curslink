@@ -998,3 +998,11 @@ def test_saving_an_overlap_with_mirror_mode_goes_straight_on_to_lining_it_up(des
     monkeypatch.setattr(desktop.service, "state", RUNNING)
     page.next_lineup()
     assert started == [(home.key, laptop.key)] and page.pending_lineups == []
+    # Lined up by clicks: next, check it on the mirror with the guides.
+    tuned = []
+    monkeypatch.setattr(page, "tune_fit", lambda b, f: tuned.append((b, f)))
+    monkeypatch.setattr(desktop.service, "is_alive", lambda: True)
+    page.fit_calibrated(home.key, laptop.key, (10.0, 20.0, 1.5))
+    assert page.pending_tune == (home.key, laptop.key)
+    page.continue_lineup()
+    assert tuned == [(home.key, laptop.key)] and page.pending_tune is None
