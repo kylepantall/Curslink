@@ -14,6 +14,7 @@ from curslink import __version__, diagnostics
 from curslink.autostart import Autostart
 from curslink.gui import native, theme
 from curslink.gui.camerapicker import CameraPicker
+from curslink.gui.netpanel import NetworkCard
 from curslink.gui.widgets import Card, Page, Segmented, Toggle, seg_track, button, label, spot, text_block
 
 
@@ -223,6 +224,10 @@ class SettingsPage(Page):
             self.agent_card.add_row(self.helper_block, self.helper)
         self.add(self.agent_card)
 
+        # -- network (both) ---------------------------------------------------------
+        self.network = NetworkCard(lambda on: self.set_config("network", "optimise", on), self.check_network)
+        self.add(self.network)
+
         # -- updates --------------------------------------------------------------
         upd = Card("Updates", rows=True)
         self.update_art = spot("update", 96, 72)
@@ -277,6 +282,8 @@ class SettingsPage(Page):
 
         app.config_changed.connect(self.load)
         app.update_found.connect(self.show_release)
+        app.service.event.connect(self._on_service_event)
+        app.service.state_changed.connect(self._on_service_state)
         self.load()
 
     def shown(self) -> None:
@@ -363,6 +370,8 @@ class SettingsPage(Page):
             self.agent_camera_row.setVisible(self.agent_camera.isChecked())
             self.agent_camera_picker.set_current(int(agent_gaze.get("camera", 0) or 0),
                                                  str(agent_gaze.get("camera_name", "") or ""))
+            net = raw.get("network", {})
+            self.network.optimise.setChecked(bool(net.get("optimise", True)) if isinstance(net, dict) else True)
             u = raw.get("update", {})
             self.upd_check.setChecked(bool(u.get("check", True)))
             self.upd_auto.setChecked(bool(u.get("auto", True)))
@@ -540,6 +549,25 @@ class SettingsPage(Page):
         from curslink.gui.keymap import KeyboardCheckDialog
 
         KeyboardCheckDialog(self.app, self.window()).exec()
+
+    # -- network --------------------------------------------------------------
+    def _on_service_event(self, event: dict) -> None:
+        kind = event.get("event")
+        if kind == "network":
+            self.network.show_network(event)
+        elif kind == "netcheck":
+            self.network.show_check(event)
+
+    def _on_service_state(self, state: str) -> None:
+        if state != "running":
+            self.network.stopped()
+
+    def check_network(self) -> None:
+        if not self.app.service.is_alive():
+            self.network.check_unavailable()
+            return
+        self.network.checking()
+        self.app.service.send("netcheck")
 
     def set_config(self, table: str, key: str, value, restart: bool = True) -> None:
         if self._loading:

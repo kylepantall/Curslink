@@ -343,6 +343,43 @@ one machine's hotspot removes the access point hop but takes the other off
 its network, for little gain. A cable (Ethernet, or a Thunderbolt bridge)
 is the fastest link and needs nothing from Curslink.
 
+### Network diagnostics and the optimiser
+
+Settings > Network shows each link as the running host or agent measures
+it, from a `network` event every 2 s (`curslink/net/check.py`): the path
+(direct with moves by UDP, direct TCP only, or the relay), the round trip
+and jitter of the host's pings over TLS (last minute), packet loss by UDP
+and the interface the connection goes out on (Wi-Fi, wired, VPN), graded
+good / fair / poor with plain-language tips. Loss is counted from the
+gaps in sequence numbers (`curslink/net/quality.py`): the host counts the
+agent's probes, and the agent counts the host's ACKs and moves and reports
+that every 5 s in a `netstats` frame (only to a host whose
+`welcome.features` lists `"netstats"`; the host sends the agent its own
+round-trip numbers in its pings in return, only to an agent that listed
+`"netstats"`). "Check the network" sends the `netcheck` command: an mDNS
+browse (does this computer see its own announcement, and the devices it
+links with?) and the list of interfaces.
+
+With `[network] optimise` on (the default), the host re-tunes each link
+every 2 s, with thresholds that switch on at worse numbers than they switch
+off at and a 20 s hold so nothing flaps:
+
+* lossy UDP (1% or more lost): each move is sent twice, the second a
+  `MOVE2` datagram 4 ms later with the same sequence number, so the first to
+  arrive is taken. Only to agents that list `"netstats"` (older agents and
+  the Android app would ignore MOVE2 anyway);
+* a fair link (p95 60 ms+, 1% loss or 15 ms jitter): at most 250 moves a
+  second, the agent's own playback rate; a poor one (p95 150 ms+ or 5%
+  loss): 100 a second. Moves are absolute, so a held-back move is replaced
+  by the next and the newest goes when its turn comes; a click, key or
+  leave sends the held one first. A good link sends every move at once;
+* all of Curslink's sockets are marked DSCP EF, which most Wi-Fi access
+  points send in the WMM voice queue, ahead of bulk traffic.
+
+An agent connected through the relay looks for the host on the LAN every
+30 s and reconnects directly once it answers there (never while input is on
+it).
+
 Both ends log where time goes every 10 seconds while input is remote: the
 host logs mouse report rate, loop wait, event tap time and ping round trip;
 the agent logs arrival rate, lateness, longest gap, playback delay and

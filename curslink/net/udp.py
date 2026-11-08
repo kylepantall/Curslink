@@ -29,6 +29,13 @@ that. Each side only takes a sequence number higher than the last it took,
 so a datagram can't be replayed, and one that arrives late is dropped.
 The agent also drops a move older (by its ``ts``) than the newest it has
 seen on either channel, so moves never step backwards.
+
+On a lossy link the network optimiser (:mod:`curslink.net.quality`) has the
+host send each move twice: the MOVE, then a few ms later a MOVE2 with the
+same sequence number and body. Whichever arrives first is taken and the
+other dropped as a repeat. Being its own kind, a MOVE2 lets the agent count
+how many MOVEs were really lost (it reports that in ``netstats``), and an
+agent older than MOVE2 simply ignores it.
 """
 
 from __future__ import annotations
@@ -44,17 +51,20 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
+from curslink.net.quality import COPY_DELAY_S, RttWindow, SeqLoss, mark_low_latency
+
 log = logging.getLogger(__name__)
 
 MAGIC = b"CL"
 VERSION = 1
-PROBE, ACK, MOVE = 1, 2, 3
+PROBE, ACK, MOVE, MOVE2 = 1, 2, 3, 4
 HEADER = struct.Struct("!2sBB8sQ")
 TAG_BYTES = 16
 BODIES = {
     PROBE: struct.Struct("!B"),     # ok: the agent heard an ACK in the last ALIVE_S
     ACK: struct.Struct("!Q"),       # the probe's sequence number, echoed (times the round trip)
     MOVE: struct.Struct("!ddd"),    # x, y, ts (host monotonic ms, as in a TCP move)
+    MOVE2: struct.Struct("!ddd"),   # the same move again (lossy links; see the module doc)
 }
 KEY_BYTES = 32
 ID_BYTES = 8
@@ -136,6 +146,8 @@ class HostPath:
     seq_out: int = 0
     sent: int = 0                   # moves sent by UDP since last taken (diagnostics)
     up: bool = False                # last logged state
+    copies: int = 1                 # each move sent this many times (the optimiser's choice)
+    probes: SeqLoss = field(default_factory=SeqLoss)  # agent -> host loss, from probe gaps
     # The newest move sent by UDP that TCP hasn't carried: sent over TCP
     # before the next click or key, so that lands where the pointer is even
     # if that datagram was lost.
@@ -154,13 +166,16 @@ class HostPath:
 class HostUdp(asyncio.DatagramProtocol):
     """The host's one UDP socket, shared by all agent connections."""
 
-    def __init__(self, clock: Callable[[], float] = time.monotonic):
+    def __init__(self, clock: Callable[[], float] = time.monotonic, mark: bool = False):
         self.clock = clock
+        self.mark = mark  # DSCP EF on our datagrams (see quality.mark_low_latency)
         self.paths: dict[bytes, HostPath] = {}
         self.transport: asyncio.DatagramTransport | None = None
 
     def connection_made(self, transport) -> None:
         self.transport = transport
+        if self.mark:
+            mark_low_latency(transport.get_extra_info("socket"))
 
     @property
     def port(self) -> int:
@@ -185,6 +200,7 @@ class HostUdp(asyncio.DatagramProtocol):
         kind, seq, values = opened
         if kind != PROBE or seq <= path.seq_in:
             return
+        path.probes.saw(seq)
         path.seq_in = seq
         path.addr = addr
         if values[0]:
@@ -209,8 +225,15 @@ class HostUdp(asyncio.DatagramProtocol):
                 self.check(path)
             return False
         path.seq_out += 1
-        if not self._send(path, seal(path.keys, path.conn_id, MOVE, path.seq_out, float(x), float(y), float(ts))):
+        seq, values = path.seq_out, (float(x), float(y), float(ts))
+        if not self._send(path, seal(path.keys, path.conn_id, MOVE, seq, *values)):
             return False
+        if path.copies > 1:
+            copy = seal(path.keys, path.conn_id, MOVE2, seq, *values)
+            try:
+                asyncio.get_running_loop().call_later(COPY_DELAY_S, self._send, path, copy)
+            except RuntimeError:  # no loop (tests calling directly): send it straight after
+                self._send(path, copy)
         path.sent += 1
         path.unsynced = {"x": x, "y": y, "ts": ts}
         return True
@@ -238,7 +261,7 @@ class AgentUdp(asyncio.DatagramProtocol):
     """The agent's end: probes the host and takes the moves it sends."""
 
     def __init__(self, offer: dict, on_move: Callable[[float, float, float], None],
-                 clock: Callable[[], float] = time.monotonic):
+                 clock: Callable[[], float] = time.monotonic, mark: bool = False):
         conn_id, key = unb64(offer.get("id")), unb64(offer.get("key"))
         port = offer.get("port")
         if (conn_id is None or len(conn_id) != ID_BYTES or key is None or len(key) != KEY_BYTES
@@ -252,7 +275,10 @@ class AgentUdp(asyncio.DatagramProtocol):
         self.seq_in = 0
         self.acked_at = 0.0
         self.sent_at: dict[int, float] = {}
-        self.rtts: list[float] = []
+        self.rtt = RttWindow(clock=clock)      # probe round trips
+        self.loss = SeqLoss(clock=clock)       # host -> agent loss, from gaps in ACK and MOVE numbers
+        self.copies = 0                        # MOVE2s that arrived before (or instead of) their MOVE
+        self.mark = mark
         self.moves = 0
         self.up = False
         self._task: asyncio.Task | None = None
@@ -264,6 +290,8 @@ class AgentUdp(asyncio.DatagramProtocol):
 
     def connection_made(self, transport) -> None:
         self.transport = transport
+        if self.mark:
+            mark_low_latency(transport.get_extra_info("socket"))
 
     def heard_lately(self) -> bool:
         return self.clock() - self.acked_at < ALIVE_S
@@ -297,21 +325,24 @@ class AgentUdp(asyncio.DatagramProtocol):
         if opened is None:
             return
         kind, seq, values = opened
+        if kind in (ACK, MOVE):
+            self.loss.saw(seq)  # MOVE2s are repeats: only the originals count for loss
         if seq <= self.seq_in:
-            return  # late or replayed
+            return  # late, replayed, or the second copy of a move already taken
         self.seq_in = seq
         if kind == ACK:
             now = self.clock()
             sent = self.sent_at.pop(values[0], None)
-            if sent is not None and len(self.rtts) < 1000:
-                self.rtts.append(now - sent)
+            if sent is not None:
+                self.rtt.add(now - sent)
             first = not self.heard_lately()
             self.acked_at = now
             if first:
                 log.info("UDP path to the host is up; pointer moves can come over it")
                 self.probe()  # tell the host straight away
-        elif kind == MOVE:
+        elif kind in (MOVE, MOVE2):
             self.moves += 1
+            self.copies += kind == MOVE2
             self.on_move(*values)
 
     def error_received(self, exc) -> None:

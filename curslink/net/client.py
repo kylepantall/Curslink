@@ -11,10 +11,11 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable
 
 from curslink.inputs.base import InputSink
+from curslink.net import quality
 from curslink.net.framing import STREAM_LIMIT, read_message
 from curslink.net.relay import RelayError, RelayTarget, agent_connect
 from curslink.net.udp import AgentUdp
-from curslink.protocol import (AGENT_FEATURES, EDGE_FEATURE, FILES_FEATURE, FILES_OUT_FEATURE, DROP_FEATURE, FILE_ACK_FEATURE, MIRROR_FEATURE, POPUPS_FEATURE, PREPARE_FEATURE, PROTOCOL_VERSION, UDP_FEATURE, Message, ProtocolError,
+from curslink.protocol import (AGENT_FEATURES, EDGE_FEATURE, FILES_FEATURE, FILES_OUT_FEATURE, DROP_FEATURE, FILE_ACK_FEATURE, MIRROR_FEATURE, NETSTATS_FEATURE, POPUPS_FEATURE, PREPARE_FEATURE, PROTOCOL_VERSION, UDP_FEATURE, Message, ProtocolError,
                                encode)
 from curslink.security import channel_binding, hello_auth
 from curslink.tally import Tally
@@ -30,6 +31,8 @@ LAN_ONLY_TIMEOUT_S = 6.0
 # Resend our camera's facing state this often, so the host can tell a
 # fresh report from a stale one.
 FACING_REFRESH_S = 1.0
+# Tell the host how the link looks from here this often (netstats).
+NETSTATS_EVERY_S = 5.0
 
 
 class AgentSession:
@@ -76,6 +79,8 @@ class AgentSession:
         # The newest move's ts (either channel): UDP can deliver one late, and
         # an older position than one already shown would step the pointer back.
         self._move_ts: float | None = None
+        # The host's measure of the round trip, from its pings (see protocol).
+        self.host_link: dict = {}
 
     def new_connection(self) -> None:
         """A fresh connection (maybe to a restarted host, with a new clock)."""
@@ -98,6 +103,8 @@ class AgentSession:
     def handle(self, msg: Message) -> bytes | None:
         t = msg.t
         if t == "ping":
+            if "rtt_ms" in msg.data:
+                self.host_link = {k: msg.data.get(k) for k in ("rtt_ms", "p95_ms", "jitter_ms", "tuning")}
             reply = {"n": msg.get("n")}
             if "ts" in msg.data:
                 reply["ts"] = msg.data["ts"]  # lets the host time the round trip
@@ -246,6 +253,7 @@ class AgentClient:
         resolve: Callable[[], Awaitable[Target]] | None = None,
         relay: RelayTarget | None = None,
         udp: bool = True,
+        optimise: bool = False,
     ):
         if not host and relay is None and resolve is None:
             raise ValueError("an agent needs a host address, a relay, or both")
@@ -263,6 +271,8 @@ class AgentClient:
         self.relay = relay
         self.udp_enabled = udp  # take moves by UDP when the host is reached directly
         self.udp: AgentUdp | None = None
+        # Mark our packets low-latency (see curslink.net.quality).
+        self.optimise = optimise
         self.via = ""
         self._direct = False
         self.connected = asyncio.Event()
@@ -299,6 +309,59 @@ class AgentClient:
             if self._writer is not writer or writer.transport.is_closing():
                 raise ConnectionError("the host disconnected")
             await asyncio.sleep(0.002)
+
+    def reconnect(self) -> None:
+        """Drop the connection; run_forever makes a new one straight away
+        (resolving the host again, so a better path is picked up)."""
+        writer = self._writer
+        if writer is not None and not writer.transport.is_closing():
+            writer.close()
+
+    @property
+    def path(self) -> str:
+        """``relay``, ``udp`` (direct, moves by UDP), ``tcp`` (direct) or "" (not connected)."""
+        if self._writer is None:
+            return ""
+        if not self._direct:
+            return "relay"
+        return "udp" if self.udp is not None and self.udp.heard_lately() else "tcp"
+
+    def link_report(self) -> dict:
+        """How the link to the host looks from here, for the app's Network settings."""
+        writer = self._writer
+        local = ""
+        if writer is not None:
+            name = writer.get_extra_info("sockname")
+            local = str(name[0]) if isinstance(name, tuple) and name else ""
+        host = self.session.host_link
+        udp = self.udp
+        rtt = udp.rtt.stats() if udp is not None else {"samples": 0}
+        if host.get("rtt_ms") is not None:
+            # The host's measure (pings over TLS) covers every path; ours only UDP.
+            rtt = {**rtt, "samples": max(rtt.get("samples") or 0, 1), "p50_ms": host["rtt_ms"],
+                   "p95_ms": host.get("p95_ms"), "jitter_ms": host.get("jitter_ms")}
+        return {
+            "device_id": "host",
+            "name": "",
+            "path": self.path,
+            "via": self.via if writer is not None else "",
+            "udp_offered": udp is not None,
+            "rtt": rtt,
+            "loss_pct": udp.loss.stats()["loss_pct"] if udp is not None else None,
+            "optimise": self.optimise,
+            "tuning": {"reason": host.get("tuning") or ""},
+            "local": local,
+        }
+
+    async def _report_netstats(self) -> None:
+        while True:
+            await asyncio.sleep(NETSTATS_EVERY_S)
+            udp = self.udp
+            if udp is None:
+                continue
+            rtt = udp.rtt.stats()
+            self.send("netstats", udp=udp.heard_lately(), loss_pct=udp.loss.stats()["loss_pct"],
+                      rtt_ms=rtt["p50_ms"], jitter_ms=rtt["jitter_ms"])
 
     async def _refresh_facing(self) -> None:
         while True:
@@ -338,6 +401,9 @@ class AgentClient:
             self.ssl_context, self.auth_key = target.ssl_context, target.auth_key
         reader, writer = await self._open()
         self.session.new_connection()
+        self.session.host_link = {}
+        if self.optimise:
+            quality.mark_low_latency(quality.transport_socket(writer))
         try:
             features = list(AGENT_FEATURES) + ([FILES_FEATURE, DROP_FEATURE, FILE_ACK_FEATURE] if self.session.files is not None else [])
             if self.session.drag_out is not None:
@@ -350,6 +416,7 @@ class AgentClient:
                 features.append(UDP_FEATURE)
             if self.session.mirror is not None:
                 features.append(MIRROR_FEATURE)
+            features.append(NETSTATS_FEATURE)
             hello = dict(
                 v=PROTOCOL_VERSION,
                 device_id=self.device_id,
@@ -389,6 +456,8 @@ class AgentClient:
             refresher = None
             if self.facing_source is not None and self._host_takes_facing:
                 refresher = asyncio.create_task(self._refresh_facing())
+            reporter = (asyncio.create_task(self._report_netstats())
+                        if NETSTATS_FEATURE in self.host_features else None)
             try:
                 while True:
                     msg = await read_message(reader)
@@ -400,6 +469,8 @@ class AgentClient:
             finally:
                 if refresher is not None:
                     refresher.cancel()
+                if reporter is not None:
+                    reporter.cancel()
         finally:
             if self.udp is not None:
                 self.udp.close()
@@ -423,7 +494,7 @@ class AgentClient:
         if not peer:
             return
         try:
-            self.udp = AgentUdp(offer, self.session.udp_move)
+            self.udp = AgentUdp(offer, self.session.udp_move, mark=self.optimise)
             await self.udp.start(peer[0])
         except (ValueError, OSError) as exc:
             log.info("pointer moves will come over TCP: can't use UDP (%s)", exc)

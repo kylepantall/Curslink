@@ -998,3 +998,34 @@ def test_saving_an_overlap_with_mirror_mode_goes_straight_on_to_lining_it_up(des
     monkeypatch.setattr(desktop.service, "state", RUNNING)
     page.next_lineup()
     assert started == [(home.key, laptop.key)] and page.pending_lineups == []
+
+
+def test_settings_network_card_shows_each_link_and_the_check(desktop, qapp):
+    desktop.window.pages["setup"].create()
+    page = desktop.window.pages["settings"]
+    desktop.window.show_page("settings")
+    qapp.processEvents()
+    card = page.network
+    assert card.optimise.isChecked()  # on by default
+    card.optimise.click()
+    assert desktop.config().get("network", "optimise") is False
+    link = {"device_id": "laptop", "name": "Work laptop", "path": "udp", "optimise": True,
+            "rtt": {"samples": 30, "p50_ms": 12.0, "p95_ms": 70.0, "jitter_ms": 4.0}, "loss_pct": 1.6,
+            "interface": {"name": "Wi-Fi", "kind": "wifi", "ip": "192.168.1.2"}, "grade": "fair",
+            "tuning": {"reason": "1.6% of packets lost, so each pointer move goes twice"},
+            "tips": ["This computer is on Wi-Fi."]}
+    desktop.service.event.emit({"event": "network", "links": [link]})
+    qapp.processEvents()
+    row = card.rows_by_id["laptop"]
+    assert "Work laptop" in row.heading.text() and "UDP" in row.heading.text()
+    assert "Latency 12 ms" in row.numbers.text() and "loss 1.6%" in row.numbers.text()
+    assert "Wi-Fi" in row.numbers.text() and "twice" in row.extra.text()
+    assert row.grade.text() == "Fair" and not card.empty.isVisibleTo(card)
+    desktop.service.event.emit({"event": "network", "links": []})
+    qapp.processEvents()
+    assert not card.rows_by_id and card.empty.isVisibleTo(card)
+    card.check_button.click()  # nothing running: says so
+    assert "Start linking" in card.check_text.detail_label.text()
+    desktop.service.event.emit({"event": "netcheck", "summary": ["mDNS works.", "Found by mDNS: laptop."]})
+    qapp.processEvents()
+    assert "Found by mDNS: laptop." in card.check_text.detail_label.text()
