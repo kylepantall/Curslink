@@ -227,3 +227,41 @@ def test_helper_draws_the_bar_and_label():
     ov.flash_at -= 10  # long past
     ov._tick()
     assert not ov.bar.isVisible()
+
+
+# A laptop standing in front of the lower right of a monitor (the overlap layout).
+MON = Device("pc", "Kyles_PC", (Screen("main", "pc", 0, 0, 2560, 1440),))
+MACBOOK = Device("mac", "MacBook", (Screen("main", "mac", 1800, 900, 1512, 982, z=1),))
+
+
+def overlap_layout(pointer_through=False):
+    return Layout.from_devices([MON, MACBOOK], allow_overlap=True, pointer_through=pointer_through)
+
+
+def test_boundary_of_a_screen_in_front_glows_where_it_is():
+    lay = overlap_layout()
+    # On the monitor, just left of where the laptop covers it.
+    hint = find_hint(lay, "pc", 1780, 1200, everyone)
+    assert hint is not None and hint.target.device_id == "mac"
+    assert hint.side == "right" and hint.rect == (0, 0, 1800, 1440)  # the bar sits at x 1800, not the screen's edge
+    assert (hint.a, hint.b, hint.at) == (900, 1440, 1200)
+    assert hint.target_side == "left" and hint.trect == (1800, 900, 1512, 982)
+    assert hint.tat == 300
+
+
+def test_leaving_a_screen_in_front_glows_inside_the_screen_behind():
+    lay = overlap_layout()
+    hint = find_hint(lay, "mac", 1805, 1200, everyone)
+    assert hint is not None and hint.target.device_id == "pc" and hint.side == "left"
+    # The monitor's bar is at the laptop's left edge (x 1800), not on the monitor's far right.
+    assert hint.target_side == "right" and hint.trect == (0, 0, 1800, 1440)
+    sent = Sent()
+    edges = EdgeIndicator(lay, everyone, sent, name=lambda d: d, kind=lambda d: "mac")
+    edges.update("mac", 1805, 1200)
+    assert sent.last("pc")["rect"] == [0, 0, 1800, 1440] and sent.last("pc")["side"] == "right"
+    assert sent.last("mac")["rect"] == [0, 0, 1512, 982] and sent.last("mac")["side"] == "left"
+
+
+def test_mirror_mode_has_no_boundary_inside_the_screen_behind():
+    lay = overlap_layout(pointer_through=True)
+    assert find_hint(lay, "pc", 1780, 1200, everyone) is None

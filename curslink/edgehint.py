@@ -74,6 +74,13 @@ class EdgeHint:
     ta: float         # the matching stretch on the target's facing side
     tb: float
     tat: float        # where the pointer would arrive, along that side
+    # Where each bar goes, in layout pixels (x, y, width, height): the screen
+    # itself, or the part of it beside a boundary inside it, where a screen of
+    # another device stands in front of it. ``side`` / ``target_side`` is the
+    # side of that rectangle. Along the edge it spans the whole screen, so
+    # ``a``, ``b`` and ``at`` count from the screen's own top (or left).
+    rect: tuple[int, int, int, int] = (0, 0, 0, 0)
+    trect: tuple[int, int, int, int] = (0, 0, 0, 0)
 
     @property
     def near(self) -> float:
@@ -137,6 +144,75 @@ def _stretch(layout: Layout, here: Screen, side: str, at: float, target: Screen,
     return lo - here.x, hi - here.x, target_side, lo - target.x, hi - target.x
 
 
+def _whole(screen: Screen) -> tuple[int, int, int, int]:
+    return (screen.x, screen.y, screen.width, screen.height)
+
+
+def _entry_rect(target: Screen, side: str, boundary: float) -> tuple[tuple[int, int, int, int], str]:
+    """Where the pointer comes into ``target`` moving out of a ``side`` at
+    ``boundary`` (a layout x for left/right, y for top/bottom): the target's
+    own facing side when they only meet there, or a line inside the target
+    when it reaches under (or over) the screen the pointer leaves."""
+    t = target
+    b = round(boundary)
+    if side == "right":
+        x0 = min(max(t.x, b), t.right - 1)
+        return (x0, t.y, t.right - x0, t.height), "left"
+    if side == "left":
+        x1 = max(min(t.right, b), t.x + 1)
+        return (t.x, t.y, x1 - t.x, t.height), "right"
+    if side == "bottom":
+        y0 = min(max(t.y, b), t.bottom - 1)
+        return (t.x, y0, t.width, t.bottom - y0), "top"
+    y1 = max(min(t.bottom, b), t.y + 1)
+    return (t.x, t.y, t.width, y1 - t.y), "bottom"
+
+
+def _boundary(here: Screen, side: str) -> float:
+    return {"right": here.right, "left": here.x, "bottom": here.bottom, "top": here.y}[side]
+
+
+def _covered_hints(layout: Layout, here: Screen, x: float, y: float,
+                   available: Callable[[str], bool]) -> list[EdgeHint]:
+    """Boundaries inside ``here`` where another device's screen stands in
+    front of it: pushing into that part crosses to the screen in front.
+    (Not in mirror mode with the pointer going through: then the covered part
+    is still ``here``'s.)"""
+    if layout.pointer_through:
+        return []
+    out = []
+    for front, (ox, oy, ow, oh) in layout.covering(here):
+        if front.device_id == here.device_id or not available(front.device_id):
+            continue
+        ox2, oy2 = ox + ow, oy + oh
+        for side, distance, along_ok in (
+            ("right", ox - 1 - x, oy <= y < oy2),    # pointer left of it, heading right
+            ("left", x - ox2, oy <= y < oy2),
+            ("bottom", oy - 1 - y, ox <= x < ox2),
+            ("top", y - oy2, ox <= x < ox2),
+        ):
+            if not along_ok or not 0 <= distance <= RANGE_PX:
+                continue
+            if side in ("right", "left"):
+                bx = ox if side == "right" else ox2
+                rect = (here.x, here.y, bx - here.x, here.height) if side == "right" else \
+                    (bx, here.y, here.right - bx, here.height)
+                a, b, at = oy - here.y, oy2 - here.y, y - here.y
+                trect, tside = _entry_rect(front, side, bx)
+                ta, tb, tat = oy - front.y, oy2 - front.y, y - front.y
+            else:
+                by = oy if side == "bottom" else oy2
+                rect = (here.x, here.y, here.width, by - here.y) if side == "bottom" else \
+                    (here.x, by, here.width, here.bottom - by)
+                a, b, at = ox - here.x, ox2 - here.x, x - here.x
+                trect, tside = _entry_rect(front, side, by)
+                ta, tb, tat = ox - front.x, ox2 - front.x, x - front.x
+            if rect[2] <= 0 or rect[3] <= 0:
+                continue
+            out.append(EdgeHint(here, side, a, b, at, float(distance), front, tside, ta, tb, tat, rect, trect))
+    return out
+
+
 def find_hint(layout: Layout, device_id: str, x: float, y: float,
               available: Callable[[str], bool], gap_tolerance: int = 0) -> EdgeHint | None:
     """The nearest edge within :data:`RANGE_PX` of (x, y) that leads to
@@ -154,9 +230,18 @@ def find_hint(layout: Layout, device_id: str, x: float, y: float,
         if crossing is None or not available(crossing.screen.device_id):
             continue
         at = _along(here, side, ex, ey)
-        a, b, target_side, ta, tb = _stretch(layout, here, side, at, crossing.screen)
-        tat = _along(crossing.screen, target_side, crossing.x, crossing.y)
-        best = EdgeHint(here, side, a, b, at, max(0.0, distance), crossing.screen, target_side, ta, tb, tat)
+        target = crossing.screen
+        a, b, target_side, ta, tb = _stretch(layout, here, side, at, target)
+        if target_side == OPPOSITE[side]:
+            trect, target_side = _entry_rect(target, side, _boundary(here, side))
+        else:  # an edge link joining other sides: its own side of the screen
+            trect = _whole(target)
+        tat = _along(target, target_side, crossing.x, crossing.y)
+        best = EdgeHint(here, side, a, b, at, max(0.0, distance), target, target_side, ta, tb, tat,
+                        _whole(here), trect)
+    for hint in _covered_hints(layout, here, x, y, available):
+        if best is None or hint.distance < best.distance:
+            best = hint
     return best
 
 
@@ -172,8 +257,13 @@ def device_kind(platform: str) -> str:
     return "linux"
 
 
-def _rect(screen: Screen) -> list[int]:
-    return [screen.os_x, screen.os_y, screen.width, screen.height]
+def _os_rect(screen: Screen, rect: tuple[int, int, int, int]) -> list[int]:
+    """A rectangle of ``screen`` in layout pixels -> its device's OS pixels."""
+    x, y, w, h = rect
+    if w <= 0 or h <= 0:
+        x, y, w, h = _whole(screen)
+    ox, oy = screen.to_os(x, y)
+    return [ox, oy, w, h]
 
 
 class EdgeIndicator:
@@ -217,12 +307,12 @@ class EdgeIndicator:
             target = hint.target.device_id
             near = round(hint.near, 3)
             wanted[device_id] = {
-                "role": "from", "rect": _rect(hint.here), "side": hint.side,
+                "role": "from", "rect": _os_rect(hint.here, hint.rect), "side": hint.side,
                 "a": round(hint.a), "b": round(hint.b), "at": round(hint.at), "near": near,
                 "name": self.name(target), "kind": self.kind(target),
             }
             wanted[target] = {
-                "role": "to", "rect": _rect(hint.target), "side": hint.target_side,
+                "role": "to", "rect": _os_rect(hint.target, hint.trect), "side": hint.target_side,
                 "a": round(hint.ta), "b": round(hint.tb), "at": round(hint.tat), "near": near,
             }
         for device in list(self._shown):
