@@ -87,3 +87,47 @@ def test_place_a_phone_against_an_edge(tmp_path):
     (s,) = cfg.raw()["devices"][1]["screens"]
     assert (s["x"], s["y"]) == (550, 982)
     assert cfg.side_of("phone", "mac") == "bottom"
+
+
+def test_switching_roles_keeps_both_roles_settings(tmp_path):
+    from curslink.configedit import ConfigFile, new_host_config, stash_path, switch_role
+
+    path = tmp_path / "curslink.toml"
+    screens = [{"id": "main", "x": 0, "y": 0, "width": 2560, "height": 1440}]
+    path.write_text(new_host_config("desk-pc", "Desk PC", screens), encoding="utf-8")
+    cfg = ConfigFile(path)
+    cfg.set("host", "effect", "blink")
+    cfg.set("pairing", "port", 25000)
+    cfg.save()
+
+    assert switch_role(path, screens) == "agent"
+    agent = ConfigFile(path)
+    assert agent.role == "agent"
+    assert agent.get("agent", "device_id") == "desk-pc"
+    assert agent.get("agent", "name") == "Desk PC"
+    assert agent.get("pairing", "port") == 25000  # shared settings carry over
+    assert stash_path(path, "host").exists()
+    agent.set("agent", "animations", False)
+    agent.save()
+
+    assert switch_role(path, screens) == "host"
+    host = ConfigFile(path)
+    assert host.role == "host"
+    assert host.get("host", "effect") == "blink"  # the old host settings came back
+    assert not stash_path(path, "host").exists()
+    assert stash_path(path, "agent").exists()
+
+    assert switch_role(path, screens) == "agent"
+    assert ConfigFile(path).get("agent", "animations") is False
+
+
+def test_switching_roles_ignores_a_broken_side_file(tmp_path):
+    from curslink.configedit import ConfigFile, new_agent_config, stash_path, switch_role
+
+    path = tmp_path / "curslink.toml"
+    path.write_text(new_agent_config("laptop", "Laptop"), encoding="utf-8")
+    stash_path(path, "host").write_text('[host]\neffect = "pop"\n', encoding="utf-8")  # no [[devices]]
+    assert switch_role(path, [{"x": 0, "y": 0, "width": 1920, "height": 1080}]) == "host"
+    host = ConfigFile(path)
+    assert host.get("host", "device_id") == "laptop"
+    assert [d["name"] for d in host.devices()] == ["Laptop"]

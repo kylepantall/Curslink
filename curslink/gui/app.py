@@ -128,6 +128,55 @@ class Curslink(QObject):
         if restart and self.service.is_alive():
             self.service.restart()
 
+    def ask_switch_role(self) -> None:
+        """Confirm, then switch host <-> agent."""
+        role = self.role
+        if role is None:
+            return
+        target = "agent" if role == "host" else "host"
+        what = ("another computer's keyboard and mouse will control this one" if target == "agent"
+                else "this computer's keyboard and mouse will control your other devices, and phones can pair here")
+        parent = self.window if self.window is not None and self.window.isVisible() else None
+        answer = QMessageBox.question(
+            parent, "Curslink",
+            f"Use this computer as the {target}?\n\nAs the {target}, {what}. Your {role} settings and "
+            f"pairings are kept, so you can switch back at any time.")
+        if answer == QMessageBox.StandardButton.Yes:
+            self.switch_role()
+
+    def switch_role(self) -> str | None:
+        """Host <-> agent, keeping each role's settings for switching back."""
+        from curslink import macperms
+        from curslink.configedit import switch_role
+        from curslink.gui.pages.layout import detect_screens
+
+        if self.role is None:
+            return None
+        was_linking = self.linking
+        if was_linking:
+            self.stop_linking()
+        try:
+            role = switch_role(self.config_path, detect_screens())
+        except Exception as exc:  # noqa: BLE001 - shown, not fatal
+            log.error("couldn't switch roles: %s", exc)
+            self.status.add_log("error", f"Couldn't switch roles: {exc}")
+            if was_linking:
+                self.start_linking()
+            return None
+        log.info("this computer is now the %s", role)
+        self.status.add_log("info", f"This computer is now the {role}.")
+        self.config_saved(restart=False)
+        if self.window is not None:
+            if macperms.missing(role):
+                self.window.show_page("status")
+            elif not self.paired_peers("agent" if role == "host" else "host"):
+                self.window.show_page("devices")  # nothing to link with in this role yet
+            else:
+                self.window.show_page("status")
+        if was_linking or self.prefs.start_linking:
+            self.start_linking()
+        return role
+
     # -- the service ----------------------------------------------------------
     def start_linking(self) -> None:
         role = self.role

@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import os
 import re
+import shutil
 import socket
 import tempfile
 from pathlib import Path
@@ -397,3 +398,81 @@ def snap(rect: tuple[int, int, int, int], others: list[tuple[int, int, int, int]
             if d < best_y[0]:
                 best_y = (d, cand)
     return best_x[1], best_y[1]
+
+
+# -- switching between host and agent -----------------------------------------
+# Tables both roles use, carried over when a role is set up for the first time.
+SHARED_TABLES = ("pairing", "update", "relay")
+
+
+def stash_path(path: Path, role: str) -> Path:
+    """Where the role this computer isn't playing keeps its settings:
+    ``curslink.toml`` -> ``curslink.agent.toml``."""
+    return path.with_name(f"{path.stem}.{role}{path.suffix}")
+
+
+def other_role(role: str | None) -> str:
+    return "agent" if role == "host" else "host"
+
+
+def name_and_id(raw: dict[str, Any]) -> tuple[str, str]:
+    """This computer's (name, device id) in a config of either role."""
+    role = role_of(raw)
+    if role == "host":
+        me = raw.get("host", {}).get("device_id", "")
+        name = next((d.get("name", me) for d in raw.get("devices", []) if d.get("id") == me), me)
+        return name or this_computer_name(), me or slug(name or this_computer_name())
+    agent = raw.get("agent", {})
+    name = agent.get("name") or agent.get("device_id") or this_computer_name()
+    return name, agent.get("device_id") or slug(name)
+
+
+def switch_role(path: str | Path, screens: list[dict[str, Any]] | None = None) -> str:
+    """Make this computer the other role, keeping both roles' settings.
+
+    The current config is put aside as ``curslink.<role>.toml``; the other
+    role's earlier settings come back from theirs, or, the first time, a new
+    config is written with the same name and device id (and the shared
+    pairing, update and relay settings). Pairings live in their own store, so
+    they're kept either way. Returns the new role."""
+    path = Path(path)
+    current = ConfigFile(path)
+    role = current.role
+    if role is None:
+        raise ValueError("set this computer up first")
+    target = other_role(role)
+    old, new = stash_path(path, role), stash_path(path, target)
+    text = None
+    if new.exists():
+        try:
+            raw = tomlkit.parse(new.read_text(encoding="utf-8")).unwrap()
+            if role_of(raw) == target and is_whole(raw):
+                text = new.read_text(encoding="utf-8")
+        except Exception:  # a broken side file: start that role afresh
+            log.warning("ignoring %s: it isn't a whole %s config", new, target)
+    if text is None:
+        raw = current.raw()
+        name, device_id = name_and_id(raw)
+        if target == "host":
+            screens = screens or [{"id": "main", "x": 0, "y": 0, "width": 1920, "height": 1080}]
+            text = new_host_config(device_id, name, screens)
+        else:
+            text = new_agent_config(device_id, name)
+        doc = tomlkit.parse(text)
+        for table in SHARED_TABLES:
+            if table in current.doc:
+                doc[table] = current.doc[table]
+        text = tomlkit.dumps(doc)
+    shutil.copy2(path, old)
+    fd, tmp = tempfile.mkstemp(prefix=".curslink-", suffix=".toml", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+    with contextlib.suppress(OSError):
+        new.unlink()  # it's the live config now
+    return target

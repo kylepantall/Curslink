@@ -781,3 +781,28 @@ def test_pair_a_phone_by_qr_code_and_pick_its_edge(desktop, qapp):
     assert desktop.config().side_of("pixel", me) == "right"
     page.place(page.store().get("pixel"), me, "left")
     assert desktop.config().side_of("pixel", me) == "left"
+
+
+def test_switching_between_host_and_agent(desktop, qapp):
+    desktop.window.pages["setup"].create()
+    store = desktop.window.pages["devices"].store()
+    store.add("laptop", "Work laptop", "agent", b"k" * 32)
+    settings = desktop.window.pages["settings"]
+    desktop.window.show_page("settings")
+    qapp.processEvents()
+    assert settings.switch_button.text() == "Switch to agent…"
+    assert desktop.tray.switch.text().lower() == "use as agent…"
+
+    assert desktop.switch_role() == "agent"
+    qapp.processEvents()
+    assert desktop.role == "agent" and desktop.check_config() is None
+    assert desktop.window.current_page() == "devices"  # no host paired yet
+    assert desktop.tray.switch.text().lower() == "use as host…"
+    assert desktop.paired_peers("agent")  # pairings are kept
+
+    assert desktop.switch_role() == "host"
+    qapp.processEvents()
+    assert desktop.role == "host" and desktop.check_config() is None
+    desktop.window.show_page("settings")
+    qapp.processEvents()
+    assert settings.switch_button.text() == "Switch to agent…"
