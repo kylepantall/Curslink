@@ -265,3 +265,15 @@ def test_leaving_a_screen_in_front_glows_inside_the_screen_behind():
 def test_mirror_mode_has_no_boundary_inside_the_screen_behind():
     lay = overlap_layout(pointer_through=True)
     assert find_hint(lay, "pc", 1780, 1200, everyone) is None
+
+
+def test_chevron_points_towards_the_edge():
+    pytest.importorskip("PySide6.QtWidgets")
+    from curslink.edgeoverlay import chevron_points
+
+    for side, (dx, dy) in {"right": (1, 0), "left": (-1, 0), "top": (0, -1), "bottom": (0, 1)}.items():
+        first, tip, last = chevron_points(side, 100, 100)
+        arms = ((first[0] + last[0]) / 2, (first[1] + last[1]) / 2)
+        # The tip sits beyond the middle of the arms, in the edge's direction.
+        assert (tip[0] - arms[0]) * dx + (tip[1] - arms[1]) * dy > 0
+        assert (tip[0] - arms[0]) * dy == 0 and (tip[1] - arms[1]) * dx == 0

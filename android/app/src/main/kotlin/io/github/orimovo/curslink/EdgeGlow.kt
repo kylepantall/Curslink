@@ -212,12 +212,13 @@ class EdgeGlow(private val context: Context, private val toPx: (Double, Double) 
         canvas.drawText(sub, textX, cy + 13f * d, subPaint)
         stroke.color = withAlpha(ink, shown * 0.6f)
         val chev = Path()
-        if (mirrored) {
-            val x = body.left + pad + 6f * d
-            chev.moveTo(x + 4.5f * d, cy - 4.5f * d); chev.lineTo(x, cy); chev.lineTo(x + 4.5f * d, cy + 4.5f * d)
-        } else {
-            val x = body.right - pad - 6f * d
-            chev.moveTo(x - 4.5f * d, cy - 4.5f * d); chev.lineTo(x, cy); chev.lineTo(x - 4.5f * d, cy + 4.5f * d)
+        val cs = 4.5f * d
+        var x = if (mirrored) body.left + pad + 6f * d else body.right - pad - 6f * d
+        when (c.side) {
+            "left" -> { chev.moveTo(x + cs, cy - cs); chev.lineTo(x, cy); chev.lineTo(x + cs, cy + cs) }
+            "top" -> { x -= cs / 2; chev.moveTo(x - cs, cy + cs / 2); chev.lineTo(x, cy - cs / 2); chev.lineTo(x + cs, cy + cs / 2) }
+            "bottom" -> { x -= cs / 2; chev.moveTo(x - cs, cy - cs / 2); chev.lineTo(x, cy + cs / 2); chev.lineTo(x + cs, cy - cs / 2) }
+            else -> { chev.moveTo(x - cs, cy - cs); chev.lineTo(x, cy); chev.lineTo(x - cs, cy + cs) }
         }
         canvas.drawPath(chev, stroke)
     }
