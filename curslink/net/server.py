@@ -92,20 +92,33 @@ class HostServer:
         self.udp: HostUdp | None = None
 
     async def start(self) -> None:
-        self._server = await asyncio.start_server(
-            self.handle_streams, self.host, self.port, ssl=self.ssl_context, limit=STREAM_LIMIT
-        )
-        sock = self._server.sockets[0]
-        self.port = sock.getsockname()[1]
+        any_port = self.port == 0
+        for attempt in range(5):
+            self._server = await asyncio.start_server(
+                self.handle_streams, self.host, 0 if any_port else self.port, ssl=self.ssl_context,
+                limit=STREAM_LIMIT,
+            )
+            sock = self._server.sockets[0]
+            self.port = sock.getsockname()[1]
+            if not self.udp_enabled:
+                break
+            # A port the OS picked can be free for TCP but taken for UDP
+            # (Windows, often); then pick another rather than lose UDP.
+            await self._start_udp(warn=not any_port or attempt == 4)
+            if self.udp is not None or not any_port or attempt == 4:
+                break
+            self._server.close()
+            await self._server.wait_closed()
         log.info("listening on %s:%d", self.host, self.port)
-        if self.udp_enabled:
-            await self._start_udp()
 
-    async def _start_udp(self) -> None:
+    async def _start_udp(self, warn: bool = True) -> None:
         loop = asyncio.get_running_loop()
         try:
             _, self.udp = await loop.create_datagram_endpoint(HostUdp, local_addr=(self.host, self.port))
         except OSError as exc:
+            if not warn:
+                self.udp = None
+                return
             log.warning("can't listen for UDP on port %d (%s); pointer moves will use TCP", self.port, exc)
             self.udp = None
             return
