@@ -80,6 +80,11 @@ class OverlayProcess:
         with self._lock:
             self._ensure()
 
+    @property
+    def pid(self) -> int | None:
+        proc = self._proc
+        return proc.pid if proc is not None and proc.poll() is None else None
+
     def _read(self, proc: subprocess.Popen) -> None:
         try:
             for line in proc.stdout:

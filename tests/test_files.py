@@ -917,3 +917,53 @@ def test_helper_edge_strips(capsys):
     assert "drop targets on the screen edges" in capsys.readouterr().out
     files.handle("strips off")
     assert files.strips == []
+
+
+async def test_a_held_drag_keeps_checking_the_window_under_it(tmp_path, monkeypatch):
+    monkeypatch.setattr("curslink.files.native.FOLLOW_EVERY_S", 0.01)
+
+    class Follow:
+        ticks, resets = 0, 0
+
+        def tick(self, now):
+            self.ticks += 1
+
+        def reset(self):
+            self.resets += 1
+
+    follow = Follow()
+    drop, receiver, helper, calls = native(tmp_path)
+    drop.follow = follow
+    drop.begin("f1", CARD)
+    await asyncio.sleep(0.05)
+    assert follow.ticks == 0                       # not before the real drag starts
+    drop.on_helper("nativedrag-started f1 card")
+    await asyncio.sleep(0.06)
+    assert follow.resets == 1 and follow.ticks >= 3
+    drop.on_helper("nativedrag-ended f1 copy")
+    await asyncio.sleep(0.03)
+    seen = follow.ticks
+    await asyncio.sleep(0.05)
+    assert follow.ticks == seen                    # stops with the drag
+
+
+def test_focus_follower_waits_for_the_pointer_to_rest(monkeypatch):
+    from curslink.files import macfocus
+
+    monkeypatch.setattr(macfocus.sys, "platform", "darwin")
+    monkeypatch.setattr("curslink.inputs.pynput_backend.mac_cursor", lambda: (10.0, 10.0))
+    under = {"hit": (42, "Mail", 7)}
+    monkeypatch.setattr(macfocus, "window_under", lambda x, y, skip: under["hit"])
+    raised = []
+    monkeypatch.setattr(macfocus, "raise_window", lambda pid, x, y: raised.append(pid))
+    f = macfocus.FocusFollower()
+    f.tick(0.0)
+    f.tick(0.1)
+    assert raised == []                            # only just arrived
+    f.tick(0.3)
+    f.tick(0.5)
+    assert raised == [42]                          # once, after resting
+    under["hit"] = (43, "Notes", 9)
+    f.tick(0.6)
+    f.tick(0.9)
+    assert raised == [42, 43]
