@@ -84,6 +84,7 @@ MESSAGE_TYPES = frozenset(
     {
         "hello",
         "welcome",
+        "refused",  # instead of welcome: why the host won't take this agent ({"reason"})
         "isolink",
         "popup_in",
         "popup_close",

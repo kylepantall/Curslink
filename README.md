@@ -212,7 +212,9 @@ session for now.
   right-click is Back, middle-click is Home, Esc is Back. Typing goes
   straight into the text field on Android 13 and later (basic typing
   before that). A PIN or fingerprint lock still asks to be unlocked when
-  the phone wakes; you can click the PIN in with the mouse.
+  the phone wakes; you can click the PIN in with the mouse. If it won't
+  link, **Export logs** in the app shares what the phone tried and what
+  the computer answered (never the keys).
 
 ## Security
 

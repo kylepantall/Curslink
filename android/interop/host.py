@@ -34,7 +34,9 @@ def say(*parts) -> None:
 
 
 async def main() -> None:
-    keys: dict[str, bytes] = {}
+    # A phone whose key the host has but that isn't in its devices (paired,
+    # but the host never reloaded its config): it should be told why.
+    keys: dict[str, bytes] = {"pixel-stranger": b"s" * 32}
     known: set[str] = set()
     links: list[HostRelayLink] = []
     loop = asyncio.get_running_loop()

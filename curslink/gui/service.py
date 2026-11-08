@@ -68,7 +68,7 @@ class Service(QObject):
         self._exited.connect(self._on_exit)
 
     _line_seen = Signal(str)
-    _exited = Signal(int)
+    _exited = Signal(object, int)  # (the process, its exit code)
 
     # -- control ------------------------------------------------------------
     def start(self, role: str, config: Path) -> None:
@@ -148,7 +148,7 @@ class Service(QObject):
         for line in proc.stdout:
             self._line_seen.emit(line.rstrip("\r\n"))
         code = proc.wait()
-        self._exited.emit(code)
+        self._exited.emit(proc, code)
 
     def _on_line(self, line: str) -> None:
         event = events.parse(line)
@@ -164,7 +164,14 @@ class Service(QObject):
             self.tail.append(event.get("message", ""))
         self.event.emit(event)
 
-    def _on_exit(self, code: int) -> None:
+    def _on_exit(self, proc: subprocess.Popen, code: int) -> None:
+        if proc is not self._proc:
+            # The one restart() or a role switch replaced: its exit says
+            # nothing about the one running now (taking it for that one left
+            # the app thinking nothing ran, so saving the config never
+            # restarted the host, which then turned away a phone paired since).
+            log.info("previous %s (pid %s) exited (code %s)", self.role, proc.pid, code)
+            return
         up_for = time.monotonic() - self._started_at
         self._proc = None
         if self._stopping or code == 0:

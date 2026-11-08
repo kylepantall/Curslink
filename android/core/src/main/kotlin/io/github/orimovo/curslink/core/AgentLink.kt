@@ -190,6 +190,15 @@ class AgentLink(
         }
     }
 
+    /** Why the host turned us away, in words for the phone's screen. */
+    private fun refusal(p: HostPairing, reason: String): String = when {
+        "unknown device" in reason ->
+            "${p.hostName} doesn't have this phone in its layout yet. Open Curslink there: if the phone isn't " +
+                "on its Devices page, scan a new QR code; if it is, restart Curslink there. (${reason})"
+        reason.isNotEmpty() -> "${p.hostName} turned us away: $reason"
+        else -> "${p.hostName} turned us away"
+    }
+
     private class Opened(val socket: Socket, val direct: Boolean, val via: String)
 
     private fun open(p: HostPairing): Opened {
@@ -238,8 +247,9 @@ class AgentLink(
                 "auth" to Tls.helloAuth(p.key, tls.binding, p.myId),
                 "ping_s" to pingSeconds,
             ))
-            val welcome = io.read() ?: throw ProtocolException("the host closed the connection")
-            if (welcome.t != "welcome") throw ProtocolException("host did not welcome us")
+            val welcome = io.read() ?: throw ProtocolException("${p.hostName} closed the connection")
+            if (welcome.t == "refused") throw ProtocolException(refusal(p, welcome.str("reason") ?: ""))
+            if (welcome.t != "welcome") throw ProtocolException("${p.hostName} did not welcome us")
             via = opened.via
             log("connected to ${p.hostName} via $via")
             if (opened.direct) {

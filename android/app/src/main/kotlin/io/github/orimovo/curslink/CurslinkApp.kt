@@ -7,6 +7,7 @@ import android.app.NotificationManager
 class CurslinkApp : Application() {
     override fun onCreate() {
         super.onCreate()
+        AppLog.init(this)
         val nm = getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(
             NotificationChannel(LinkService.CHANNEL_LINK, "Staying linked", NotificationManager.IMPORTANCE_MIN).apply {

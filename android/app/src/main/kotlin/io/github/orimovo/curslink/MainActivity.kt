@@ -163,10 +163,31 @@ class MainActivity : AppCompatActivity() {
             LinkService.instance?.relink()
             Toast.makeText(this, "Saved", Toast.LENGTH_SHORT).show()
         })
+        root.addView(text("Help", 20f, bold = true, top = 24))
+        root.addView(text("If something isn't working, send these to whoever's helping you. They say what the phone tried and what the computer answered, never your keys.", 13f))
+        root.addView(button("Export logs") { exportLogs() })
         root.addView(text("This phone: ${prefs.name} · id ${prefs.deviceId}", 12f, top = 24).apply { gravity = Gravity.START })
 
         val request = LinkService.instance?.pairRequest
         if (request != null && pairDialog == null) askForCode(request) else if (request == null) pairDialog?.dismiss()
+    }
+
+    private fun exportLogs() {
+        val pairing = prefs.pairing
+        val (state, detail) = LinkService.state
+        val summary = buildString {
+            append("This phone: ${prefs.name} (${prefs.deviceId})\n")
+            append(pairing?.let { "Paired with: ${it.hostName} (${it.hostId}), addresses ${it.addresses.joinToString().ifEmpty { "none" }}, port ${it.controlPort}" +
+                (if (it.hasRelay) ", relay ${it.relay}" else ", no relay") } ?: "Not paired")
+            append("\nLink: $state${if (detail.isNotEmpty()) " ($detail)" else ""}")
+            append("\nMouse and keyboard (accessibility): ${if (accessibilityOn()) "on" else "off"}")
+            append("\nIgnoring battery optimisation: ${(getSystemService(POWER_SERVICE) as PowerManager).isIgnoringBatteryOptimizations(packageName)}")
+            append("\nScreen layout size: ${prefs.layoutSize?.let { "${it.first} x ${it.second} dp" } ?: "not set"}")
+        }
+        runCatching { AppLog.share(this, summary) }.onFailure {
+            AppLog.w("CurslinkMain", "couldn't export logs", it)
+            Toast.makeText(this, "Couldn't export the logs: ${it.message}", Toast.LENGTH_LONG).show()
+        }
     }
 
     private fun startScan() {
@@ -193,6 +214,7 @@ class MainActivity : AppCompatActivity() {
             val outcome = runCatching { PairingNet.pairByQr(invite, me, service.about()) }
             runOnUiThread {
                 busy = false
+                outcome.onFailure { AppLog.w("CurslinkMain", "QR pairing with ${invite.hostName} failed", it) }
                 outcome.onSuccess { (result, address) ->
                     service.paired(result, address, invite.controlPort, invite.relay to invite.relayKey)
                     Toast.makeText(this, "Paired with ${result.peer.name}", Toast.LENGTH_LONG).show()

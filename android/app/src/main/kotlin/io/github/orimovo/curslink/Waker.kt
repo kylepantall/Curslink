@@ -4,7 +4,6 @@ import android.app.KeyguardManager
 import android.content.Context
 import android.content.Intent
 import android.os.PowerManager
-import android.util.Log
 
 /** The mouse arrived: turn the screen on and bring up the unlock screen. */
 object Waker {
@@ -30,6 +29,6 @@ object Waker {
                     Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_ANIMATION or Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS,
                 ),
             )
-        }.onFailure { Log.w("CurslinkWake", "couldn't show over the lock screen: $it") }
+        }.onFailure { AppLog.w("CurslinkWake", "couldn't show over the lock screen: $it") }
     }
 }

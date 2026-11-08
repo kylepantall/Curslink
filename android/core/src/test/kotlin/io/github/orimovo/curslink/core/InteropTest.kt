@@ -87,6 +87,19 @@ class InteropTest {
             val pairing = HostPairing(invite.hostId, invite.hostName, me.deviceId, result.key, listOf(address), invite.controlPort, invite.relay, invite.relayKey)
             run(pairing, wantUdp = true)
             run(pairing.copy(addresses = emptyList()), wantUdp = false)  // through the relay only
+
+            // Known by key but not in the host's devices: the phone is told why, not just cut off.
+            val why = LinkedBlockingQueue<String>()
+            val stranger = AgentLink(handler, { pairing.copy(myId = "pixel-stranger", key = ByteArray(32) { 's'.code.toByte() }, relay = "") },
+                { Hello("Test Pixel", "Android 15", screens) },
+                onState = { s, detail -> if (s == LinkState.WAITING && detail.isNotEmpty()) why.put(detail) })
+            stranger.start()
+            try {
+                val detail = why.poll(10, TimeUnit.SECONDS) ?: fail("the stranger was never told")
+                assertTrue("doesn't have this phone" in detail && "unknown device 'pixel-stranger'" in detail, detail)
+            } finally {
+                stranger.stop()
+            }
         } finally {
             proc.outputStream.close()
             proc.destroy()

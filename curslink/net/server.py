@@ -251,6 +251,12 @@ class HostServer:
                 pinger.cancel()
         except (asyncio.TimeoutError, ProtocolError) as exc:
             log.warning("rejecting %s: %s", peer, exc)
+            if conn is None and isinstance(exc, ProtocolError):
+                # Say why, so the agent (a phone, say) can show it rather
+                # than just seeing the connection close.
+                with contextlib.suppress(Exception):
+                    writer.write(encode("refused", reason=str(exc)))
+                    await asyncio.wait_for(writer.drain(), 1)
         except (ConnectionError, ssl.SSLError, OSError) as exc:
             log.info("connection from %s ended: %s", peer, exc)
         finally:

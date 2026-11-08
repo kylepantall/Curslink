@@ -75,7 +75,7 @@ async def test_wrong_secret_cannot_connect():
 
 async def test_unknown_device_rejected():
     server, client, task, *_ = await start(device="intruder")
-    with pytest.raises(Exception):
+    with pytest.raises(Exception, match="refused us: unknown device 'intruder'"):
         await asyncio.wait_for(task, 3)
     assert server.connections == {}
     await server.close()
