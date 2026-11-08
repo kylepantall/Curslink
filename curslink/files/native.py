@@ -174,7 +174,8 @@ class NativeDrop:
         if word == "nativedrag-started":
             if drop is not None and drop.phase == "starting":
                 drop.phase = "dragging"
-                self.helper("card hide")
+                if not rest.endswith(" card"):  # (a Mac's drag keeps the card as its image)
+                    self.helper("card hide")
                 log.info("drop: real drag started in %d ms", (time.monotonic() - drop.started_at) * 1000)
             return True
         if word == "nativedrag-ended":
@@ -183,6 +184,7 @@ class NativeDrop:
             if drop is not None and drop.phase == "dragging":
                 drop.phase = "finished"
                 self.drops.pop(tid, None)
+                self.helper("card hide")
             return True
         return False
 
@@ -280,6 +282,7 @@ class NativeDrop:
         self.popups.quiet.discard(drop.id)
         if drop.phase in ("starting", "dragging") and drop.native:
             self.helper("nativedrag cancel")
+            self.helper("card hide")
             if drop.phase == "dragging":
                 self.cancel_drag()
         else:

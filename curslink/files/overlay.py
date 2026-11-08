@@ -137,6 +137,25 @@ def strip_rect(strip: dict, to_logical) -> "object":
     return QRect(g.x(), g.y() + g.height() - t, g.width(), t)
 
 
+def edge_rects() -> list:
+    """Thin strips along the sides of Qt's screens that touch no other
+    screen: where a drag can leave this computer."""
+    from PySide6.QtCore import QRect
+    from PySide6.QtGui import QGuiApplication
+
+    from curslink.files.dragout import outer_sides
+
+    geos = [sc.geometry() for sc in QGuiApplication.screens()]
+    sides = outer_sides([{"x": g.x(), "y": g.y(), "width": g.width(), "height": g.height()} for g in geos])
+    t = 3
+    rects = []
+    for s in sides:
+        x, y, w, h = s["x"], s["y"], s["w"], s["h"]
+        rects.append({"left": QRect(x, y, t, h), "right": QRect(x + w - t, y, t, h),
+                      "top": QRect(x, y, w, t), "bottom": QRect(x, y + h - t, w, t)}[s["side"]])
+    return rects
+
+
 def _elide(painter, text: str, width: int) -> str:
     from PySide6.QtCore import Qt
 
@@ -392,13 +411,17 @@ def make_drag_source(tid: str, paths: list[str], info: dict):
             w.dragging = True
             w.timer.stop()
             try:
-                started = mac_begin_drag(w, paths, card_pixmap(info),
+                # The drag image would sit still: macOS only moves it on
+                # mouse-dragged events, which go to whoever got the button's
+                # mouse-down (on another computer, here). So the drag carries
+                # an empty image and the card keeps following the pointer.
+                started = mac_begin_drag(w, paths, None,
                                          lambda op: (_say(f"nativedrag-ended {tid} {op}"), w.close()))
             except Exception as exc:  # pragma: no cover - macOS only
                 _say(f"log the Mac drag didn't start: {type(exc).__name__}: {exc}")
                 started = False
             if started:
-                _say(f"nativedrag-started {tid}")
+                _say(f"nativedrag-started {tid} card")  # keep the card up
             else:
                 w.dragging = False
                 w.timer.start(8)
@@ -448,14 +471,17 @@ def mac_begin_drag(widget, paths: list[str], pixmap, done) -> bool:
     window = view.window()
     if window is None:
         return False
-    buf = QByteArray()
-    io = QBuffer(buf)
-    io.open(QIODevice.OpenModeFlag.WriteOnly)
-    pixmap.save(io, "PNG")
-    raw = bytes(buf.data())
-    image = NSImage.alloc().initWithData_(NSData.dataWithBytes_length_(raw, len(raw)))
-    ratio = pixmap.devicePixelRatio() or 1.0
-    iw, ih = pixmap.width() / ratio, pixmap.height() / ratio
+    if pixmap is None:
+        image, iw, ih = NSImage.alloc().initWithSize_((1, 1)), 1.0, 1.0  # nothing to see
+    else:
+        buf = QByteArray()
+        io = QBuffer(buf)
+        io.open(QIODevice.OpenModeFlag.WriteOnly)
+        pixmap.save(io, "PNG")
+        raw = bytes(buf.data())
+        image = NSImage.alloc().initWithData_(NSData.dataWithBytes_length_(raw, len(raw)))
+        ratio = pixmap.devicePixelRatio() or 1.0
+        iw, ih = pixmap.width() / ratio, pixmap.height() / ratio
     at = window.mouseLocationOutsideOfEventStream()
     local = view.convertPoint_fromView_(at, None)
     flipped = view.isFlipped()
@@ -492,7 +518,12 @@ class FilesOverlay:
         rest = rest.strip()
         if word == "strips":
             self._close(self.strips)
-            if rest != "off":
+            if rest == "edges":
+                rects = edge_rects()
+                self.strips = [make_catcher(r) for r in rects]
+                _say("log drop targets on the screen edges: " + ", ".join(
+                    f"{r.x()},{r.y()} {r.width()}x{r.height()}" for r in rects))
+            elif rest != "off":
                 try:
                     strips = json.loads(rest)
                 except ValueError:
