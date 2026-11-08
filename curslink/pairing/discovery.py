@@ -139,6 +139,23 @@ def local_addresses() -> list[str]:
     return out
 
 
+def zeroconf_options() -> dict:
+    """Keyword arguments for ``Zeroconf``: IPv4 only, on the LAN addresses.
+
+    zeroconf's default is every interface, which on Windows includes
+    127.0.0.1 (its multicast socket fails with WinError 1231 "network
+    location cannot be reached") and VPN/virtual adapters that can't carry
+    multicast, and each failing socket costs a send. Binding just the real
+    addresses makes queries and announcements go out reliably."""
+    from zeroconf import IPVersion
+
+    addresses = list(dict.fromkeys(local_addresses()))
+    opts: dict = {"ip_version": IPVersion.V4Only}
+    if addresses:
+        opts["interfaces"] = addresses
+    return opts
+
+
 def local_hostname() -> str:
     """This machine's mDNS name, e.g. "kyles-pc.local"."""
     host = re.sub(r"[^A-Za-z0-9-]", "-", socket.gethostname().split(".")[0]) or "curslink"
@@ -176,7 +193,7 @@ class Advertiser:
             server=f"{local_hostname()}.",
             parsed_addresses=addresses,
         )
-        self._zc = AsyncZeroconf()
+        self._zc = AsyncZeroconf(**zeroconf_options())
         # allow_name_change: two devices with the same display name still both show up.
         await self._zc.async_register_service(self._info, allow_name_change=True)
         log.info("advertising %s on the LAN for pairing (port %d) as %s, %s", self.me.name, self.pairing_port,
@@ -192,8 +209,12 @@ class Advertiser:
             self._zc = None
 
 
-async def browse(timeout: float = 3.0, exclude: str | None = None) -> list[Found]:
-    """Every Curslink device that answers within ``timeout`` seconds."""
+async def browse(timeout: float = 3.0, exclude: str | None = None, want: str | None = None) -> list[Found]:
+    """Every Curslink device that answers within ``timeout`` seconds.
+
+    With ``want`` (a device id) it returns as soon as that device has
+    answered, so a long ``timeout`` (Wi-Fi drops the odd multicast packet)
+    only costs time when the device really isn't there."""
     from zeroconf import ServiceStateChange
     from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZeroconf
 
@@ -205,10 +226,16 @@ async def browse(timeout: float = 3.0, exclude: str | None = None) -> list[Found
 
     log.info("discovery: looking for Curslink devices for %.0fs from %s (%s)", timeout, local_hostname(),
              ", ".join(local_addresses()) or "no LAN address")
-    azc = AsyncZeroconf()
+    azc = AsyncZeroconf(**zeroconf_options())
     browser = AsyncServiceBrowser(azc.zeroconf, [SERVICE_TYPE], handlers=[on_change])
+    tag = f"({want[:20]})" if want else None
     try:
-        await asyncio.sleep(timeout)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while loop.time() < deadline:
+            await asyncio.sleep(0.1)
+            if tag and any(tag in n for n in names):
+                break
         infos = [AsyncServiceInfo(SERVICE_TYPE, n) for n in sorted(names)]
         await asyncio.gather(*(i.async_request(azc.zeroconf, 1500) for i in infos))
     finally:
@@ -232,7 +259,7 @@ async def browse(timeout: float = 3.0, exclude: str | None = None) -> list[Found
 
 
 async def find(device_id: str, timeout: float = 3.0) -> Found | None:
-    for item in await browse(timeout):
+    for item in await browse(timeout, want=device_id):
         if item.device_id == device_id:
             return item
     return None

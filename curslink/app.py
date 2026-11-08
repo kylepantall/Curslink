@@ -1199,7 +1199,7 @@ async def resolve_host(cfg: AgentConfig, store: PairingStore) -> ConnectTarget:
     if peer is not None:
         from curslink.pairing.discovery import find
 
-        found = await find(peer.device_id, timeout=2.0)
+        found = await find(peer.device_id, timeout=5.0)
         if found is not None and found.control_port:
             from curslink.pairing.discovery import reachable
 
