@@ -369,3 +369,22 @@ def test_helper_captures_and_shows_a_mirror(qapp):
     window.grab()  # paints without trouble
     helper.handle('mirror {"captures": [], "shows": []}')
     assert not helper.captures and not helper.windows
+
+
+def test_no_drawn_pointer_for_a_phone_whose_capture_shows_its_own():
+    lay = Layout.from_devices([
+        Device("pc", "PC", (Screen("main", "pc", 0, 0, 1000, 600, z=1),)),
+        Device("phone", "S25", (Screen("main", "phone", 900, 300, 400, 800),)),
+    ], allow_overlap=True, pointer_through=True, mirror=True)
+
+    class PhoneTransport(Transport):
+        def supports(self, device_id, feature):
+            return device_id == "phone" and feature in ("mirror", "mirror_cursor")
+
+    transport = PhoneTransport({"phone"})
+    host, router, _local = make_host(lay, transport, [])
+    router.switch_to(lay.screen("phone", "main"), 1100, 700, "gaze")
+    assert transport.of("mirror", "phone")[-1]["captures"]
+    router.on_motion(-150, -200)  # into the corner the PC covers
+    assert router.active_device == "phone" and (router.x, router.y) == (950, 500)
+    assert not [d for d in transport.of("mirror_pointer") if "x" in d]

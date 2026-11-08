@@ -37,6 +37,7 @@ class InputService : AccessibilityService() {
     private lateinit var gestures: Gestures
     private lateinit var wm: WindowManager
     private var view: PointerView? = null
+    private var mirrorView: MirrorView? = null
     private var params: WindowManager.LayoutParams? = null
     private val shapeThread = HandlerThread("curslink-shape").apply { start() }
     private val shapeHandler = Handler(shapeThread.looper)
@@ -70,6 +71,7 @@ class InputService : AccessibilityService() {
     override fun onDestroy() {
         instance = null
         view?.let { runCatching { wm.removeView(it) } }
+        mirrorView?.let { runCatching { wm.removeView(it) } }
         shapeThread.quitSafely()
         super.onDestroy()
     }
@@ -77,7 +79,25 @@ class InputService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
     override fun onInterrupt() {}
 
+    private fun overlayParams() = WindowManager.LayoutParams(
+        WindowManager.LayoutParams.MATCH_PARENT,
+        WindowManager.LayoutParams.MATCH_PARENT,
+        WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+        WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+        PixelFormat.TRANSLUCENT,
+    ).apply {
+        if (Build.VERSION.SDK_INT >= 28) layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+    }
+
     private fun addOverlay() {
+        // Mirrors first, so the pointer is drawn above them.
+        if (mirrorView?.isAttachedToWindow != true) {
+            mirrorView?.let { old -> runCatching { wm.removeViewImmediate(old) } }
+            val m = MirrorView(this)
+            runCatching { wm.addView(m, overlayParams()) }.onSuccess { mirrorView = m }
+                .onFailure { AppLog.w(TAG, "couldn't add the mirror overlay", it) }
+        }
         val v = PointerView(this)
         val lp = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -107,6 +127,29 @@ class InputService : AccessibilityService() {
         view = null
         params = null
         addOverlay()
+    }
+
+    // ------------------------------------------------------------ mirrors
+    /** Mirror mode: the mirrors to show now (rectangles in the layout's units). */
+    fun mirrorShows(shows: List<io.github.orimovo.curslink.core.MirrorShow>) = main.post {
+        if (shows.isNotEmpty()) ensureOverlay()
+        val wanted = shows.associate { s ->
+            val a = toPxFree(s.x, s.y)
+            val b = toPxFree(s.x + s.w, s.y + s.h)
+            s.id to Triple(android.graphics.RectF(a.x, a.y, b.x, b.y), s.label, s.edges)
+        }
+        mirrorView?.set(wanted)
+    }
+
+    fun mirrorImage(id: String, bitmap: android.graphics.Bitmap) = main.post { mirrorView?.image(id, bitmap) ?: bitmap.recycle() }
+
+    fun mirrorPointer(id: String, x: Double?, y: Double?) = main.post { mirrorView?.pointer(id, x?.toFloat(), y?.toFloat()) }
+
+    /** Like toPx, without keeping it on the screen (a mirror's far corner is its edge). */
+    private fun toPxFree(x: Double, y: Double): PointF {
+        val size = Screen.sizePx(this)
+        val (w, h) = Prefs(this).layoutSize ?: Screen.naturalSizeDp(this)
+        return PointF((x / w * size.x).toFloat(), (y / h * size.y).toFloat())
     }
 
     // ----------------------------------------------------------- mapping

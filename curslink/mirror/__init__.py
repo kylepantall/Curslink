@@ -352,6 +352,9 @@ class MirrorHost:
             self.on_ack(self.local_id, data.get("id"))
 
     # -- the pointer -------------------------------------------------------------
+    def _captures_cursor(self, device_id: str) -> bool:
+        return device_id != self.local_id and self.server.supports(device_id, "mirror_cursor")
+
     def _send_pointer(self) -> None:
         if not self.streams:
             return
@@ -359,6 +362,8 @@ class MirrorHost:
         x, y = self.router.x, self.router.y
         for sid, stream in self.streams.items():
             p = stream.pointer(x, y) if self.router.screen == stream.source else None
+            if p is not None and self._captures_cursor(stream.source.device_id):
+                p = None  # it's in the picture already (a phone draws its pointer on its screen)
             if p is not None:
                 p = (round(p[0], 4), round(p[1], 4))
             last = self._pointer.get(sid)

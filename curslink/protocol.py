@@ -170,6 +170,9 @@ FILE_ACK_FEATURE = "file_ack"
 # mirror_pointer, mirror_ack): it can capture part of its screens and show
 # part of another's (see curslink.mirror).
 MIRROR_FEATURE = "mirror"
+# Listed with "mirror" by an agent whose captures already show its pointer
+# (a phone, which draws its own): the host sends no mirror_pointer for them.
+MIRROR_CURSOR_FEATURE = "mirror_cursor"
 FILE_FRAMES = frozenset({"file_begin", "file_item", "file_data", "file_end", "file_cancel", "file_result",
                          "file_ack"})
 

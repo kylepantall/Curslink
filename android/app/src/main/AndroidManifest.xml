@@ -10,6 +10,8 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <!-- Mirror mode with the phone behind: sharing the covered part of the screen. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- Staying linked while the phone sleeps: control can arrive any time. -->
@@ -48,6 +50,15 @@
             android:theme="@style/Theme.Curslink.Wake"
             android:turnScreenOn="true" />
 
+        <!-- Asks to share the screen for mirror mode (Android's own prompt). -->
+        <activity
+            android:name=".MirrorConsentActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:theme="@style/Theme.Curslink.Wake" />
+
         <activity
             android:name="com.journeyapps.barcodescanner.CaptureActivity"
             android:screenOrientation="fullSensor"
@@ -56,7 +67,7 @@
         <service
             android:name=".LinkService"
             android:exported="false"
-            android:foregroundServiceType="connectedDevice" />
+            android:foregroundServiceType="connectedDevice|mediaProjection" />
 
         <service
             android:name=".InputService"
