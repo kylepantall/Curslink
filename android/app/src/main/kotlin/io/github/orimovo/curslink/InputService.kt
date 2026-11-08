@@ -26,6 +26,7 @@ import kotlin.math.abs
  */
 class InputService : AccessibilityService() {
     companion object {
+        private const val TAG = "CurslinkInput"
         @Volatile var instance: InputService? = null
             private set
         private const val KEEP_ON_MS = 120_000L
@@ -46,13 +47,21 @@ class InputService : AccessibilityService() {
     private var pointer = PointF()
     private var finger: PointF? = null
     private var pendingScroll = PointF()
-    private val endScroll = Runnable { gestures.release(holdMs = 60); finger = null }
+    private val endScroll = Runnable {
+        // Lifting a sideways swipe at speed flicks it on, as a finger would,
+        // so pages and carousels turn instead of springing back; an up and
+        // down scroll holds still first so the page stops where it is.
+        gestures.release(holdMs = if (sideways) 0 else 60)
+        finger = null
+    }
+    private var sideways = false
 
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
         gestures = Gestures(this, main)
         wm = getSystemService(WINDOW_SERVICE) as WindowManager
+        AppLog.i(TAG, "mouse and keyboard service on")
         addOverlay()
         // The link may already be up (the service runs on its own).
         if (Prefs(this).pairing != null) runCatching { LinkService.start(this) }
@@ -84,7 +93,20 @@ class InputService : AccessibilityService() {
         runCatching { wm.addView(v, lp) }.onSuccess {
             view = v
             params = lp
-        }
+            AppLog.i(TAG, "pointer overlay added")
+        }.onFailure { AppLog.w(TAG, "couldn't add the pointer overlay", it) }
+    }
+
+    /** The overlay can be gone (never added while the phone was starting,
+     *  or dropped by the system): put it back before drawing on it. */
+    private fun ensureOverlay() {
+        val v = view
+        if (v != null && v.isAttachedToWindow) return
+        AppLog.w(TAG, if (v == null) "no pointer overlay; adding it" else "the pointer overlay was detached; adding it again")
+        v?.let { old -> runCatching { wm.removeViewImmediate(old) } }
+        view = null
+        params = null
+        addOverlay()
     }
 
     // ----------------------------------------------------------- mapping
@@ -126,7 +148,17 @@ class InputService : AccessibilityService() {
     // -------------------------------------------------------- from the link
     fun enter(x: Double, y: Double, effect: String) = main.post {
         active = true
+        ensureOverlay()
         pointer = toPx(x, y)
+        view?.let { v ->
+            val draws = v.draws
+            main.postDelayed({
+                if (active && view === v && v.draws == draws) {
+                    AppLog.w(TAG, "the pointer overlay didn't draw: ${v.width}x${v.height}, attached ${v.isAttachedToWindow}, " +
+                        "shown ${v.isShown}, at (${pointer.x}, ${pointer.y}) of ${Screen.sizePx(this)}")
+                }
+            }, 1000)
+        }
         view?.apply {
             moveTo(pointer.x, pointer.y)
             shown = true
@@ -173,8 +205,10 @@ class InputService : AccessibilityService() {
                     gestures.release(pointer)
                 }
             }
-            // Android has no right-click: it's Back, as with a mouse plugged in.
-            "right", "x1" -> if (pressed) performGlobalAction(GLOBAL_ACTION_BACK)
+            // A touch screen's right-click is a long press (the context menu,
+            // selecting text); the mouse's back button (and Esc) is Back.
+            "right" -> if (pressed) gestures.longPress(pointer, ViewConfiguration.getLongPressTimeout() + 200L)
+            "x1" -> if (pressed) performGlobalAction(GLOBAL_ACTION_BACK)
             "middle" -> if (pressed) performGlobalAction(GLOBAL_ACTION_HOME)
             "x2" -> if (pressed) performGlobalAction(GLOBAL_ACTION_RECENTS)
         }
@@ -184,14 +218,15 @@ class InputService : AccessibilityService() {
         if (!active) return@post
         touched()
         if (gestures.down && !gestures.scrolling) return@post  // dragging: the wheel does nothing
-        val step = ViewConfiguration.get(this).scaledVerticalScrollFactor
+        val vc = ViewConfiguration.get(this)
         // Wheel up shows what's above: the finger slides down the page.
-        val ddx = (-dx * step).toFloat()
-        val ddy = (dy * step).toFloat()
+        val ddx = (-dx * vc.scaledHorizontalScrollFactor).toFloat()
+        val ddy = (dy * vc.scaledVerticalScrollFactor).toFloat()
         val size = Screen.sizePx(this)
         var f = finger
         if (f == null || !gestures.down) {
             pendingScroll.offset(ddx, ddy)
+            sideways = abs(pendingScroll.x) > abs(pendingScroll.y)
             val slop = ViewConfiguration.get(this).scaledTouchSlop
             if (abs(pendingScroll.x) < slop && abs(pendingScroll.y) < slop) return@post
             gestures.press(pointer, forScroll = true)
@@ -203,7 +238,7 @@ class InputService : AccessibilityService() {
         }
         if (f.x < 0 || f.y < 0 || f.x >= size.x || f.y >= size.y) {
             // The finger ran off the screen: lift it; the next scroll starts again at the pointer.
-            gestures.release(PointF(f.x.coerceIn(0f, size.x - 1f), f.y.coerceIn(0f, size.y - 1f)), holdMs = 60)
+            gestures.release(PointF(f.x.coerceIn(0f, size.x - 1f), f.y.coerceIn(0f, size.y - 1f)), holdMs = if (sideways) 0 else 60)
             finger = null
             return@post
         }

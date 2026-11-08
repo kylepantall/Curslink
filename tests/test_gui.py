@@ -779,8 +779,10 @@ def test_pair_a_phone_by_qr_code_and_pick_its_edge(desktop, qapp):
     assert (phone["screens"][0]["width"], phone["screens"][0]["height"]) == (411, 914)
     me = desktop.config().get("host", "device_id")
     assert desktop.config().side_of("pixel", me) == "right"
+    assert {lk["b"] for lk in desktop.config().links()} == {"pixel/phone"}  # the whole right side leads to it
     page.place(page.store().get("pixel"), me, "left")
     assert desktop.config().side_of("pixel", me) == "left"
+    assert desktop.config().links() and all(lk["a_side"] == "left" for lk in desktop.config().links())
 
 
 def test_switching_between_host_and_agent(desktop, qapp, monkeypatch):

@@ -209,10 +209,10 @@ session for now.
   which edge of your screens leads to it next to it under *Paired*.
   Android has no way for an app to move a real mouse pointer, so Curslink
   draws its own and turns clicks, drags and scrolls into touches;
-  right-click is Back, middle-click is Home, Esc is Back. Typing goes
-  straight into the text field on Android 13 and later (basic typing
-  before that). A PIN or fingerprint lock still asks to be unlocked when
-  the phone wakes; you can click the PIN in with the mouse. If it won't
+  right-click is a long press, middle-click is Home, and Esc or the
+  mouse's back button is Back. Typing goes straight into the text field
+  on Android 13 and later (basic typing before that). A PIN or
+  fingerprint lock still asks to be unlocked when the phone wakes; you can click the PIN in with the mouse. If it won't
   link, **Export logs** in the app shares what the phone tried and what
   the computer answered (never the keys).
 

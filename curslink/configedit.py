@@ -124,6 +124,9 @@ def _normalise(screens: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+OPPOSITE = {"left": "right", "right": "left", "top": "bottom", "bottom": "top"}
+
+
 class ConfigFile:
     """One ``curslink.toml``, edited in place."""
 
@@ -313,10 +316,15 @@ class ConfigFile:
         side, gap = max(gaps.items(), key=lambda kv: kv[1])
         return side if gap >= -1 else None
 
-    def place_beside(self, device_id: str, anchor_id: str, side: str) -> None:
+    def place_beside(self, device_id: str, anchor_id: str, side: str, whole_side: bool = False) -> None:
         """Move ``device_id`` (all its screens) against one edge of
         ``anchor_id``'s screens, centred along it: pushing the pointer off
-        that edge then lands on it. Edges calibrated for it are dropped."""
+        that edge then lands on it. Edges calibrated for it are dropped.
+
+        ``whole_side`` (a phone: one small screen): link every one of the
+        anchor's screens that's open on that side to it, end to end, so the
+        whole side leads to it, across monitors of any size and however
+        they're staggered, not just the stretch it happens to touch."""
         a, d = self._box(anchor_id), self._box(device_id)
         if a is None or d is None:
             raise KeyError(device_id if d is None else anchor_id)
@@ -339,6 +347,45 @@ class ConfigFile:
             ends = (str(link.get("a", "")), str(link.get("b", "")))
             if any(e.split("/")[0] == device_id for e in ends):
                 self.remove_link(*ends)
+        screens = list(self._device(device_id).get("screens", []))
+        if whole_side and len(screens) == 1:
+            mine = screens[0]
+            facing = OPPOSITE[side]
+            length = int(mine.get("width", 0)) if side in ("top", "bottom") else int(mine.get("height", 0))
+            target = f"{device_id}/{mine.get('id', 'screen0')}"
+            for screen_id, span in self.open_stretches(anchor_id, side):
+                self.set_link(f"{anchor_id}/{screen_id}", side, span, target, facing, (0, length))
+
+    def open_stretches(self, device_id: str, side: str, min_px: int = 40) -> list[tuple[str, tuple[int, int]]]:
+        """For each of a device's screens, the longest stretch of its ``side``
+        edge with none of the device's other screens beyond it, as
+        ``(screen id, (start, end))`` along that edge (px from its top or left)."""
+        rects = [(str(s.get("id", f"screen{i}")), int(s.get("x", 0)), int(s.get("y", 0)),
+                  int(s.get("width", 0)), int(s.get("height", 0)))
+                 for i, s in enumerate((self._device(device_id) or {}).get("screens", []))]
+        out = []
+        for sid, x, y, w, h in rects:
+            horizontal = side in ("top", "bottom")
+            edge = {"top": y, "bottom": y + h, "left": x, "right": x + w}[side]
+            lo, hi = (x, x + w) if horizontal else (y, y + h)
+            covered = []
+            for oid, ox, oy, ow, oh in rects:
+                if oid == sid:
+                    continue
+                near = {"top": oy + oh, "bottom": oy, "left": ox + ow, "right": ox}[side]
+                if abs(near - edge) > 8:
+                    continue
+                a, b = (ox, ox + ow) if horizontal else (oy, oy + oh)
+                if min(b, hi) > max(a, lo):
+                    covered.append((max(a, lo), min(b, hi)))
+            best, at = None, lo
+            for a, b in sorted(covered) + [(hi, hi)]:
+                if a - at >= min_px and (best is None or a - at > best[1] - best[0]):
+                    best = (at, a)
+                at = max(at, b)
+            if best is not None:
+                out.append((sid, (best[0] - lo, best[1] - lo)))
+        return out
 
     def remove_device(self, device_id: str) -> bool:
         devices = self.doc.get("devices")
