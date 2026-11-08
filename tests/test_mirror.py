@@ -132,10 +132,11 @@ def test_device_states_say_what_to_capture_and_show_in_each_ones_own_pixels():
     lay = desk()
     stream, = streams_for(lay, lay.screen("pc", "main"))
     states = device_states([stream], {"pc": "WKS82261"}, 15)
-    assert states["pc"] == {"captures": [{"id": stream.id, "screen": "main", "os": [800, 400, 200, 200], "fps": 15}],
-                            "shows": []}
+    assert states["pc"] == {"captures": [{"id": stream.id, "screen": "main", "os": [800, 400, 200, 200],
+                                          "screen_os": [0, 0, 1000, 600], "fps": 15}], "shows": []}
     show, = states["lap"]["shows"]
     assert show["os"] == [0, 0, 200, 200] and show["label"] == "WKS82261"
+    assert show["screen_os"] == [0, 0, 500, 300]
     assert set(show["edges"]) == {"right", "bottom"}  # where it ends inside the laptop
 
 
@@ -706,6 +707,9 @@ def test_screen_sizes_are_matched_and_checked():
     assert match(sizes, -500, 0, 2560, 1440) == (597, 336)  # moved, but the only one that size
     assert match(sizes + sizes[1:], -500, 0, 2560, 1440) is None
     assert match(sizes, 0, 0, 1280, 720) is None
+    # One monitor, laid out in logical pixels but measured in physical ones.
+    assert match(sizes[:1], 0, 0, 1280, 720) == (344, 194)
+    assert match(sizes[:1], 0, 0, 1280, 1024) is None
 
 
 async def test_a_mirroring_agent_says_how_big_its_screens_are_in_hello(monkeypatch):
@@ -734,3 +738,18 @@ async def test_a_mirroring_agent_says_how_big_its_screens_are_in_hello(monkeypat
     finally:
         await server.close()
         await asyncio.wait_for(task, 3)
+
+
+def test_mirror_rects_go_by_fractions_of_the_whole_screen(qapp):
+    # Kyle's laptop: the layout has it at 1920x1080, Qt sees it at another
+    # size (Windows scaling), but the pointer goes by fractions: so must the capture.
+    from PySide6.QtGui import QGuiApplication
+
+    from curslink.mirror.helper import spec_to_logical
+
+    g = QGuiApplication.primaryScreen().geometry()
+    x, y, w, h, index = spec_to_logical({"screen": "main", "os": [960, 540, 480, 270],
+                                          "screen_os": [0, 0, 1920, 1080]})
+    assert (x, y, w, h) == pytest.approx((g.x() + g.width() / 2, g.y() + g.height() / 2, g.width() / 4,
+                                          g.height() / 4))
+    assert QGuiApplication.screens()[index] == QGuiApplication.primaryScreen()

@@ -175,15 +175,24 @@ def apply_fit(layout: Layout, data: dict) -> tuple[float, float, float] | None:
     return current_fit(layout, behind, front)
 
 
+def screen_os(screen: Screen) -> list[int]:
+    """The whole screen as the layout has it, in that computer's OS pixels:
+    the helper places ``os`` rectangles as fractions of it, so a layout size
+    that isn't the screen's real one (Windows scaling) still lands right."""
+    return [screen.os_x, screen.os_y, screen.width, screen.height]
+
+
 def device_states(streams: list[Stream], names: dict[str, str], fps: int) -> dict[str, dict]:
     """What each device should capture and show for ``streams`` (the payload
     of its ``mirror`` frame). Devices with nothing to do aren't listed."""
     out: dict[str, dict] = {}
     for s in streams:
         src = out.setdefault(s.source.device_id, {"captures": [], "shows": []})
-        src["captures"].append({"id": s.id, "screen": s.source.id, "os": s.os_rect(s.source), "fps": fps})
+        src["captures"].append({"id": s.id, "screen": s.source.id, "os": s.os_rect(s.source),
+                                "screen_os": screen_os(s.source), "fps": fps})
         dst = out.setdefault(s.target.device_id, {"captures": [], "shows": []})
-        dst["shows"].append({"id": s.id, "screen": s.target.id, "os": s.os_rect(s.target), "size": list(s.shown[2:]),
+        dst["shows"].append({"id": s.id, "screen": s.target.id, "os": s.os_rect(s.target),
+                             "screen_os": screen_os(s.target), "size": list(s.shown[2:]),
                              "label": names.get(s.source.device_id, s.source.device_id), "edges": s.edges()})
     return out
 

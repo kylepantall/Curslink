@@ -969,3 +969,32 @@ def test_qt_keys_are_named_like_the_host_sends_them(qapp):
     assert qt_key_name(ev(Qt.Key.Key_A, "A")) == "a"
     assert qt_key_name(ev(Qt.Key.Key_F5)) == "f5"
     assert qt_key_name(ev(Qt.Key.Key_Slash, "/")) == "/"
+
+
+def test_saving_an_overlap_with_mirror_mode_goes_straight_on_to_lining_it_up(desktop, qapp, monkeypatch):
+    page, home, laptop = _host_with_laptop(desktop)
+    cfg = desktop.config()
+    cfg.set("layout", "mirror", True)
+    cfg.set_fit(home.key, "gone/main", 1, 2, 1.0)  # a line-up for screens no longer overlapping
+    cfg.save()
+    started = []
+    monkeypatch.setattr(page, "calibrate_fit", lambda b, f: started.append((b, f)))
+    hx, hy, hw, hh = home.layout_rect()
+    page.scene.clearSelection()
+    laptop.setSelected(True)
+    page.spins["x"].setValue(hx + hw - 200)
+    page.spins["y"].setValue(hy + hh - 200)
+    page.overlap_toggle.setChecked(True)
+    page.bring_to_front(laptop)
+    page.overlaps_changed()
+    page.save()
+    assert desktop.config().fits() == []
+    assert page.pending_lineups == [(home.key, laptop.key)]
+    # The laptop is another computer: it waits for linking to be running.
+    page.next_lineup()
+    assert started == []
+    from curslink.gui.service import RUNNING
+
+    monkeypatch.setattr(desktop.service, "state", RUNNING)
+    page.next_lineup()
+    assert started == [(home.key, laptop.key)] and page.pending_lineups == []

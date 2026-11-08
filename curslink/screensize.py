@@ -64,7 +64,18 @@ def match(sizes: list[dict], os_x: int, os_y: int, width: int, height: int) -> t
             same_size.append(s)
         except (KeyError, TypeError, ValueError):
             continue
-    return mm(same_size[0]) if len(same_size) == 1 else None
+    if len(same_size) == 1:
+        return mm(same_size[0])
+    # The only monitor, in other pixels (Windows scaling: the layout may have
+    # it in logical pixels and the OS here in physical ones): same shape will do.
+    if len(sizes) == 1 and height > 0:
+        try:
+            s = sizes[0]
+            if abs((s["width"] / s["height"]) / (width / height) - 1) < 0.02:
+                return mm(s)
+        except (KeyError, TypeError, ValueError, ZeroDivisionError):
+            pass
+    return None
 
 
 def _mac() -> list[dict]:  # pragma: no cover - macOS only
