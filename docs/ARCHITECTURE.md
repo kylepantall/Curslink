@@ -223,6 +223,12 @@ front of it shows the part it covers, live (`curslink.mirror`).
   other's, and where it stands, saved as `[[layout.fit]]`;
   `Layout.covered_parts` then says what to capture behind and where it
   shows in front.
+- Fine-tuning: what lines up depends on where you sit (the screen in front
+  is nearer to you), so "Fine-tune…" (`curslink.gui.fittune`) holds the
+  mirror up and moves or resizes it with the arrow keys and +/- while you
+  look. Each change goes to the service as `fit {...}`
+  (`curslink.mirror.apply_fit`), so it shows at once; Save writes the
+  `[[layout.fit]]` without a restart.
 - Curslink's own overlay windows (the edge indicator, mirrors) are kept out
   of captures (`curslink.capturehide`; on macOS the capture also leaves out
   the helper's own windows), so they don't show up twice.
