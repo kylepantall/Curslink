@@ -378,19 +378,30 @@ class Label(_Overlay):
         chev = QColor(name_ink)
         chev.setAlphaF(0.55)
         p.setPen(QPen(chev, 1.7, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        x = body.left() + pad + 6 if mirrored else body.right() - pad - 6
+        if self.side in ("top", "bottom"):
+            x -= 2.25  # centred where the sideways chevron sits
         path = QPainterPath()
-        if mirrored:
-            x = body.left() + pad + 6
-            path.moveTo(x + 4.5, cy - 4.5)
-            path.lineTo(x, cy)
-            path.lineTo(x + 4.5, cy + 4.5)
-        else:
-            x = body.right() - pad - 6
-            path.moveTo(x - 4.5, cy - 4.5)
-            path.lineTo(x, cy)
-            path.lineTo(x - 4.5, cy + 4.5)
+        first, tip, last = chevron_points(self.side, x, cy)
+        path.moveTo(*first)
+        path.lineTo(*tip)
+        path.lineTo(*last)
         p.drawPath(path)
         p.end()
+
+
+def chevron_points(side: str, x: float, y: float, s: float = 4.5) -> tuple[tuple[float, float], ...]:
+    """The label's chevron, pointing towards ``side``: (arm, tip, arm).
+
+    Sideways the tip is at (x, y); up or down the chevron is centred on it.
+    """
+    if side == "left":
+        return (x + s, y - s), (x, y), (x + s, y + s)
+    if side == "top":
+        return (x - s, y + s / 2), (x, y - s / 2), (x + s, y + s / 2)
+    if side == "bottom":
+        return (x - s, y - s / 2), (x, y + s / 2), (x + s, y - s / 2)
+    return (x - s, y - s), (x, y), (x - s, y + s)
 
 
 class EdgeOverlay:
