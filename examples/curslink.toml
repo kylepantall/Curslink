@@ -111,8 +111,8 @@ confirm_with_agents = true   # agents running their own camera ([agent.gaze])
 #
 # Screens are laid out in their own pixels, which differ in size between
 # monitors, so the layout only roughly says what a screen in front covers.
-# "Line up overlap…" on the Layout page (click where the screen in front's
-# top corners sit on the screen behind) writes where it really is:
+# "Line up overlap…" on the Layout page (a click on each screen: where a
+# corner of the other one sits) writes where it really is:
 # [[layout.fit]]
 # behind = "wks82261/screen2"
 # front = "kyles-pc/main"
