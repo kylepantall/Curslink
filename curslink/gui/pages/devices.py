@@ -494,7 +494,11 @@ class DevicesPage(Page):
     def place(self, peer, anchor: str, side: str) -> None:
         cfg = self.app.config()
         try:
-            cfg.place_beside(peer.device_id, anchor, side)
+            # A phone is one small screen: the whole side of this computer's
+            # screens leads to it, not just the bit it happens to touch.
+            device = next((d for d in cfg.devices() if d.get("id") == peer.device_id), {})
+            phone = [str(sc.get("id")) for sc in device.get("screens", [])] == ["phone"]
+            cfg.place_beside(peer.device_id, anchor, side, whole_side=phone)
         except (KeyError, ValueError) as exc:
             self.say(f"Couldn't move {peer.name}: {exc}")
             return
@@ -568,6 +572,9 @@ class DevicesPage(Page):
                                                    for k in ("x", "y", "width", "height"))
                 ]
                 cfg.add_device(peer.device_id, peer.name, screens or None)
+                if [sc["id"] for sc in screens] == ["phone"]:
+                    # The whole right side leads to it, across every monitor.
+                    cfg.place_beside(peer.device_id, cfg.get("host", "device_id"), "right", whole_side=True)
                 cfg.save()
                 note += (" It's been added to the right of your screens: pick another edge for it below, "
                          "or arrange it on the Layout page.")

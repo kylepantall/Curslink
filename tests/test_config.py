@@ -89,6 +89,44 @@ def test_place_a_phone_against_an_edge(tmp_path):
     assert cfg.side_of("phone", "mac") == "bottom"
 
 
+def test_a_phones_edge_spans_every_monitor_on_that_side(tmp_path):
+    from curslink.config import host_config
+    from curslink.configedit import ConfigFile
+
+    cfg = ConfigFile(tmp_path / "c.toml")
+    cfg.set("host", "device_id", "mac")
+    # A laptop with a taller monitor to its left, bottoms not lined up, and a
+    # small one sitting on top of the laptop (its bottom isn't open).
+    cfg.add_device("mac", "Mac", [
+        {"id": "main", "x": 0, "y": 400, "width": 1512, "height": 982},
+        {"id": "big", "x": -2560, "y": 0, "width": 2560, "height": 1440},
+        {"id": "top", "x": 200, "y": -680, "width": 1200, "height": 1080},
+    ])
+    cfg.add_device("phone", "Pixel", [{"id": "phone", "x": 0, "y": 0, "width": 384, "height": 832}])
+    cfg.place_beside("phone", "mac", "bottom", whole_side=True)
+    links = {(lk["a"], tuple(lk["a_span"])): (lk["b"], lk["b_side"], tuple(lk["b_span"])) for lk in cfg.links()}
+    assert links == {
+        ("mac/main", (0, 1512)): ("phone/phone", "top", (0, 384)),
+        ("mac/big", (0, 2560)): ("phone/phone", "top", (0, 384)),
+    }
+    assert all(lk["a_side"] == "bottom" for lk in cfg.links())
+    cfg.save()
+    layout = host_config(cfg.raw(), base_dir=tmp_path).layout
+    # off the bottom of either monitor, at the same fraction along the phone
+    big, main = layout.screen("mac", "big"), layout.screen("mac", "main")
+    for screen, along, want in ((big, 1280, 192), (main, 1511, 383)):
+        c = layout.find_crossing("mac", screen.x + along, screen.bottom - 1, 0, 1)
+        assert c is not None, screen.id
+        assert (c.screen.device_id, round(c.x - c.screen.x)) == ("phone", want), screen.id
+    # and the phone's top edge comes back
+    phone = layout.screen("phone", "phone")
+    c = layout.find_crossing("phone", phone.x + 100, phone.y, 0, -1)
+    assert c is not None and c.screen.device_id == "mac"
+    # picking another edge drops these links
+    cfg.place_beside("phone", "mac", "left")
+    assert cfg.links() == []
+
+
 def test_switching_roles_keeps_both_roles_settings(tmp_path):
     from curslink.configedit import ConfigFile, new_host_config, stash_path, switch_role
 

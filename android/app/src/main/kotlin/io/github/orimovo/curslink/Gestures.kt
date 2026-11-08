@@ -43,6 +43,14 @@ class Gestures(private val service: AccessibilityService, private val main: Hand
         dispatch(s)
     }
 
+    /** A long press at [p]: what a right-click means on a touch screen (a context menu, selecting text). */
+    fun longPress(p: PointF, holdMs: Long) {
+        if (stroke != null) return
+        val path = Path().apply { moveTo(p.x, p.y) }
+        val s = GestureDescription.StrokeDescription(path, 0, holdMs, false)
+        service.dispatchGesture(GestureDescription.Builder().addStroke(s).build(), null, main)
+    }
+
     fun moveTo(p: PointF) {
         if (stroke == null) return
         target = PointF(p.x, p.y)

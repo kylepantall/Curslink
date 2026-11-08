@@ -76,7 +76,12 @@ class PointerView(context: Context) : View(context) {
         }
     }
 
+    /** How many times it has drawn (InputService checks it did after the mouse arrives). */
+    var draws = 0
+        private set
+
     override fun onDraw(canvas: Canvas) {
+        draws++
         if (ring > 0f) {
             ringPaint.alpha = ((1f - ring) * 255).toInt()
             ringPaint.strokeWidth = 4f * d * (1f - ring) + 1f
