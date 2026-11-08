@@ -947,23 +947,32 @@ async def test_a_held_drag_keeps_checking_the_window_under_it(tmp_path, monkeypa
     assert follow.ticks == seen                    # stops with the drag
 
 
-def test_focus_follower_waits_for_the_pointer_to_rest(monkeypatch):
-    from curslink.files import macfocus
+def test_focus_follower_waits_for_the_pointer_to_rest():
+    from curslink.files.focus import FocusFollower
 
-    monkeypatch.setattr(macfocus.sys, "platform", "darwin")
-    monkeypatch.setattr("curslink.inputs.pynput_backend.mac_cursor", lambda: (10.0, 10.0))
-    under = {"hit": (42, "Mail", 7)}
-    monkeypatch.setattr(macfocus, "window_under", lambda x, y, skip: under["hit"])
+    under = {"hit": ((42, 7), "Mail", 10, 10)}
     raised = []
-    monkeypatch.setattr(macfocus, "raise_window", lambda pid, x, y: raised.append(pid))
-    f = macfocus.FocusFollower()
+
+    class Impl:
+        @staticmethod
+        def probe(skip):
+            return under["hit"]
+
+        @staticmethod
+        def bring(key, x, y):
+            raised.append(key[0])
+
+    f = FocusFollower(impl=Impl)
     f.tick(0.0)
     f.tick(0.1)
     assert raised == []                            # only just arrived
     f.tick(0.3)
     f.tick(0.5)
     assert raised == [42]                          # once, after resting
-    under["hit"] = (43, "Notes", 9)
+    under["hit"] = ((43, 9), "Notes", 10, 10)
     f.tick(0.6)
     f.tick(0.9)
+    assert raised == [42, 43]
+    under["hit"] = None                            # the taskbar, or ours
+    f.tick(1.5)
     assert raised == [42, 43]

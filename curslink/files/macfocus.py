@@ -75,44 +75,17 @@ def raise_window(pid: int, x: float, y: float) -> None:
     app.activateWithOptions_(NSApplicationActivateIgnoringOtherApps)
 
 
-class FocusFollower:
-    """Called repeatedly while a drag is held: once the pointer has rested
-    over another app's window for a moment, bring that window forward."""
+def probe(skip: set[int]):
+    """(key, name, x, y) for the window under the pointer, or None."""
+    from curslink.inputs.pynput_backend import mac_cursor
 
-    REST_S = 0.25
+    x, y = mac_cursor()
+    hit = window_under(x, y, skip)
+    if hit is None:
+        pid = finder_pid()  # the desktop
+        return ((pid, 0), "Finder (the desktop)", x, y) if pid else None
+    return (hit[0], hit[2]), hit[1], x, y
 
-    def __init__(self, skip_pids=lambda: set()):
-        self.skip_pids = skip_pids
-        self._candidate: tuple[int, int] | None = None
-        self._since = 0.0
-        self._focused: tuple[int, int] | None = None
 
-    def reset(self) -> None:
-        self._candidate = self._focused = None
-
-    def tick(self, now: float) -> None:
-        if sys.platform != "darwin":
-            return
-        try:
-            from curslink.inputs.pynput_backend import mac_cursor
-
-            x, y = mac_cursor()
-            skip = {os.getpid(), *self.skip_pids()}
-            hit = window_under(x, y, skip)
-            if hit is None:
-                pid = finder_pid()  # the desktop
-                key, name = ((pid, 0), "Finder (the desktop)") if pid else (None, "")
-            else:
-                key, name = (hit[0], hit[2]), hit[1]
-            if key is None:
-                return
-            if key != self._candidate:
-                self._candidate, self._since = key, now
-                return
-            if key == self._focused or now - self._since < self.REST_S:
-                return
-            self._focused = key
-            log.info("drop: bringing %s forward under the pointer", name)
-            raise_window(key[0], x, y)
-        except Exception:  # pragma: no cover - macOS only
-            log.debug("couldn't follow the pointer's window", exc_info=True)
+def bring(key, x: float, y: float) -> None:
+    raise_window(key[0], x, y)
