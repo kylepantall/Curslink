@@ -757,3 +757,38 @@ def test_mirror_rects_go_by_fractions_of_the_whole_screen(qapp):
     assert (x, y, w, h) == pytest.approx((g.x() + g.width() / 2, g.y() + g.height() / 2, g.width() / 4,
                                           g.height() / 4))
     assert QGuiApplication.screens()[index] == QGuiApplication.primaryScreen()
+
+
+def test_crossing_between_fitted_screens_lands_where_the_screens_really_meet():
+    from curslink.layout import Fit
+
+    lay = desk()
+    # The laptop really stands at (850, 500) on the PC, at half size: its
+    # pixels are half the PC's.
+    lay.fits = (Fit(("pc", "main"), ("lap", "main"), 850, 500, 0.5),)
+    pc, lap = lay.screen("pc", "main"), lay.screen("lap", "main")
+    # Off the PC's bottom edge: onto the laptop just under the mirror, whose
+    # bottom (the PC's edge) is 200 laptop pixels down, not where the layout puts it.
+    c = lay.find_crossing("pc", 900, 599, 0, 2)
+    assert c.screen == lap and (c.x, c.y) == pytest.approx((900, 606))
+    # Off the laptop's top: onto the PC just above where the laptop really is.
+    c = lay.find_crossing("lap", 900, 400, 0, -1)
+    assert c.screen == pc and (c.x, c.y) == pytest.approx((900, 498.5))
+    # Without mirror mode it's the layout's geometry, as before.
+    lay.mirror = False
+    assert lay.find_crossing("pc", 900, 599, 0, 2).y == 603
+
+
+def test_edge_glow_and_label_follow_the_fit():
+    from curslink.edgehint import find_hint
+    from curslink.layout import Fit
+
+    lay = desk()
+    lay.fits = (Fit(("pc", "main"), ("lap", "main"), 850, 500, 0.5),)
+    hint = find_hint(lay, "pc", 900, 590, lambda device: True)
+    assert hint.side == "bottom" and hint.target.device_id == "lap"
+    # The bar on the PC spans where the laptop really is along its bottom edge...
+    assert (hint.a, hint.b) == pytest.approx((850, 1000))
+    # ...and the one on the laptop sits on the mirror's bottom edge, 200 px down.
+    assert hint.target_side == "top" and hint.trect[1] == 600
+    assert (hint.ta, hint.tb) == pytest.approx((0, 300))
