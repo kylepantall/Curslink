@@ -475,12 +475,16 @@ def start_file_drags(cfg: HostConfig, router: Router, server: HostServer, overla
 
     # A real drag of files arriving from an agent needs the real button-up
     # held back until they're all here, which the Mac's event tap can do.
-    native_press = None
+    native_press = follow = None
     if sys.platform == "darwin":
+        from curslink.files.macfocus import FocusFollower
         from curslink.inputs.pynput_backend import press_left_here as native_press
+
+        # Apps under a drag from another computer take it only once in front.
+        follow = FocusFollower(lambda: {overlay.pid} if getattr(overlay, "pid", None) else set())
     handoff = DragHandoff(router, server, overlay.command, capture.inject_drag_end, cfg.name, emit=events.emit,
                           drag_source=drag_source, native_press=native_press,
-                          release_held=getattr(capture, "release_held", lambda: None))
+                          release_held=getattr(capture, "release_held", lambda: None), follow=follow)
     if hasattr(capture, "hold_left_up"):
         capture.hold_left_up = handoff.native.holding
     clean_old()

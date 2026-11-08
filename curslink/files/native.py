@@ -41,6 +41,7 @@ from curslink.files.transfer import FileReceiver, move_into, safe_parts, Transfe
 log = logging.getLogger(__name__)
 
 START_TIMEOUT_S = 1.5   # the helper must have started the drag by then
+FOLLOW_EVERY_S = 0.08   # how often the window under a held drag is checked
 KEEP_DROPS_S = 24 * 3600
 
 
@@ -89,12 +90,16 @@ class NativeDrop:
         cancel: Callable[[], None],
         folder: Path | None = None,
         root: Path | None = None,
+        follow=None,
     ):
         """``press()``: the left button down here, under the pointer (None:
         no real drags on this device). ``release()``: let it go (a drop).
         ``cancel()``: end a drag here without dropping (Escape, then let go).
         All blocking and quick. ``folder``: where files go when there's no
-        real drag (Downloads by default)."""
+        real drag (Downloads by default). ``follow``: an object whose
+        ``tick(now)`` runs every FOLLOW_EVERY_S while a real drag is held and
+        ``reset()`` when one starts (the Mac brings the window under the
+        pointer forward; see curslink.files.macfocus)."""
         self.helper = helper
         self.receiver = receiver
         self.popups = popups
@@ -104,6 +109,8 @@ class NativeDrop:
         self.folder = Path(folder) if folder else receiver.folder
         self.root = root or staging_root()
         self.drops: dict[str, Drop] = {}
+        self.follow = follow
+        self._following: asyncio.TimerHandle | None = None
         receiver_event = receiver.on_event
 
         def on_event(kind: str, info: dict) -> None:
@@ -174,6 +181,7 @@ class NativeDrop:
         if word == "nativedrag-started":
             if drop is not None and drop.phase == "starting":
                 drop.phase = "dragging"
+                self._start_following()
                 if not rest.endswith(" card"):  # (a Mac's drag keeps the card as its image)
                     self.helper("card hide")
                 log.info("drop: real drag started in %d ms", (time.monotonic() - drop.started_at) * 1000)
@@ -187,6 +195,23 @@ class NativeDrop:
                 self.helper("card hide")
             return True
         return False
+
+    def _start_following(self) -> None:
+        if self.follow is None or self._following is not None:
+            return
+        self.follow.reset()
+        try:
+            self._following = asyncio.get_running_loop().call_soon(self._follow)
+        except RuntimeError:
+            pass
+
+    def _follow(self) -> None:
+        self._following = None
+        if not any(d.phase == "dragging" for d in self.drops.values()):
+            return
+        loop = asyncio.get_running_loop()
+        self.follow.tick(loop.time())
+        self._following = loop.call_later(FOLLOW_EVERY_S, self._follow)
 
     def _bg(self, fn: Callable[[], None]) -> None:
         """Input injection blocks for a moment: off the loop."""
