@@ -27,6 +27,48 @@ interface InputHandler {
     fun button(name: String, pressed: Boolean)
     fun scroll(dx: Double, dy: Double)
     fun key(key: String, pressed: Boolean)
+    /** The edge indicator: an edge here leads to another device, or the pointer is heading here. */
+    fun edge(cmd: EdgeCommand) {}
+}
+
+/**
+ * One edge frame (see curslink.edgehint): hide, flash, or show the bar of
+ * light along [side] between [a] and [b] (pixels along that side of the
+ * screen [rect] = x, y, width, height), brightest at [at]. Role "from" is
+ * the screen the pointer is on and also gets the label ([name], [kind]);
+ * "to" is the screen it's heading for. [near] is 0..1, 1 at the edge.
+ */
+data class EdgeCommand(
+    val hide: Boolean = false,
+    val flash: Boolean = false,
+    val role: String = "",
+    val rect: List<Double> = emptyList(),
+    val side: String = "",
+    val a: Double = 0.0,
+    val b: Double = 0.0,
+    val at: Double = 0.0,
+    val near: Double = 0.0,
+    val name: String = "",
+    val kind: String = "",
+) {
+    companion object {
+        private val SIDES = setOf("left", "right", "top", "bottom")
+
+        fun parse(f: Frame): EdgeCommand? {
+            if (f.bool("hide") == true) return EdgeCommand(hide = true)
+            if (f.bool("flash") == true) return EdgeCommand(flash = true)
+            val role = f.str("role")?.takeIf { it == "from" || it == "to" } ?: return null
+            val side = f.str("side")?.takeIf { it in SIDES } ?: return null
+            val rect = (f["rect"] as? kotlinx.serialization.json.JsonArray)?.map { it.numOrNull() ?: return null }
+                ?.takeIf { it.size == 4 } ?: return null
+            return EdgeCommand(
+                role = role, rect = rect, side = side,
+                a = f.num("a") ?: return null, b = f.num("b") ?: return null, at = f.num("at") ?: return null,
+                near = (f.num("near") ?: 0.0).coerceIn(0.0, 1.0),
+                name = f.str("name") ?: "", kind = f.str("kind") ?: "",
+            )
+        }
+    }
 }
 
 /** How this device describes itself in hello. */
@@ -99,6 +141,7 @@ class AgentSession(private val handler: InputHandler, val mirror: MirrorSession?
                 handler.key(key, pressed)
             }
             "mirror", "mirror_frame", "mirror_pointer", "mirror_ack" -> return mirror?.handle(f)
+            "edge" -> EdgeCommand.parse(f)?.let { handler.edge(it) }
             // Everything else (look, hint, drag, files, popups) is only sent to
             // agents that list the feature in hello, and we list none of them.
         }
@@ -239,7 +282,7 @@ class AgentLink(
             val tls = Tls.connect(s.getInputStream(), s.getOutputStream(), p.myId, p.key)
             val io = FrameIO(tls.input, tls.output)
             val me = hello()
-            val features = (if (opened.direct) listOf("udp") else emptyList()) +
+            val features = listOf("edge") + (if (opened.direct) listOf("udp") else emptyList()) +
                 // mirror_cursor: our captures show the pointer already (it's drawn on the screen).
                 (if (session.mirror != null) listOf("mirror", "mirror_cursor") else emptyList())
             io.send("hello", jsonOf(

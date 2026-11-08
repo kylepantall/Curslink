@@ -19,6 +19,7 @@ which took focus away from whatever you were typing in.
 
 from __future__ import annotations
 
+import json
 import logging
 import queue
 import subprocess
@@ -356,6 +357,9 @@ def _run_qt_helper() -> None:
     from curslink.mirror.helper import MirrorHelper
 
     mirror = MirrorHelper()
+    from curslink.edgeoverlay import EdgeOverlay
+
+    edges = EdgeOverlay(to_logical)
 
     def poll() -> None:
         while True:
@@ -380,6 +384,15 @@ def _run_qt_helper() -> None:
                     mirror.handle(line)
                 except Exception:  # pragma: no cover - never take the helper down
                     log.exception("overlay command %s", parts[0])
+            elif parts and parts[0] == "edge":
+                try:
+                    data = json.loads(line.split(None, 1)[1])
+                    if isinstance(data, dict):
+                        edges.handle(data)
+                except (IndexError, ValueError, TypeError, KeyError):
+                    log.debug("bad edge command %r", line)
+                except Exception:  # pragma: no cover - never take the helper down
+                    log.exception("edge command %r", line)
             elif parts:
                 try:
                     files.handle(line)

@@ -98,7 +98,7 @@ class InputService : AccessibilityService() {
             runCatching { wm.addView(m, overlayParams()) }.onSuccess { mirrorView = m }
                 .onFailure { AppLog.w(TAG, "couldn't add the mirror overlay", it) }
         }
-        val v = PointerView(this)
+        val v = PointerView(this) { x, y -> toPx(x, y).let { it.x to it.y } }
         val lp = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -212,6 +212,12 @@ class InputService : AccessibilityService() {
         }
         touched()
         queueShape()
+    }
+
+    /** The edge indicator (see EdgeGlow): drawn even while the pointer is elsewhere, for the "heading here" bar. */
+    fun edge(cmd: io.github.orimovo.curslink.core.EdgeCommand) = main.post {
+        if (!cmd.hide && !cmd.flash) ensureOverlay()
+        view?.edgeGlow(cmd)
     }
 
     fun leave(effect: String) = main.post {

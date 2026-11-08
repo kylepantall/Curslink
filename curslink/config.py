@@ -11,6 +11,7 @@ from typing import Any
 from curslink.gaze.confirm import ConfirmSettings, FacingSettings
 from curslink.gaze.zones import GazeSettings
 from curslink.layout import SIDES, Device, EdgeEnd, EdgeLink, Layout, Screen
+from curslink.inputs.keys import OS_KINDS, KeyMaps, expand_map
 from curslink.pairing.service import DEFAULT_PAIRING_PORT
 from curslink.net.relay import (
     DEFAULT_RELAY_PORT,
@@ -82,6 +83,8 @@ class HostConfig:
     isolink: bool = True
     # Mirror mode's frames a second ([layout] mirror_fps; on with [layout] mirror, see curslink.mirror).
     mirror_fps: int = 15
+    # How keys change on their way to each device (see curslink.inputs.keys.KeyMaps).
+    keymaps: KeyMaps = field(default_factory=KeyMaps)
 
     @property
     def name(self) -> str:
@@ -328,6 +331,27 @@ def jump_screens(g: dict[str, Any], layout: Layout) -> frozenset[tuple[str, str]
     return frozenset(out)
 
 
+def key_table(value: Any, where: str) -> dict[str, str]:
+    if not isinstance(value, dict) or not all(isinstance(v, str) for v in value.values()):
+        raise ConfigError(f'{where} must be a table of key = "key"')
+    return {str(k): v for k, v in value.items()}
+
+
+def keymaps(raw: dict[str, Any], presets: bool) -> KeyMaps:
+    """``[keymap]``: ``"mac>windows" = {cmd = "ctrl", ...}`` per pair of
+    systems, ``"device:<id>"`` for one device."""
+    table = raw.get("keymap", {})
+    if not isinstance(table, dict):
+        raise ConfigError("[keymap] must be a table")
+    custom = {}
+    for name, value in table.items():
+        src, sep, dst = name.partition(">")
+        if not name.startswith("device:") and not (sep and src in OS_KINDS and dst in OS_KINDS):
+            raise ConfigError(f'[keymap] "{name}": use "<from>><to>" ({", ".join(OS_KINDS)}) or "device:<id>"')
+        custom[name] = key_table(value, f'[keymap."{name}"]')
+    return KeyMaps(custom, presets)
+
+
 def load_raw(path: str | Path) -> dict[str, Any]:
     try:
         with open(path, "rb") as fh:
@@ -347,6 +371,7 @@ def host_config(raw: dict[str, Any], base_dir: Path = Path(".")) -> HostConfig:
     router = RouterSettings(
         effect=host.get("effect", "pop"),
         edge_switching=host.get("edge_switching", True),
+        edge_indicator=bool(host.get("edge_indicator", True)),
         gaze_switching=raw.get("gaze", {}).get("enabled", False),
         gap_tolerance_px=_int(host, "gap_tolerance_px", 64),
         gaze_within_device=bool(raw.get("gaze", {}).get("within_device", False)),
@@ -380,6 +405,7 @@ def host_config(raw: dict[str, Any], base_dir: Path = Path(".")) -> HostConfig:
     if not lan and relay is None:
         raise ConfigError("[host].lan = false needs a [relay] to connect through")
     return HostConfig(
+        keymaps=keymaps(raw, router.swap_cmd_ctrl),
         device_id=device_id,
         secret=secret,
         layout=layout,
@@ -411,7 +437,7 @@ def agent_config(raw: dict[str, Any], base_dir: Path = Path(".")) -> AgentConfig
         port=_int(agent, "port", DEFAULT_PORT),
         name=agent.get("name", agent["device_id"]),
         host_id=agent.get("host_id", ""),
-        modifier_map=dict(agent.get("modifier_map", {})),
+        modifier_map=expand_map(key_table(agent.get("modifier_map", {}), "[agent].modifier_map")),
         animations=agent.get("animations", True),
         smooth_pointer=bool(agent.get("smooth_pointer", True)),
         udp=bool(agent.get("udp", True)),
