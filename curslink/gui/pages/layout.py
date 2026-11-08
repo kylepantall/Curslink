@@ -418,8 +418,11 @@ class LayoutPage(Page):
             self.load()
 
     def load(self) -> None:
-        self.scene.clear()
+        # Forget them first: clear() deselects the old screens as it deletes
+        # them, and selection_changed then mustn't reach the deleted tag.
         self.items = []
+        self.tag = None
+        self.scene.clear()
         if not self.app.has_config():
             return
         role = self.app.role

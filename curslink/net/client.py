@@ -332,6 +332,8 @@ class AgentClient:
                 hello["auth"] = hello_auth(self.auth_key, binding, self.device_id)
             writer.write(encode("hello", **hello))
             welcome = await asyncio.wait_for(read_message(reader), 5)
+            if welcome is not None and welcome.t == "refused":
+                raise ProtocolError(f"the host refused us: {welcome.get('reason', '')}")
             if welcome is None or welcome.t != "welcome":
                 raise ProtocolError("host did not welcome us")
             log.info("connected to host via %s", self.via)

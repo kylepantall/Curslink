@@ -156,6 +156,10 @@ def qr_pixmap(text: str, scale: int = 6):
 EDGES = (("Right", "right"), ("Left", "left"), ("Above", "top"), ("Below", "bottom"))
 
 
+PHONE_TEXT = ("Install Curslink on your Android phone, then scan a code from here to pair it. Afterwards, push "
+              "the pointer past the edge you choose for the phone and it wakes up with your mouse and keyboard on it.")
+
+
 class DevicesPage(Page):
     def __init__(self, app):
         super().__init__("Devices", "Pair once and each device gets its own key. Nothing secret goes in a config file.")
@@ -208,9 +212,7 @@ class DevicesPage(Page):
         self.qr_image.hide()
         self.phone_row.addWidget(self.qr_image)
         words = QVBoxLayout()
-        self.phone_text = label("Install Curslink on your Android phone, then scan a code from here to pair it. "
-                                "Afterwards, push the pointer past the edge you choose for the phone and it wakes "
-                                "up with your mouse and keyboard on it.", wrap=True)
+        self.phone_text = label(PHONE_TEXT, wrap=True)
         words.addWidget(self.phone_text)
         buttons = QHBoxLayout()
         self.qr_button = button("Show QR code", "primary", self.show_qr)
@@ -336,7 +338,7 @@ class DevicesPage(Page):
         connected = {a.device_id for a in self.app.status.agents.values() if a.connected}
         if self.app.status.host_state == "connected":
             connected |= {p.device_id for p in peers if p.role == "host"}
-        self.phone.setVisible(self.app.role == "host")
+        self.draw_phone(peers)
         for p in peers:
             t = time.localtime(p.paired_at)
             when = f"{t.tm_mday} {time.strftime('%b %Y', t)}" if p.paired_at else "earlier"
@@ -444,6 +446,22 @@ class DevicesPage(Page):
             self.say(message)
 
     # -- phones -------------------------------------------------------------
+    def draw_phone(self, peers) -> None:
+        """Hosts show the QR code; an agent says where to find it, since a
+        phone pairs with the host (the computer with the keyboard and mouse)."""
+        if self.app.role == "host":
+            if self.qr is None:
+                self.phone_text.setText(PHONE_TEXT)
+                self.qr_button.show()
+            return
+        hosts = [p.name for p in peers if p.role == "host"]
+        where = f"your host, {hosts[0]}" if hosts else "your host"
+        self.phone_text.setText(
+            f"Phones pair with the computer your keyboard and mouse are plugged into: {where}. Open Curslink "
+            "there and go to Devices › Pair a phone. Then put the phone beside this computer's screens on "
+            "its Layout page, if that's where it sits.")
+        self.qr_button.hide()
+
     def edge_picker(self, peer):
         """Which edge of this computer's screens leads to the device: picking
         one moves the device there in the layout."""

@@ -809,3 +809,66 @@ def test_switching_between_host_and_agent(desktop, qapp, monkeypatch):
     desktop.window.show_page("settings")
     qapp.processEvents()
     assert settings.switch_button.text() == "Switch to agent…"
+
+
+def test_layout_page_reloads_with_an_overlap(desktop, qapp):
+    page, home, laptop = _host_with_laptop(desktop)
+    desktop.window.show()
+    desktop.window.show_page("layout")
+    qapp.processEvents()
+    laptop = next(i for i in page.items if i.device_id == "laptop")
+    home = next(i for i in page.items if i.device_id != "laptop")
+    hx, hy, hw, hh = home.layout_rect()
+    page.scene.clearSelection()
+    laptop.setSelected(True)
+    page.spins["x"].setValue(hx + hw - 200)
+    page.spins["y"].setValue(hy + hh - 200)
+    page.overlap_toggle.setChecked(True)
+    page.save()
+    page.load()
+    assert page.overlap_row.isVisible()
+    laptop = next(i for i in page.items if i.device_id == "laptop")
+    page.scene.clearSelection()
+    laptop.setSelected(True)
+    page.load()  # the config changed (a phone paired, say), with an overlap showing: this crashed
+    assert page.tag is not None and len(page.items) == 2
+    desktop.window.hide()
+
+
+def test_an_old_service_exiting_doesnt_forget_the_new_one(qapp):
+    """Switching roles (or restarting) starts the new process before the old
+    one's exit is seen; that exit mustn't count for the new one, or saving
+    the config after pairing a phone never restarts the host."""
+    from curslink.gui.service import RUNNING, Service
+
+    class Proc:
+        def __init__(self, pid, alive):
+            self.pid, self.alive = pid, alive
+
+        def poll(self):
+            return None if self.alive else 0
+
+    service = Service()
+    service.role = "host"
+    old, new = Proc(1, False), Proc(2, True)
+    service._proc = new
+    service._set_state(RUNNING)
+    service._on_exit(old, 0)
+    assert service._proc is new and service.is_alive() and service.state == RUNNING
+    service._on_exit(new, 0)
+    assert service._proc is None and not service.is_alive()
+
+
+def test_devices_page_on_an_agent_points_phones_to_the_host(desktop, qapp, monkeypatch):
+    from curslink import macperms
+
+    monkeypatch.setattr(macperms, "missing", lambda role=None: [])
+    desktop.window.pages["setup"].create()
+    assert desktop.switch_role() == "agent"
+    page = desktop.window.pages["devices"]
+    page.store().add("mac", "Kyle's Mac", "host", b"k" * 32)
+    page.refresh()
+    assert "Kyle's Mac" in page.phone_text.text() and page.qr_button.isHidden()
+    assert desktop.switch_role() == "host"
+    page.refresh()
+    assert "scan a code" in page.phone_text.text() and not page.qr_button.isHidden()

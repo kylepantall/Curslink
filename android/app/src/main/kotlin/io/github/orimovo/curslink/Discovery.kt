@@ -5,7 +5,6 @@ import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.net.wifi.WifiManager
 import android.os.Build
-import android.util.Log
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -39,8 +38,8 @@ class Discovery(context: Context) {
             setAttribute("v", "1")
         }
         val reg = object : NsdManager.RegistrationListener {
-            override fun onServiceRegistered(info: NsdServiceInfo) { Log.i(TAG, "advertising as ${info.serviceName}") }
-            override fun onRegistrationFailed(info: NsdServiceInfo, code: Int) { Log.w(TAG, "can't advertise: $code") }
+            override fun onServiceRegistered(info: NsdServiceInfo) { AppLog.i(TAG, "advertising as ${info.serviceName}") }
+            override fun onRegistrationFailed(info: NsdServiceInfo, code: Int) { AppLog.w(TAG, "can't advertise: $code") }
             override fun onServiceUnregistered(info: NsdServiceInfo) {}
             override fun onUnregistrationFailed(info: NsdServiceInfo, code: Int) {}
         }
@@ -49,7 +48,7 @@ class Discovery(context: Context) {
         val disc = object : NsdManager.DiscoveryListener {
             override fun onDiscoveryStarted(type: String) {}
             override fun onDiscoveryStopped(type: String) {}
-            override fun onStartDiscoveryFailed(type: String, code: Int) { Log.w(TAG, "can't browse: $code") }
+            override fun onStartDiscoveryFailed(type: String, code: Int) { AppLog.w(TAG, "can't browse: $code") }
             override fun onStopDiscoveryFailed(type: String, code: Int) {}
             override fun onServiceFound(info: NsdServiceInfo) { queue(info) }
             override fun onServiceLost(info: NsdServiceInfo) {}
@@ -95,7 +94,7 @@ class Discovery(context: Context) {
             @Suppress("DEPRECATION") info.host?.hostAddress
         } ?: return
         hosts[id] = FoundHost(id, attr("name").ifEmpty { id }, address, cport)
-        Log.i(TAG, "found host ${attr("name")} at $address:$cport")
+        AppLog.i(TAG, "found host ${attr("name")} at $address:$cport")
     }
 
     fun stop() {

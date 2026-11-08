@@ -14,7 +14,6 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
-import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import io.github.orimovo.curslink.core.AgentLink
@@ -84,6 +83,9 @@ class LinkService : Service() {
         super.onCreate()
         instance = this
         prefs = Prefs(this)
+        AppLog.i(TAG, "starting as ${prefs.name} (${prefs.deviceId}); " +
+            (prefs.pairing?.let { "paired with ${it.hostName} (${it.hostId}) at ${it.addresses.joinToString().ifEmpty { "no address yet" }}" +
+                (if (it.hasRelay) ", relay ${it.relay}" else "") } ?: "not paired"))
         discovery = Discovery(this)
         goForeground()
         pairingServer = PairingServer(
@@ -91,7 +93,7 @@ class LinkService : Service() {
             about = ::about,
             askCode = ::askCode,
             onPaired = ::paired,
-            onFailed = { reason -> Log.i(TAG, "pairing failed: $reason"); clearPairRequest() },
+            onFailed = { reason -> AppLog.i(TAG, "pairing failed: $reason"); clearPairRequest() },
         ).also { it.start() }
         discovery.start(prefs.deviceId, prefs.name, pairingServer!!.boundPort)
         link = AgentLink(
@@ -105,7 +107,7 @@ class LinkService : Service() {
                 updateNotification()
                 changed()
             },
-            log = { Log.i(TAG, it) },
+            log = { AppLog.i(TAG, it) },
         ).also { it.start() }
         (getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager).registerDefaultNetworkCallback(netCallback)
     }
@@ -113,6 +115,7 @@ class LinkService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
 
     override fun onDestroy() {
+        AppLog.i(TAG, "stopping")
         instance = null
         runCatching { (getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager).unregisterNetworkCallback(netCallback) }
         link?.stop()
@@ -129,6 +132,7 @@ class LinkService : Service() {
     }
 
     fun unpair() {
+        AppLog.i(TAG, "unpaired from ${prefs.pairing?.hostName}")
         prefs.pairing = null
         prefs.layoutSize = null
         relink()
@@ -193,19 +197,22 @@ class LinkService : Service() {
             relay = relayAddress,
             relayKey = relayKey,
         )
-        Log.i(TAG, "paired with ${result.peer.name}")
+        AppLog.i(TAG, "paired with ${result.peer.name} (${result.peer.deviceId}) at ${address.ifEmpty { "?" }}" +
+            (if (relayAddress.isNotEmpty()) ", relay $relayAddress" else ""))
         relink()
     }
 
     // ------------------------------------------------------------- input
     private inner class Input : InputHandler {
         override fun enter(x: Double, y: Double, effect: String) {
+            AppLog.i(TAG, "control came here at ($x, $y)" + if (InputService.instance == null) "; the accessibility service is off, so nothing happens" else "")
             holdWifi()
             Waker.wake(this@LinkService)
             InputService.instance?.enter(x, y, effect)
         }
 
         override fun leave(effect: String, x: Double?, y: Double?) {
+            AppLog.i(TAG, "control went back")
             releaseWifi()
             InputService.instance?.leave(effect)
         }
