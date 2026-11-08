@@ -16,7 +16,7 @@ from curslink import events
 from curslink.config import AgentConfig, HostConfig, PairingConfig
 from curslink.gaze.confirm import FacingDetector, GazeArbiter
 from curslink.gaze.zones import Calibration, GazeClassifier, Target
-from curslink.inputs.keys import swap_cmd_ctrl, swap_for
+from curslink.inputs.keys import KeyMaps
 from curslink.net.client import AgentClient, AgentSession, NotReady
 from curslink.net.client import Target as ConnectTarget
 from curslink.net.relay import HostRelayLink, RelayTarget, paired_room_id
@@ -269,8 +269,7 @@ async def run_host(cfg: HostConfig) -> None:
         overlay=overlay,
         settings=cfg.router,
     )
-    if cfg.router.swap_cmd_ctrl:
-        router.key_for = cmd_ctrl_swapper(server)
+    router.key_for = key_mapper(server, cfg.keymaps)
 
     def agent_connected(conn) -> None:
         events.emit("agent", device_id=conn.device_id, name=conn.name, platform=conn.platform,
@@ -374,14 +373,20 @@ async def run_host(cfg: HostConfig) -> None:
         await server.close()
 
 
-def cmd_ctrl_swapper(server: HostServer, local_platform: str = sys.platform):
-    """Swap Cmd and Ctrl for keys going to a computer of the other kind (Mac vs PC)."""
+def key_mapper(server: HostServer, maps: KeyMaps, local_platform: str = sys.platform):
+    """Keys for each device through the mapping for its pair of systems
+    (Cmd <-> Ctrl between a Mac and a PC unless changed; see KeyMaps)."""
     def key_for(device_id: str, key: str) -> str:
         conn = server.connections.get(device_id)
-        if conn is not None and swap_for(local_platform, conn.platform):
-            return swap_cmd_ctrl(key)
-        return key
+        if conn is None:
+            return key
+        return maps.key(local_platform, conn.platform, key, device_id)
     return key_for
+
+
+def cmd_ctrl_swapper(server: HostServer, local_platform: str = sys.platform):
+    """Swap Cmd and Ctrl for keys going to a computer of the other kind (Mac vs PC)."""
+    return key_mapper(server, KeyMaps(), local_platform)
 
 
 class HostCamera:
@@ -805,6 +810,18 @@ def remember_positions(router: Router, path=None) -> None:
     router.listeners.append(save)
 
 
+def agent_command(session, stop: asyncio.Event, command: str) -> None:
+    """A command from the app to a running agent: ``stop``, or ``keys learn
+    on``/``off`` for the keyboard check (the host's keys are reported as
+    ``key_learned`` events instead of being typed)."""
+    if command == "stop":
+        stop.set()
+    elif command == "keys learn on":
+        session.set_learning(lambda key, pressed: events.emit("key_learned", key=key, pressed=pressed))
+    elif command == "keys learn off":
+        session.set_learning(None)
+
+
 async def run_agent(cfg: AgentConfig) -> None:
     from curslink.inputs.pynput_backend import PynputSink
     from curslink.overlay import OverlayProcess
@@ -859,7 +876,7 @@ async def run_agent(cfg: AgentConfig) -> None:
     await pairing.start()
     stop = asyncio.Event()
     if events.channel.enabled:
-        events.read_commands(asyncio.get_running_loop(), lambda command: command == "stop" and stop.set())
+        events.read_commands(asyncio.get_running_loop(), lambda command: agent_command(session, stop, command))
     events.emit("running", role="agent", device_id=cfg.device_id, name=cfg.name)
     runner = asyncio.create_task(client.run_forever())
     stopper = asyncio.create_task(stop.wait())

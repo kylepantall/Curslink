@@ -169,3 +169,23 @@ def test_switching_roles_ignores_a_broken_side_file(tmp_path):
     host = ConfigFile(path)
     assert host.get("host", "device_id") == "laptop"
     assert [d["name"] for d in host.devices()] == ["Laptop"]
+
+
+def test_keymap_tables_load_per_pair():
+    raw = load_raw(EXAMPLE)
+    raw["keymap"] = {"linux>windows": {"caps_lock": "ctrl"}, "device:laptop": {"cmd": "alt"}}
+    cfg = host_config(raw)
+    assert cfg.keymaps.key("linux", "Windows 11", "caps_lock") == "ctrl"
+    assert cfg.keymaps.key("darwin", "Linux", "cmd_l", "laptop") == "alt_l"
+    raw["keymap"] = {"mac-windows": {}}
+    with pytest.raises(ConfigError):
+        host_config(raw)
+    raw["keymap"] = {"mac>windows": {"cmd": 3}}
+    with pytest.raises(ConfigError):
+        host_config(raw)
+
+
+def test_agent_modifier_map_is_written_by_family():
+    raw = load_raw(EXAMPLE)
+    raw.setdefault("agent", {})["modifier_map"] = {"cmd": "ctrl"}
+    assert agent_config(raw).modifier_map["cmd_r"] == "ctrl_r"

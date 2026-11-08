@@ -60,6 +60,9 @@ class AgentSession:
         # A curslink.popups.AgentPopups opens and closes Isolink's floating
         # chats the host carries here (popup_in, popup_close).
         self.popups = None
+        # Set while the app's keyboard check is listening: keys from the host
+        # go here (as sent, before [agent].modifier_map) instead of being typed.
+        self.learn: Callable[[str, bool], None] | None = None
         self.active = False
         self.keys: set[str] = set()
         self.buttons: set[str] = set()
@@ -153,11 +156,24 @@ class AgentSession:
                 log.exception("couldn't scroll by (%s, %s)", msg.data["dx"], msg.data["dy"])
         elif t == "key":
             key, pressed = msg.data["key"], msg.data["pressed"]
+            if self.learn is not None and key not in self.keys:
+                self.learn(key, pressed)
+                return None
             if not pressed and key not in self.keys:
                 return None  # a release whose press happened elsewhere
             (self.keys.add if pressed else self.keys.discard)(key)
             self.sink.key(key, pressed)
         return None
+
+    def set_learning(self, learn: Callable[[str, bool], None] | None) -> None:
+        """Start (or stop) handing the host's keys to ``learn``; keys held
+        now are let go first so none sticks while they aren't typed."""
+        if learn is not None:
+            for key in sorted(self.keys):
+                with contextlib.suppress(Exception):
+                    self.sink.key(key, False)
+            self.keys.clear()
+        self.learn = learn
 
     def release_all(self) -> None:
         """Input left this device (or the host went away)."""
