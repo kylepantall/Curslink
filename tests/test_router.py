@@ -401,3 +401,12 @@ def test_keys_go_through_key_for_including_releases_on_switch(parts):
     router.go_home("test")
     keys = [(d["key"], d["pressed"]) for _, t, d in transport.sent if t == "key"]
     assert keys == [("ctrl", True), ("c", True), ("c", False), ("ctrl", False)]
+
+
+def test_no_crossing_animation_while_setting_up(parts):
+    router, capture, sink, transport, overlay = parts
+    router.setup_quiet = True
+    router.on_pointer(1000, 500)
+    router.on_pointer(3839, 500)
+    (_dev, _t, data), = transport.of_type("enter")
+    assert data["effect"] == "none"

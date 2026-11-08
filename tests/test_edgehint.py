@@ -277,3 +277,17 @@ def test_chevron_points_towards_the_edge():
         # The tip sits beyond the middle of the arms, in the edge's direction.
         assert (tip[0] - arms[0]) * dx + (tip[1] - arms[1]) * dy > 0
         assert (tip[0] - arms[0]) * dy == 0 and (tip[1] - arms[1]) * dx == 0
+
+
+def test_indicator_goes_dark_while_setting_up(layout):
+    sent = Sent()
+    edges = indicator(layout, sent)
+    edges.update("desktop", 3839, 500)
+    assert sent.last("desktop")["role"] == "from"
+    edges.pause(True)
+    assert sent.last("desktop") == {"hide": True} and sent.last("laptop") == {"hide": True}
+    edges.update("desktop", 3839, 500)
+    assert sent.last("desktop") == {"hide": True}
+    edges.pause(False)
+    edges.update("desktop", 3839, 500)
+    assert sent.last("desktop")["role"] == "from"

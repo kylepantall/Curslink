@@ -106,6 +106,8 @@ class Router:
         self.transport = transport
         self.overlay = overlay or NullOverlay()
         self.settings = settings or RouterSettings()
+        # The app is setting up (Layout page): no crossing animations.
+        self.setup_quiet = False
         self.listeners: list[Callable[[SwitchEvent], None]] = []
         # Told whenever gaze switching is paused or resumed.
         self.on_gaze_paused: Callable[[bool], None] = lambda paused: None
@@ -415,7 +417,7 @@ class Router:
         left_at = (self.x, self.y)
         self._last_pos[old] = left_at
         self._screen_pos[(self.screen.device_id, self.screen.id)] = left_at
-        effect = self.settings.effect
+        effect = "none" if self.setup_quiet else self.settings.effect
         # Where the pointer leaves from: the animation plays there too, so you
         # see it cut across the edge rather than only where it lands.
         exit_x, exit_y = self.screen.to_os(self.x, self.y)

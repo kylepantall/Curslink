@@ -292,6 +292,7 @@ class EdgeIndicator:
         self.kind = kind
         self.gap_tolerance = gap_tolerance
         self.enabled = True
+        self.paused = False  # the app is setting up: no bars of light meanwhile
         # What each device is showing now: {device_id: last command sent}.
         self._shown: dict[str, dict] = {}
         self._last: EdgeHint | None = None
@@ -300,7 +301,8 @@ class EdgeIndicator:
 
     def update(self, device_id: str, x: float, y: float) -> None:
         """The pointer is at global (x, y) on ``device_id``."""
-        hint = find_hint(self.layout, device_id, x, y, self.available, self.gap_tolerance) if self.enabled else None
+        hint = (find_hint(self.layout, device_id, x, y, self.available, self.gap_tolerance)
+                if self.enabled and not self.paused else None)
         if self._quiet is not None:
             q_device, q_screen, q_side = self._quiet
             here = self.layout.screen_at(x, y, device_id)
@@ -346,6 +348,14 @@ class EdgeIndicator:
     def forget(self, device_id: str) -> None:
         """That device went away: it isn't showing anything now."""
         self._shown.pop(device_id, None)
+
+    def pause(self, on: bool) -> None:
+        """While the app is setting up: take every bar of light down, show none."""
+        self.paused = on
+        if on:
+            self._last = None
+            for device in list(self._shown):
+                self._put(device, {"hide": True})
 
     def _put(self, device: str, data: dict) -> None:
         if "role" in data:
