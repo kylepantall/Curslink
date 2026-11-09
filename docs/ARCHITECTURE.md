@@ -269,9 +269,15 @@ front of it shows the part it covers, live (`curslink.mirror`).
   behind, not while adjusting) draws the system cursor
   (`curslink.mirror.cursorshape`: `NSCursor currentSystemCursor` on macOS,
   `GetCursorInfo` on Windows) into the picture at its hot spot, so the
-  mirror shows exactly what's there and nothing on top. Agents list
+  mirror shows exactly what's there and nothing on top. Where macOS
+  draws the cursor as a window of its own (WindowServer's, at the cursor
+  window level), the grab already has it, so it isn't drawn in again. Agents list
   `mirror_cursor`; only an older agent behind still gets `mirror_pointer`
   (and the older `cursor` look beside frames).
+- Crossings between lined-up screens go by the fit: `Layout.find_crossing`
+  looks for the screen in front where the line-up put it
+  (`Layout.placed`), not where the layout's rectangle has it, so the whole
+  real edge crosses (and shows its glow and landing effect).
 - Full resolution: a capture with `tiles` (the device in front lists
   `mirror_tiles`; this computer always does) sends the covered area at the
   screen behind's own pixels, never scaled down, as 256 px JPEG tiles at

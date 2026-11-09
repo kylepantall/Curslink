@@ -1147,6 +1147,7 @@ def _still_capture(qapp, monkeypatch, spec, size=(120, 80)):
 
     def image():
         real()  # finds where it captures
+        cap.has_cursor = False  # a still picture, without this computer's cursor in it
         return still
 
     monkeypatch.setattr(cap, "image", image)
@@ -1251,3 +1252,60 @@ def test_tiles_wait_for_room_without_dropping_each_other():
     for _ in range(3):
         src.ack("a")
     assert [f["n"] for f in sent[TILES_IN_FLIGHT:]] == [99, TILES_IN_FLIGHT + 1, TILES_IN_FLIGHT + 2]
+
+
+def test_crossing_goes_by_where_the_line_up_put_the_screen_in_front():
+    """Kyle: after lining up, the pointer only got into part of the laptop
+    (where the layout had it, not where it really stands), and with no
+    crossing there, no edge glow or landing effect either."""
+    from curslink.layout import Fit
+
+    lay = desk()
+    lay.fits = (Fit(("pc", "main"), ("lap", "main"), 500, 450, 1.0),)  # really at 500..1000 x 450..750
+    # Down off the PC's bottom edge where the laptop really is (the layout has it from 800 only).
+    c = lay.find_crossing("pc", 600, 599, 0, 5)
+    assert c is not None and c.screen.device_id == "lap"
+    assert (round(c.x), round(c.y)) == (900, 556)
+    # Right off the PC's edge where the layout has the laptop but it really isn't.
+    assert lay.find_crossing("pc", 999, 420, 5, 0) is None
+    # And back up off the laptop's top edge: onto the PC where that really is.
+    c = lay.find_crossing("lap", 900, 400, 0, -5)
+    assert c is not None and c.screen.device_id == "pc" and (round(c.x), round(c.y)) == (600, 443)
+
+
+def test_a_mac_capture_that_has_the_cursor_in_it_casts_that_one(qapp, monkeypatch):
+    """macOS can draw the cursor as a window of its own, which a grab takes
+    in: drawing it in as well showed two."""
+    from curslink.mirror import helper as mh
+
+    class Q:
+        kCGCursorWindowLevelKey = 19
+
+        @staticmethod
+        def CGWindowLevelForKey(key):  # noqa: N802
+            return 2147483630
+
+    infos = [{"kCGWindowNumber": 1, "kCGWindowLayer": 0, "kCGWindowOwnerName": "Finder"},
+             {"kCGWindowNumber": 2, "kCGWindowLayer": 2147483630, "kCGWindowOwnerName": "WindowServer"},
+             {"kCGWindowNumber": 3, "kCGWindowLayer": 25, "kCGWindowOwnerName": "WindowServer",
+              "kCGWindowName": "Cursor"},
+             {"kCGWindowNumber": 4, "kCGWindowLayer": 25, "kCGWindowOwnerName": "WindowServer",
+              "kCGWindowName": "Menubar"}]
+    assert mh.mac_cursor_windows(Q, infos) == [2, 3]
+    import curslink.mirror.cursorshape as cursorshape
+
+    calls = []
+    monkeypatch.setattr(cursorshape, "current", lambda dpr=1.0: calls.append(dpr))
+    cap, out = _still_capture(qapp, monkeypatch, {"id": "c", "screen": "main", "os": [10, 10, 120, 80], "fps": 1,
+                                                 "cursor": True})
+    real = cap.image
+
+    def image():
+        img = real()
+        cap.has_cursor = True
+        return img
+
+    monkeypatch.setattr(cap, "image", image)
+    cap.grab()
+    assert calls == []  # not looked up, so not drawn in
+    cap.stop()

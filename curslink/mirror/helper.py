@@ -188,6 +188,30 @@ def mac_screen_recording(ask: bool = False) -> bool:
 
 
 _listed_ok = True
+# Whether the last mac_grab already has the cursor in it: macOS can draw it
+# as a window of its own (WindowServer's "Cursor", at the cursor level, as
+# with a bigger or coloured pointer), which a grab then takes in. Then it's
+# cast as it is, and not drawn in a second time.
+mac_grab_has_cursor = False
+_said_cursor: bool | None = None
+
+
+def mac_cursor_windows(quartz, infos) -> list[int]:
+    """The ids of the windows in ``infos`` that are the cursor itself."""
+    level = None
+    try:
+        level = int(quartz.CGWindowLevelForKey(quartz.kCGCursorWindowLevelKey))
+    except Exception:  # pragma: no cover - macOS only
+        pass
+    out = []
+    for i in infos:
+        name = str(i.get("kCGWindowName") or "")
+        owner = str(i.get("kCGWindowOwnerName") or "")
+        layer = i.get("kCGWindowLayer")
+        if "kCGWindowNumber" in i and ((level is not None and layer is not None and int(layer) >= level)
+                                       or (owner == "WindowServer" and "cursor" in name.lower())):
+            out.append(int(i["kCGWindowNumber"]))
+    return out
 
 
 def mac_grab(x: float, y: float, w: float, h: float) -> QImage | None:
@@ -205,6 +229,8 @@ def mac_grab(x: float, y: float, w: float, h: float) -> QImage | None:
         cg = None
         listed = getattr(Quartz, "CGWindowListCreateImageFromArray", None)
         global _listed_ok
+        global mac_grab_has_cursor, _said_cursor
+        mac_grab_has_cursor = False
         if listed is not None and _listed_ok:
             try:
                 import os
@@ -214,6 +240,11 @@ def mac_grab(x: float, y: float, w: float, h: float) -> QImage | None:
                                                           Quartz.kCGNullWindowID) or []
                 ids = [int(i["kCGWindowNumber"]) for i in infos
                        if int(i.get("kCGWindowOwnerPID", -1)) != me and "kCGWindowNumber" in i]
+                cursor = set(mac_cursor_windows(Quartz, infos)) & set(ids)
+                mac_grab_has_cursor = bool(cursor)
+                if mac_grab_has_cursor != _said_cursor:
+                    _said_cursor = mac_grab_has_cursor
+                    log.info("mirror: the capture %s the cursor itself", "shows" if cursor else "doesn't show")
                 if ids:
                     cg = listed(rect, ids, Quartz.kCGWindowImageDefault)
             except Exception:  # pragma: no cover - macOS only
@@ -291,6 +322,7 @@ class Capture:
         QTimer.singleShot(0, self.grab)
 
     def image(self) -> QImage | None:
+        self.has_cursor = False  # the grab has the cursor in it already
         found = spec_to_logical(self.spec)
         if found is None:
             self.why = "no screen of this computer is there"
@@ -305,6 +337,7 @@ class Capture:
             # windows (the edge indicator), which would show up twice.
             img = mac_grab(lx, ly, lw, lh)
             if img is not None:
+                self.has_cursor = mac_grab_has_cursor
                 return img
         qscreen = QGuiApplication.screens()[index]
         g = qscreen.geometry()
@@ -333,7 +366,7 @@ class Capture:
             log.info("mirror: capturing %s at %dx%d", self.spec.get("os"), img.width(), img.height())
         self.failed = False
         cast = None
-        if self.spec.get("cursor") and not self.spec.get("tune"):
+        if self.spec.get("cursor") and not self.spec.get("tune") and not getattr(self, "has_cursor", False):
             img, cast = self.draw_cursor(img)
         now = time.monotonic()
         if self.spec.get("tiles"):
