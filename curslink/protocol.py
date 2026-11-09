@@ -339,8 +339,12 @@ def _validate(msg: Message) -> None:
         if not isinstance(msg.data.get("id"), str) or not isinstance(msg.data.get("data"), str):
             raise ProtocolError("clip_data needs an id and data")
     elif t == "drag":
-        if msg.data.get("hide") is not True and not isinstance(msg.data.get("card"), dict):
-            raise ProtocolError("drag needs a card, or hide")
+        # A card (shown, and with an id its bytes follow), hide, or drop {id}.
+        if msg.data.get("drop") is True:
+            if not isinstance(msg.data.get("id"), str):
+                raise ProtocolError("drag.drop needs an id")
+        elif msg.data.get("hide") is not True and not isinstance(msg.data.get("card"), dict):
+            raise ProtocolError("drag needs a card, hide or drop")
     elif t == "fetch":
         if not isinstance(msg.data.get("id"), str):
             raise ProtocolError("fetch.id must be a string")
