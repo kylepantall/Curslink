@@ -49,6 +49,7 @@ from curslink.files.popups import ReceivePopups
 from curslink.files.transfer import FileReceiver
 from curslink.protocol import DROP_FEATURE, FILE_ACK_FEATURE, FILES_FEATURE, FILES_OUT_FEATURE
 from curslink.router import Router, SwitchEvent
+from curslink.files.dragdebug import trace
 
 log = logging.getLogger(__name__)
 
@@ -149,6 +150,7 @@ class DragHandoff:
             if self.incoming is not None:
                 inc, self.incoming = self.incoming, None
                 log.info("drag: dropped here")
+                trace("dropped-here")
                 self.native.let_go(inc["id"], inject=False)  # the real button-up is on its way (or held)
             else:
                 self.released_early = True
@@ -198,6 +200,7 @@ class DragHandoff:
             return
         paths = [p for p in data.get("paths", []) if isinstance(p, str)] if isinstance(data, dict) else []
         log.info("drag: a %s drag reached a drop target", "file" if paths else "non-file")
+        trace("host-target", files=bool(paths))
         if not self.left_down:
             return
         if not paths:
@@ -291,6 +294,7 @@ class DragHandoff:
             return
         self.carrying = device_id
         log.info("drag: carrying %s to %s", ", ".join(i.name for i in self.items[:3]), device_id)
+        trace("carry", to=device_id)
         self.set_shield(True)  # the host's own drag rests on it until the drop
         if not self.server.supports(device_id, DROP_FEATURE):
             self.server.send(device_id, "drag", card=card(self.items))  # older agent: sent on the drop
@@ -309,6 +313,7 @@ class DragHandoff:
         if out is None:
             return
         log.info("drag: not dropped on %s; stopping its transfer", out.device_id)
+        trace("not-dropped", on=out.device_id)
         self.outgoing.pop(out.id, None)
         if out.task is not None:
             out.task.cancel()
@@ -320,6 +325,7 @@ class DragHandoff:
         self.carrying = None
         loop = asyncio.get_running_loop()
         out, self.carry_out = self.carry_out, None
+        trace("dropped-on", on=device_id)
         if out is not None and out.device_id == device_id:
             log.info("drag: dropped on %s (%s of %s sent)", device_id, human_size(out.sent),
                      human_size(out.total) if out.total else "?")
@@ -370,6 +376,7 @@ class DragHandoff:
         """Router: input is coming here from ``device_id`` with its left
         button held. Ask it whether that's a file drag (and to end it there)."""
         log.info("drag: input came back from %s with the button held; asking what it's dragging", device_id)
+        trace("came-back", from_=device_id)
         self.awaiting_out, self.released_early, self.incoming = device_id, False, None
         self.server.send(device_id, "drag_out")
 
@@ -398,6 +405,7 @@ class DragHandoff:
         if self.incoming is not None:
             tid = self.incoming["id"]
             log.info("drag: carried on past this computer; not dropped here")
+            trace("carried-past")
             self.server.send(self.incoming["device"], "fetch", id=tid, cancel=True)
             self.expecting.discard(tid)
             self.native.cancel(tid)

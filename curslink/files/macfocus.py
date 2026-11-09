@@ -16,6 +16,8 @@ import sys
 
 log = logging.getLogger(__name__)
 
+_skip: set[int] = set()  # our own processes, as the last probe had them
+
 SKIP_OWNERS = {"Window Server", "Dock", "SystemUIServer", "Control Center", "Notification Center"}
 
 
@@ -78,9 +80,8 @@ def raise_window(pid: int, x: float, y: float) -> None:
     app.activateWithOptions_(NSApplicationActivateIgnoringOtherApps)
 
 
-def front_pid() -> int | None:
-    """The frontmost app's pid, asked of Accessibility (NSWorkspace's answer
-    only updates in a process running an AppKit loop, which this isn't)."""
+def ax_front_pid() -> int | None:
+    """The frontmost app's pid as Accessibility has it, or None."""
     try:
         try:
             import HIServices as AX
@@ -93,17 +94,41 @@ def front_pid() -> int | None:
             if not err:
                 return int(pid)
     except Exception:
-        log.debug("couldn't ask which app is in front", exc_info=True)
-    from AppKit import NSWorkspace
+        log.debug("couldn't ask Accessibility which app is in front", exc_info=True)
+    return None
 
-    front = NSWorkspace.sharedWorkspace().frontmostApplication()
-    return int(front.processIdentifier()) if front is not None else None
+
+def top_window_pid(skip: set[int] = frozenset()) -> int | None:
+    """The owner of the front-most ordinary window on screen (fresh in any
+    process, unlike NSWorkspace's frontmostApplication, which only updates
+    in one running an AppKit loop)."""
+    import Quartz
+
+    infos = Quartz.CGWindowListCopyWindowInfo(
+        Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements, Quartz.kCGNullWindowID) or []
+    for info in infos:
+        if int(info.get("kCGWindowLayer", 1)) != 0 or float(info.get("kCGWindowAlpha", 1)) <= 0:
+            continue
+        pid = int(info.get("kCGWindowOwnerPID", 0))
+        if pid in skip or str(info.get("kCGWindowOwnerName", "")) in SKIP_OWNERS:
+            continue
+        return pid
+    return None
+
+
+def front_pid() -> int | None:
+    """The frontmost app's pid: Accessibility's answer, else the owner of the
+    front-most window."""
+    pid = ax_front_pid()
+    return pid if pid is not None else top_window_pid({os.getpid(), *_skip})
 
 
 def probe(skip: set[int]):
     """(key, name, x, y) for the window under the pointer, or None."""
     from curslink.inputs.pynput_backend import mac_cursor
 
+    global _skip
+    _skip = set(skip)
     x, y = mac_cursor()
     hit = window_under(x, y, skip)
     if hit is None:
@@ -117,7 +142,14 @@ def bring(key, x: float, y: float) -> None:
 
 
 def is_front(key) -> bool:
-    return front_pid() == key[0]
+    """In front by Accessibility's answer, or its window is the front-most
+    one on screen (on 0.4.37 Accessibility never named the app it had just
+    brought forward, so every try looked like it had failed)."""
+    if ax_front_pid() == key[0]:
+        return True
+    if key[1] == 0:  # the desktop: Finder in front by Accessibility only
+        return False
+    return top_window_pid({os.getpid(), *_skip}) == key[0]
 
 
 def token(key) -> int:
