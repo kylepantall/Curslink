@@ -224,6 +224,16 @@ class SettingsPage(Page):
             self.agent_card.add_row(self.helper_block, self.helper)
         self.add(self.agent_card)
 
+        # -- clipboard (both) -------------------------------------------------------
+        self.clipboard_card = Card("Clipboard", rows=True)
+        self.clipboard = Toggle("Share the clipboard")
+        self.clipboard.clicked.connect(lambda on: self.set_config(self._role_table(), "clipboard", on))
+        self.clipboard_card.add_row(text_block(
+            "Share the clipboard",
+            "Copy text, a picture or files on one computer and paste them on another. Passwords copied from "
+            "a password manager stay where they are. Copies bigger than 25 MB aren't shared."), self.clipboard)
+        self.add(self.clipboard_card)
+
         # -- network (both) ---------------------------------------------------------
         self.network = NetworkCard(lambda on: self.set_config("network", "optimise", on), self.check_network)
         self.add(self.network)
@@ -370,6 +380,8 @@ class SettingsPage(Page):
             self.agent_camera_row.setVisible(self.agent_camera.isChecked())
             self.agent_camera_picker.set_current(int(agent_gaze.get("camera", 0) or 0),
                                                  str(agent_gaze.get("camera_name", "") or ""))
+            role_table = raw.get(self._role_table(), {})
+            self.clipboard.setChecked(bool(role_table.get("clipboard", True)) if isinstance(role_table, dict) else True)
             net = raw.get("network", {})
             self.network.optimise.setChecked(bool(net.get("optimise", True)) if isinstance(net, dict) else True)
             u = raw.get("update", {})
@@ -568,6 +580,13 @@ class SettingsPage(Page):
             return
         self.network.checking()
         self.app.service.send("netcheck")
+
+    def _role_table(self) -> str:
+        """The config table of this computer's role: "host" or "agent"."""
+        try:
+            return "agent" if self.app.config().role == "agent" else "host"
+        except Exception:
+            return "host"
 
     def set_config(self, table: str, key: str, value, restart: bool = True) -> None:
         if self._loading:

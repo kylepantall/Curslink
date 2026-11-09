@@ -58,6 +58,14 @@ Host -> agent
                                        pointer is heading here ("to"); see
                                        curslink.edgehint. Only to an agent whose
                                        hello.features has "edge"
+    clip         {id, kind, size, files?}
+                                       something was copied (either way: host ->
+                                       agent and agent -> host), its bytes follow
+                                       in clip_data frames; see curslink.clipboard.
+                                       Only between a host and an agent that both
+                                       list "clipboard" in their features (or an
+                                       agent's "clipboard_text": text only)
+    clip_data    {id, data, end?}      the next bytes of a clip (base64)
 
 Agent -> host
     hello        {v, device_id, name, platform, screens, auth, camera, ping_s}
@@ -139,6 +147,8 @@ MESSAGE_TYPES = frozenset(
         "netstats",
         "mirror_tune",
         "edge",
+        "clip",
+        "clip_data",
         "bye",
         "drag",
         "drag_out",
@@ -201,6 +211,13 @@ MIRROR_CURSOR_FEATURE = "mirror_cursor"
 # takes a move sent twice on a lossy link (MOVE2 datagrams, see
 # curslink.net.udp); a host that lists it takes netstats frames.
 NETSTATS_FEATURE = "netstats"
+# Clipboard sync (clip, clip_data; see curslink.clipboard). Listed by a host
+# in welcome.features and an agent in hello.features when it's turned on
+# there; clips only go between two that both list it.
+CLIPBOARD_FEATURE = "clipboard"
+# An agent that only shares text (the Android app): the host sends it no
+# pictures or files.
+CLIPBOARD_TEXT_FEATURE = "clipboard_text"
 FILE_FRAMES = frozenset({"file_begin", "file_item", "file_data", "file_end", "file_cancel", "file_result",
                          "file_ack"})
 
@@ -310,6 +327,17 @@ def _validate(msg: Message) -> None:
             value = msg.data.get(key)
             if value is not None and not _is_number(value):
                 raise ProtocolError(f"netstats.{key} must be a number or null")
+    elif t == "clip":
+        if not isinstance(msg.data.get("id"), str) or not msg.data["id"]:
+            raise ProtocolError("clip.id must be a non-empty string")
+        if msg.data.get("kind") not in ("text", "image", "files"):
+            raise ProtocolError("clip.kind must be text, image or files")
+        size = msg.data.get("size")
+        if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+            raise ProtocolError("clip.size must be a whole number")
+    elif t == "clip_data":
+        if not isinstance(msg.data.get("id"), str) or not isinstance(msg.data.get("data"), str):
+            raise ProtocolError("clip_data needs an id and data")
     elif t == "drag":
         if msg.data.get("hide") is not True and not isinstance(msg.data.get("card"), dict):
             raise ProtocolError("drag needs a card, or hide")

@@ -85,6 +85,10 @@ class HostConfig:
     isolink: bool = True
     # Mirror mode's frames a second ([layout] mirror_fps; on with [layout] mirror, see curslink.mirror).
     mirror_fps: int = 15
+    # Share what's copied with the agents ([host] clipboard; see curslink.clipboard).
+    clipboard: bool = True
+    # Copies bigger than this (MB) stay on their own device ([host] clipboard_max_mb).
+    clipboard_max_mb: int = 25
     # How keys change on their way to each device (see curslink.inputs.keys.KeyMaps).
     keymaps: KeyMaps = field(default_factory=KeyMaps)
 
@@ -126,6 +130,16 @@ class AgentConfig:
     isolink: bool = True
     # Take part in mirror mode: show and capture covered screen areas ([agent] mirror).
     mirror: bool = True
+    # Share what's copied with the host ([agent] clipboard; see curslink.clipboard).
+    clipboard: bool = True
+    clipboard_max_mb: int = 25
+
+
+def _clipboard_max_mb(table: dict[str, Any], where: str) -> int:
+    value = table.get("clipboard_max_mb", 25)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        raise ConfigError(f"{where}.clipboard_max_mb must be a positive number")
+    return max(1, min(1024, int(value)))
 
 
 def _enabled(raw: Any, where: str) -> bool:
@@ -459,6 +473,8 @@ def host_config(raw: dict[str, Any], base_dir: Path = Path(".")) -> HostConfig:
         files=bool(raw.get("files", {}).get("enabled", True)) if isinstance(raw.get("files", {}), dict) else True,
         isolink=_enabled(raw.get("isolink", {}), "[isolink]"),
         mirror_fps=max(1, min(30, _int(raw.get("layout", {}), "mirror_fps", 15))),
+        clipboard=bool(host.get("clipboard", True)),
+        clipboard_max_mb=_clipboard_max_mb(host, "[host]"),
     )
 
 
@@ -492,6 +508,8 @@ def agent_config(raw: dict[str, Any], base_dir: Path = Path(".")) -> AgentConfig
         files=agent_files_config(agent.get("files", {})),
         isolink=_enabled(agent.get("isolink", {}), "[agent.isolink]"),
         mirror=bool(agent.get("mirror", True)),
+        clipboard=bool(agent.get("clipboard", True)),
+        clipboard_max_mb=_clipboard_max_mb(agent, "[agent]"),
     )
     if not cfg.host and not cfg.relay and not cfg.pairing.enabled:
         raise ConfigError("set [agent].host (LAN), a [relay] (internet), or leave [pairing] enabled")

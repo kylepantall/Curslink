@@ -15,7 +15,7 @@ from curslink.net import quality
 from curslink.net.framing import STREAM_LIMIT, read_message
 from curslink.net.relay import RelayError, RelayTarget, agent_connect
 from curslink.net.udp import AgentUdp
-from curslink.protocol import (AGENT_FEATURES, EDGE_FEATURE, FILES_FEATURE, FILES_OUT_FEATURE, DROP_FEATURE, FILE_ACK_FEATURE, MIRROR_FEATURE, NETSTATS_FEATURE, POPUPS_FEATURE, PREPARE_FEATURE, PROTOCOL_VERSION, UDP_FEATURE, Message, ProtocolError,
+from curslink.protocol import (AGENT_FEATURES, CLIPBOARD_FEATURE, EDGE_FEATURE, FILES_FEATURE, FILES_OUT_FEATURE, DROP_FEATURE, FILE_ACK_FEATURE, MIRROR_FEATURE, NETSTATS_FEATURE, POPUPS_FEATURE, PREPARE_FEATURE, PROTOCOL_VERSION, UDP_FEATURE, Message, ProtocolError,
                                encode)
 from curslink.security import channel_binding, hello_auth
 from curslink.tally import Tally
@@ -70,6 +70,10 @@ class AgentSession:
         # covered areas (mirror, mirror_frame, mirror_pointer, mirror_ack);
         # without one the agent doesn't offer the "mirror" feature.
         self.mirror = None
+        # A curslink.clipboard.sync.ClipboardSync shares the clipboard with
+        # the host (clip, clip_data); without one the agent doesn't offer
+        # the "clipboard" feature.
+        self.clipboard = None
         # Set while the app's keyboard check is listening: keys from the host
         # go here (as sent, before [agent].modifier_map) instead of being typed.
         self.learn: Callable[[str, bool], None] | None = None
@@ -152,6 +156,9 @@ class AgentSession:
         elif t in ("mirror", "mirror_frame", "mirror_pointer", "mirror_ack"):
             if self.mirror is not None:
                 self.mirror.handle(t, dict(msg.data))
+        elif t in ("clip", "clip_data"):
+            if self.clipboard is not None:
+                self.clipboard.handle("host", t, dict(msg.data))
         elif t == "fetch":
             if self.drag_out is not None:
                 self.drag_out.fetch(dict(msg.data))
@@ -417,6 +424,8 @@ class AgentClient:
             if self.session.mirror is not None:
                 features.append(MIRROR_FEATURE)
             features.append(NETSTATS_FEATURE)
+            if self.session.clipboard is not None:
+                features.append(CLIPBOARD_FEATURE)
             hello = dict(
                 v=PROTOCOL_VERSION,
                 device_id=self.device_id,

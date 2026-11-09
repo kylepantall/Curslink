@@ -250,6 +250,25 @@ front of it shows the part it covers, live (`curslink.mirror`).
   draws mirrors in its pointer overlay, and captures with Android's screen
   capture (MediaProjection), which asks the first time it's needed.
 
+### Clipboard sync
+
+Copy on one device, paste on another (`curslink/clipboard/`). The overlay
+helper, a Qt process every device already runs, watches the clipboard
+(Qt's `dataChanged`, plus polling the pasteboard's change count on macOS,
+where an accessory app never hears it) and prints `clip {...}` with the
+text, a PNG it wrote, or the copied files' paths. The service sends that
+over the paired link as `clip {id, kind, size, files?}` then base64
+`clip_data` frames, written only as fast as the link drains so the pointer
+never waits. The host is the hub: what an agent copied goes on the host's
+clipboard and on to every other agent. Files arrive in a temp folder and
+go on the clipboard as file URLs, so pasting in Finder or Explorer copies
+them out; images go on as images. The helper skips what it set itself (so
+nothing bounces back), anything a password manager marks private, and the
+service anything over `clipboard_max_mb` (25). The Android app lists
+`clipboard_text` and only trades text; Android lets it read other apps'
+copies only while Curslink is in front. `[host]`/`[agent] clipboard =
+false` (Settings > Clipboard) turns it off.
+
 ### Carrying Isolink's floating chats
 
 Isolink, the messenger, floats chats in small windows of their own on a

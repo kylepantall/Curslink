@@ -106,6 +106,12 @@ class HostServer:
         # (device_id, frame type, frame data): mirror_frame and mirror_ack
         # from an agent taking part in mirror mode (see curslink.mirror).
         self.on_mirror: Callable[[str, str, dict], None] = lambda device_id, t, data: None
+        # (device_id, frame type, frame data): clip and clip_data, something
+        # copied on that agent (see curslink.clipboard).
+        self.on_clip: Callable[[str, str, dict], None] = lambda device_id, t, data: None
+        # welcome.features: what this host understands (more is added when
+        # turned on, e.g. "clipboard").
+        self.features: list[str] = list(HOST_FEATURES)
         self.host = host
         self.port = port
         # (device_id, hello.auth, TLS channel binding) -> allowed? See security.HelloVerifier.
@@ -292,7 +298,7 @@ class HostServer:
             if self.optimise:
                 quality.mark_low_latency(quality.transport_socket(writer))
             self.connections[device_id] = conn
-            welcome = {"device_id": device_id, "features": list(HOST_FEATURES)}
+            welcome = {"device_id": device_id, "features": list(self.features)}
             # Only for an agent that asked: older ones would drop the connection
             # on a datagram-era frame they don't know (they never get one).
             if self.udp is not None and UDP_FEATURE in conn.features:
@@ -364,6 +370,8 @@ class HostServer:
             self.on_popup_result(conn.device_id, dict(msg.data))
         elif msg.t in ("mirror_frame", "mirror_ack", "mirror_tune"):
             self.on_mirror(conn.device_id, msg.t, dict(msg.data))
+        elif msg.t in ("clip", "clip_data"):
+            self.on_clip(conn.device_id, msg.t, dict(msg.data))
         elif msg.t.startswith("file_"):
             reply = self.on_files(conn.device_id, msg)
             if reply and not conn.writer.transport.is_closing():

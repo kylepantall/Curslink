@@ -19,8 +19,10 @@ which took focus away from whatever you were typing in.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
+import os
 import queue
 import subprocess
 import sys
@@ -53,6 +55,8 @@ class OverlayProcess:
         # Each line the helper prints (e.g. ``drag {...}`` when a file drag
         # passes over one of its drop targets), called on a reader thread.
         self.on_line: Callable[[str], None] = lambda line: None
+        # Lines every (re)started helper gets first, e.g. ``clipwatch on``.
+        self.startup: list[str] = []
 
     def _ensure(self) -> subprocess.Popen | None:
         if self._disabled:
@@ -70,6 +74,10 @@ class OverlayProcess:
                 )
                 threading.Thread(target=self._read, args=(self._proc,), name="curslink-overlay-out",
                                  daemon=True).start()
+                for line in self.startup:
+                    self._proc.stdin.write(line + "\n")
+                if self.startup:
+                    self._proc.stdin.flush()
             except OSError:
                 log.warning("switch animation unavailable", exc_info=True)
                 self._disabled = True
@@ -365,6 +373,9 @@ def _run_qt_helper() -> None:
     from curslink.edgeoverlay import EdgeOverlay
 
     edges = EdgeOverlay(to_logical)
+    from curslink.clipboard.helper import ClipboardHelper
+
+    clipboard = ClipboardHelper()
 
     def poll() -> None:
         while True:
@@ -398,6 +409,11 @@ def _run_qt_helper() -> None:
                     log.debug("bad edge command %r", line)
                 except Exception:  # pragma: no cover - never take the helper down
                     log.exception("edge command %r", line)
+            elif parts and parts[0] in ("clipwatch", "clipset"):
+                try:
+                    clipboard.handle(line)
+                except Exception:  # pragma: no cover - never take the helper down
+                    log.exception("clipboard command %s", parts[0])
             elif parts:
                 try:
                     files.handle(line)
@@ -408,6 +424,13 @@ def _run_qt_helper() -> None:
     timer.timeout.connect(poll)
     timer.start(10)
     app.exec()
+    # Leave without running Qt's exit-time clean-up: the clipboard may hold
+    # data we put there (curslink.clipboard), and Qt deleting that after
+    # Python has gone crashes the helper on its way out.
+    clipboard.flush()
+    with contextlib.suppress(Exception):
+        sys.stdout.flush()
+    os._exit(0)
 
 
 # ------------------------------------------------------------ the Tk helper
