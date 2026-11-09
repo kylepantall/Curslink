@@ -352,6 +352,11 @@ def _run_qt_helper() -> None:
 
     def read_stdin() -> None:
         for line in sys.stdin:
+            if line.startswith("focus "):  # now, not after a drag's modal loop
+                from curslink.files.focus import from_helper
+
+                from_helper(line)
+                continue
             commands.put(line)
         commands.put(None)
 

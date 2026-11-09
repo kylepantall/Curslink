@@ -42,6 +42,7 @@ log = logging.getLogger(__name__)
 
 START_TIMEOUT_S = 1.5   # the helper must have started the drag by then
 FOLLOW_EVERY_S = 0.08   # how often the window under a held drag is checked
+FOCUS_SETTLE_S = 0.15   # after bringing a window forward at the drop, before letting go
 KEEP_DROPS_S = 24 * 3600
 
 
@@ -76,6 +77,7 @@ class Drop:
     released: bool = False     # the user let go
     waited: bool = False       # ...before every byte had arrived
     inject: bool = True        # the button-up is ours to send
+    held: bool = False         # the real button-up was held back for it
     started_at: float = field(default_factory=time.monotonic)
 
 
@@ -223,14 +225,31 @@ class NativeDrop:
     def release(self) -> None:
         self._bg(self._release)
 
+    def _drop_here(self) -> None:
+        """Let go, once the window under the pointer is in front: apps often
+        refuse a drop in a window that isn't."""
+        if self.follow is not None and self.follow.bring_now():
+            try:
+                asyncio.get_running_loop().call_later(FOCUS_SETTLE_S, self.release)
+                return
+            except RuntimeError:  # no loop (tests calling directly)
+                pass
+        self.release()
+
     def cancel_drag(self) -> None:
         self._bg(self._cancel)
 
     # ------------------------------------------------------------- the drop
     def holding(self) -> bool:
         """Should a button-up be held back now (a real drag whose files
-        haven't all arrived)? Read from input threads."""
-        return any(d.phase == "dragging" and not d.done for d in list(self.drops.values()))
+        haven't all arrived, or over a window that isn't in front yet so
+        wouldn't take it)? Read from input threads."""
+        ready = self.follow is None or self.follow.ready()
+        hold = False
+        for d in list(self.drops.values()):
+            if d.phase == "dragging" and (not d.done or not ready):
+                d.held = hold = True
+        return hold
 
     def let_go(self, tid: str | None = None, inject: bool = True) -> None:
         """The user let go. ``inject``: this device's button-up is ours to
@@ -268,8 +287,8 @@ class NativeDrop:
     def _finish(self, drop: Drop, inject: bool) -> None:
         self.popups.quiet.discard(drop.id)
         if drop.phase == "dragging":
-            if inject or drop.waited:
-                self.release()  # the OS drops the files where the pointer is
+            if inject or drop.waited or drop.held:
+                self._drop_here()  # the OS drops the files where the pointer is
             if drop.waited:
                 self.helper("toast " + json.dumps({"id": drop.id, "state": "done", "count": len(drop.tops),
                                                "total": drop.card.get("size", 0), "card": drop.card,

@@ -499,7 +499,8 @@ def start_file_drags(cfg: HostConfig, router: Router, server: HostServer, overla
         from curslink.inputs.pynput_backend import press_left_here as native_press
 
         # Apps under a drag from another computer take it only once in front.
-        follow = FocusFollower(lambda: {overlay.pid} if getattr(overlay, "pid", None) else set())
+        follow = FocusFollower(lambda: {overlay.pid} if getattr(overlay, "pid", None) else set(),
+                               ask_helper=lambda token: overlay.command(f"focus {token}"))
     handoff = DragHandoff(router, server, overlay.command, capture.inject_drag_end, cfg.name, emit=events.emit,
                           drag_source=drag_source, native_press=native_press,
                           release_held=getattr(capture, "release_held", lambda: None), follow=follow)
@@ -1260,7 +1261,8 @@ def receive_files(cfg: AgentConfig, session: AgentSession, overlay):
         from curslink.files.focus import FocusFollower
 
         # Bring the window under a held drag forward, as on a Mac host.
-        follow = FocusFollower(lambda: {overlay.pid} if getattr(overlay, "pid", None) else set())
+        follow = FocusFollower(lambda: {overlay.pid} if getattr(overlay, "pid", None) else set(),
+                               ask_helper=lambda token: overlay.command(f"focus {token}"))
     native = NativeDrop(overlay.command, receiver, popups,
                         press=(lambda: sink.button("left", True)) if sys.platform == "win32" else None,
                         release=lambda: sink.button("left", False), cancel=cancel_drag, follow=follow)

@@ -931,6 +931,9 @@ async def test_a_held_drag_keeps_checking_the_window_under_it(tmp_path, monkeypa
         def reset(self):
             self.resets += 1
 
+        def ready(self):
+            return True
+
     follow = Follow()
     drop, receiver, helper, calls = native(tmp_path)
     drop.follow = follow
@@ -976,6 +979,125 @@ def test_focus_follower_waits_for_the_pointer_to_rest():
     under["hit"] = None                            # the taskbar, or ours
     f.tick(1.5)
     assert raised == [42, 43]
+
+
+def test_focus_follower_keeps_trying_until_the_window_is_in_front():
+    # 0.4.35: "you have to focus the app yourself sometimes" - one go that
+    # Windows or macOS turned down was never tried again.
+    from curslink.files.focus import FocusFollower
+
+    state = {"front": None, "refuse": 2}
+    raised, asked = [], []
+
+    class Impl:
+        @staticmethod
+        def probe(skip):
+            return 42, "Mail", 10, 10
+
+        @staticmethod
+        def bring(key, x, y):
+            raised.append(key)
+            if state["refuse"]:
+                state["refuse"] -= 1
+            else:
+                state["front"] = key
+
+        @staticmethod
+        def is_front(key):
+            return state["front"] == key
+
+    f = FocusFollower(impl=Impl, ask_helper=asked.append)
+    f.tick(0.0)
+    assert not f.ready()
+    f.tick(0.25)
+    assert raised == [42] and asked == [42]        # refused: the helper tries too
+    f.tick(0.35)
+    assert raised == [42]                          # not straight away
+    f.tick(0.6)
+    f.tick(0.95)
+    assert raised == [42, 42, 42] and f.ready()
+    f.tick(1.5)
+    assert raised == [42, 42, 42]                  # in front: left alone
+    state["front"] = None                          # something took it back
+    f.tick(1.6)
+    assert raised == [42, 42, 42, 42]
+
+
+def test_focus_follower_brings_forward_at_once_on_let_go():
+    from curslink.files.focus import FocusFollower
+
+    state = {"front": 1}
+    raised = []
+
+    class Impl:
+        @staticmethod
+        def probe(skip):
+            return 7, "Notes", 0, 0
+
+        @staticmethod
+        def bring(key, x, y):
+            raised.append(key)
+            state["front"] = key
+
+        @staticmethod
+        def is_front(key):
+            return state["front"] == key
+
+    f = FocusFollower(impl=Impl)
+    assert f.bring_now() is True and raised == [7]
+    assert f.bring_now() is False and raised == [7]
+
+
+async def test_a_drop_waits_for_the_window_under_it_to_come_forward(tmp_path, monkeypatch):
+    monkeypatch.setattr("curslink.files.native.FOCUS_SETTLE_S", 0.02)
+
+    class Follow:
+        front = False
+        brought = 0
+
+        def tick(self, now):
+            pass
+
+        def reset(self):
+            pass
+
+        def ready(self):
+            return self.front
+
+        def bring_now(self):
+            if self.front:
+                return False
+            self.brought += 1
+            self.front = True
+            return True
+
+    drop, receiver, helper, calls = native(tmp_path)
+    drop.follow = follow = Follow()
+    drop.begin("w1", CARD)
+    drop.on_helper("nativedrag-started w1")
+    feed(receiver, "w1")                           # every byte is here...
+    assert drop.holding()                          # ...but the window isn't in front
+    drop.let_go("w1", inject=False)
+    await asyncio.sleep(0)
+    assert follow.brought == 1 and "release" not in calls
+    await asyncio.sleep(0.05)
+    assert calls[-1] == "release"
+
+
+def test_helper_focus_lines_bring_the_window_forward(monkeypatch):
+    import curslink.files.focus as focus
+
+    got = []
+
+    class Impl:
+        @staticmethod
+        def bring_here(token):
+            got.append(token)
+
+    monkeypatch.setattr(focus, "_platform", lambda: Impl)
+    focus.from_helper("focus 1234\n")
+    focus.from_helper("focus nope\n")
+    assert got == [1234]
 
 
 def test_every_drag_frame_the_host_sends_is_valid():
