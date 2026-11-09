@@ -155,7 +155,12 @@ async def send_clip(send: Send, clip: Clip, cid: str | None = None) -> None:
     cid = cid or new_id()
     await send("clip", id=cid, **clip.header())
     pending: str | None = None
-    for block in clip.chunks():
+    blocks = clip.chunks()
+    while True:
+        # Files are read off the loop (see ClipboardSync.helper_line).
+        block = await asyncio.to_thread(next, blocks, None) if clip.kind == "files" else next(blocks, None)
+        if block is None:
+            break
         if pending is not None:
             await send("clip_data", id=cid, data=pending)
         pending = base64.b64encode(block).decode("ascii")
@@ -373,7 +378,17 @@ class ClipboardSync:
                 with contextlib.suppress(OSError):
                     os.unlink(data["path"])
             return
-        clip = clip_from_helper(data, self.max_bytes)
+        if data.get("kind") == "files":
+            # Off the loop: listing copied files in a protected folder can
+            # wait on a macOS permission prompt, and the loop forwards input.
+            async def files() -> None:
+                self._share(await asyncio.to_thread(clip_from_helper, data, self.max_bytes))
+
+            asyncio.get_running_loop().create_task(files())
+            return
+        self._share(clip_from_helper(data, self.max_bytes))
+
+    def _share(self, clip: Clip | None) -> None:
         if clip is not None:
             log.info("clipboard: copied %s here; sharing it", clip.describe())
             self._send_all(clip)

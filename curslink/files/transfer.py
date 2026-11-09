@@ -107,6 +107,9 @@ class Outgoing:
     window: int | None = None
     acked: int = 0
     _moved: asyncio.Event | None = None
+    # Called once with a path that takes more than OPEN_SLOW_S to open: on a
+    # Mac that's a permission prompt waiting to be answered on this computer.
+    on_slow: Callable[[str], None] | None = None
 
     def ack(self, n: object) -> None:
         """file_ack from the receiver."""
@@ -140,10 +143,30 @@ class Outgoing:
                 waited += 0.5
 
 
+OPEN_SLOW_S = 1.0
+
+
+async def off_loop_watched(what: str, on_slow: Callable[[str], None] | None, fn, *args):
+    """Run blocking file work off the event loop: on a Mac, touching a file
+    in a protected folder (Desktop, Documents, Downloads...) waits until a
+    permission prompt is answered, and the loop must keep forwarding input
+    meanwhile, or nobody can answer it (0.4.39). ``on_slow(what)`` once it
+    has taken OPEN_SLOW_S."""
+    task = asyncio.ensure_future(asyncio.to_thread(fn, *args))
+    done, _ = await asyncio.wait({task}, timeout=OPEN_SLOW_S)
+    if not done and on_slow is not None:
+        on_slow(what)
+    return await task
+
+
+async def open_watched(src: str, on_slow: Callable[[str], None] | None):
+    return await off_loop_watched(src, on_slow, open, src, "rb")
+
+
 async def send_files(send: Send, out: Outgoing, from_name: str) -> None:
     """Send ``out.items`` with ``send(t, **data)``, which waits while the
     connection is busy. Raises if the link goes away or the agent refuses."""
-    entries = await asyncio.to_thread(plan, out.items)
+    entries = await off_loop_watched(out.items[0].path if out.items else "", out.on_slow, plan, out.items)
     if not entries:
         raise TransferError("nothing to send (empty folders only?)")
     out.total = sum(size for _src, _rel, size in entries)
@@ -155,7 +178,8 @@ async def send_files(send: Send, out: Outgoing, from_name: str) -> None:
             if out.refused:
                 raise TransferError(out.refused)
             await send("file_item", id=out.id, i=i, path=rel, size=size)
-            with open(src, "rb") as fh:
+            fh = await open_watched(src, out.on_slow)
+            with fh:
                 left = size
                 while left > 0:
                     chunk = await asyncio.to_thread(fh.read, min(CHUNK, left))

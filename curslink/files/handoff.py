@@ -39,10 +39,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from typing import Callable
 
 from curslink.files.meta import Dragged, card, describe, human_size
-from curslink.files.transfer import Outgoing, new_id, send_files
+from curslink.files.transfer import Outgoing, new_id, off_loop_watched, send_files
 from curslink.layout import Layout
 from curslink.files.native import NativeDrop
 from curslink.files.popups import ReceivePopups
@@ -213,7 +214,7 @@ class DragHandoff:
         asyncio.get_running_loop().create_task(self._describe(gen, paths))
 
     async def _describe(self, gen: int, paths: list[str]) -> None:
-        items = await asyncio.to_thread(describe, paths)
+        items = await off_loop_watched(paths[0] if paths else "", self._slow_read, describe, paths)
         if gen != self._gen:
             return
         if not items:
@@ -340,7 +341,19 @@ class DragHandoff:
         loop.create_task(self._end_host_drag(self._gen))
         self._clear_local(keep_shield=True)
 
+    def _slow_read(self, path: str) -> None:
+        """Reading a dragged file is taking a while: on a Mac, most likely
+        a prompt asking to let Curslink read the folder it's in. It can only
+        be answered here, so bring the pointer home."""
+        folder = os.path.basename(os.path.dirname(path)) or path
+        log.warning("drag: reading %s is slow; this computer may be asking to let Curslink read %s, "
+                    "so input comes back here to answer it", os.path.basename(path), folder)
+        trace("slow-read", path=repr(path))
+        if not self.router.is_local:
+            self.router.go_home("hotkey")
+
     async def _send(self, out: Outgoing) -> None:
+        out.on_slow = self._slow_read
         names = ", ".join(i.name for i in out.items[:3])
         self.emit("file", state="sending", id=out.id, to=out.device_id, names=names)
         try:
