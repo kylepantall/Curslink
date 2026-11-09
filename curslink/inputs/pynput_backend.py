@@ -93,8 +93,15 @@ class PynputCapture:
     deltas; see ``_mac_motion``.
     """
 
-    def __init__(self, park_at: tuple[int, int] = (400, 400)):
+    def __init__(self, park_at: tuple[int, int] = (400, 400), hide_cursor: bool = True):
         self.park_at = park_at
+        # Windows and X11: the parked cursor is hidden while grabbed (macOS
+        # always hides it, below). See curslink.cursorhide.
+        self._hider = None
+        if hide_cursor and sys.platform != "darwin":
+            from curslink.cursorhide import CursorHider
+
+            self._hider = CursorHider()
         self._handler: CaptureHandler | None = None
         self._grabbed = False
         self._lock = threading.Lock()
@@ -135,6 +142,12 @@ class PynputCapture:
             _mac_attach_cursor(True)
             _mac_cursor_visible(True)
 
+    def close(self) -> None:
+        """Stop for good: the cursor shows again."""
+        self.stop()
+        if self._hider is not None:
+            self._hider.show()
+
     def set_grab(self, grabbed: bool) -> None:
         if grabbed == self._grabbed:
             return
@@ -155,6 +168,8 @@ class PynputCapture:
             return
         if grabbed and self._controller is not None:
             self._controller.position = self.park_at
+        if self._hider is not None:
+            (self._hider.hide if grabbed else self._hider.show)()
         self._restart()
 
     def _restart(self) -> None:

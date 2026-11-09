@@ -258,7 +258,7 @@ async def run_host(cfg: HostConfig) -> None:
     if not cfg.secret and not store.peers("agent"):
         log.info("no devices paired yet: run `curslink pair` here or on an agent")
     home = next(iter(cfg.layout.screens(cfg.device_id)))
-    capture = PynputCapture(park_at=home.to_os(*home.center))
+    capture = PynputCapture(park_at=home.to_os(*home.center), hide_cursor=cfg.hide_cursor)
     overlay = OverlayProcess()
     overlay.start()
     router = Router(
@@ -382,7 +382,7 @@ async def run_host(cfg: HostConfig) -> None:
         if network is not None:
             network.cancel()
         camera.stop()
-        capture.stop()
+        capture.close()
         if isolink is not None:
             await isolink.stop()
         if mirror is not None:
@@ -1105,6 +1105,10 @@ async def run_agent(cfg: AgentConfig) -> None:
         overlay.show if overlay and cfg.animations else (lambda effect, x, y: None),
         smoother=smoother,
     )
+    if cfg.hide_cursor:
+        from curslink.cursorhide import CursorHider
+
+        session.cursor = CursorHider(call_later=asyncio.get_running_loop().call_later)
     native = receive_files(cfg, session, overlay) if cfg.files.enabled and overlay is not None else None
     store = PairingStore(cfg.pairing.store)
     mdns: dict = {}  # "seen": whether the last lookup found the host by mDNS (None: not looked up)
@@ -1204,6 +1208,8 @@ async def run_agent(cfg: AgentConfig) -> None:
         await pairing.close()
         if overlay:
             overlay.close()
+        if session.cursor is not None:
+            session.cursor.show()
 
 
 def agent_popups(cfg: AgentConfig, session: AgentSession, sink, client: AgentClient):

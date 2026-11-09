@@ -89,6 +89,9 @@ class HostConfig:
     clipboard: bool = True
     # Copies bigger than this (MB) stay on their own device ([host] clipboard_max_mb).
     clipboard_max_mb: int = 25
+    # Hide this computer's cursor while input is on another device ([host] hide_cursor;
+    # see curslink.cursorhide). A Mac host always hides it.
+    hide_cursor: bool = True
     # How keys change on their way to each device (see curslink.inputs.keys.KeyMaps).
     keymaps: KeyMaps = field(default_factory=KeyMaps)
 
@@ -133,6 +136,8 @@ class AgentConfig:
     # Share what's copied with the host ([agent] clipboard; see curslink.clipboard).
     clipboard: bool = True
     clipboard_max_mb: int = 25
+    # Hide this device's cursor while input is on another device ([agent] hide_cursor).
+    hide_cursor: bool = True
 
 
 def _clipboard_max_mb(table: dict[str, Any], where: str) -> int:
@@ -475,6 +480,7 @@ def host_config(raw: dict[str, Any], base_dir: Path = Path(".")) -> HostConfig:
         mirror_fps=max(1, min(30, _int(raw.get("layout", {}), "mirror_fps", 15))),
         clipboard=bool(host.get("clipboard", True)),
         clipboard_max_mb=_clipboard_max_mb(host, "[host]"),
+        hide_cursor=bool(host.get("hide_cursor", True)),
     )
 
 
@@ -510,6 +516,7 @@ def agent_config(raw: dict[str, Any], base_dir: Path = Path(".")) -> AgentConfig
         mirror=bool(agent.get("mirror", True)),
         clipboard=bool(agent.get("clipboard", True)),
         clipboard_max_mb=_clipboard_max_mb(agent, "[agent]"),
+        hide_cursor=bool(agent.get("hide_cursor", True)),
     )
     if not cfg.host and not cfg.relay and not cfg.pairing.enabled:
         raise ConfigError("set [agent].host (LAN), a [relay] (internet), or leave [pairing] enabled")

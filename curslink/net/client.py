@@ -74,6 +74,9 @@ class AgentSession:
         # the host (clip, clip_data); without one the agent doesn't offer
         # the "clipboard" feature.
         self.clipboard = None
+        # A curslink.cursorhide.CursorHider: this device's own cursor is
+        # hidden while input is on another device ([agent] hide_cursor).
+        self.cursor = None
         # Set while the app's keyboard check is listening: keys from the host
         # go here (as sent, before [agent].modifier_map) instead of being typed.
         self.learn: Callable[[str, bool], None] | None = None
@@ -135,11 +138,15 @@ class AgentSession:
                 self.smoother.reset(x, y)
             else:
                 self.sink.move_to(x, y)
+            if self.cursor is not None:
+                self.cursor.show()  # after the move: it shows where it lands
             self.show_effect(msg.get("effect", "none"), x, y)
         elif t == "leave":
             self.release_all()
             if "x" in msg.data and "y" in msg.data:  # where the pointer left from (0.4.17+ hosts)
                 self.show_effect(msg.get("effect", "none"), int(msg.data["x"]), int(msg.data["y"]))
+            if self.cursor is not None:
+                self.cursor.hide()  # the pointer is on another device now
         elif t == "look":
             self.on_look(dict(msg.data))
         elif t == "hint":
@@ -494,6 +501,8 @@ class AgentClient:
                 self.on_state("disconnected", "")
             self.connected.clear()
             self.session.release_all()
+            if self.session.cursor is not None:
+                self.session.cursor.show()  # no host: this device's own mouse is all there is
             if self.session.files is not None:
                 self.session.files.close_all()
             if self.session.drag_out is not None:

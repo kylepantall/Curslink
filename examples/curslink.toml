@@ -35,6 +35,7 @@ swap_cmd_ctrl = true         # Mac <-> PC: Cmd on the Mac is Ctrl on the PC (and
                              # the built-in mapping for pairs without a [keymap] table
 clipboard = true             # share what's copied (text, pictures, files) with the agents
 clipboard_max_mb = 25        # bigger copies stay on their own computer
+hide_cursor = true           # hide this computer's cursor while input is on another device
 
 lan = true                   # accept agents on the LAN; false = relay only
 udp = true                   # send pointer moves by UDP to agents that take them
@@ -201,6 +202,8 @@ name = "Work laptop"
 port = 24850
 animations = true
 clipboard = true             # share what's copied here with the host (and on to the others)
+hide_cursor = true           # hide this computer's cursor while input is on another device
+                             # (it shows again if this computer's own mouse moves it)
 udp = true                   # take pointer moves by UDP when the host is reached
                              # directly (never through a relay)
 # This computer's own fixes for keys the host sends, applied after the

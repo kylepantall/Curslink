@@ -174,6 +174,11 @@ class Service(QObject):
             return
         up_for = time.monotonic() - self._started_at
         self._proc = None
+        # A service that was killed can leave Windows' cursors blank (see
+        # curslink.cursorhide): put the user's own back.
+        from curslink.cursorhide import restore_windows
+
+        restore_windows()
         if self._stopping or code == 0:
             log.info("%s exited (code %s) after %.0fs", self.role, code, up_for)
         else:
