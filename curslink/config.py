@@ -94,6 +94,9 @@ class HostConfig:
     # Hide this computer's cursor while input is on another device ([host] hide_cursor;
     # see curslink.cursorhide). A Mac host always hides it.
     hide_cursor: bool = True
+    # Keep this screen on while a device is connected ([host] keep_screen_on;
+    # see curslink.keepawake).
+    keep_screen_on: bool = False
     # How keys change on their way to each device (see curslink.inputs.keys.KeyMaps).
     keymaps: KeyMaps = field(default_factory=KeyMaps)
 
@@ -140,6 +143,8 @@ class AgentConfig:
     clipboard_max_mb: int = 25
     # Hide this device's cursor while input is on another device ([agent] hide_cursor).
     hide_cursor: bool = True
+    # Keep this screen on while connected to the host ([agent] keep_screen_on).
+    keep_screen_on: bool = False
 
 
 def _clipboard_max_mb(table: dict[str, Any], where: str) -> int:
@@ -524,6 +529,7 @@ def host_config(raw: dict[str, Any], base_dir: Path = Path(".")) -> HostConfig:
         clipboard=bool(host.get("clipboard", True)),
         clipboard_max_mb=_clipboard_max_mb(host, "[host]"),
         hide_cursor=bool(host.get("hide_cursor", True)),
+        keep_screen_on=bool(host.get("keep_screen_on", False)),
     )
 
 
@@ -560,6 +566,7 @@ def agent_config(raw: dict[str, Any], base_dir: Path = Path(".")) -> AgentConfig
         clipboard=bool(agent.get("clipboard", True)),
         clipboard_max_mb=_clipboard_max_mb(agent, "[agent]"),
         hide_cursor=bool(agent.get("hide_cursor", True)),
+        keep_screen_on=bool(agent.get("keep_screen_on", False)),
     )
     if not cfg.host and not cfg.relay and not cfg.pairing.enabled:
         raise ConfigError("set [agent].host (LAN), a [relay] (internet), or leave [pairing] enabled")

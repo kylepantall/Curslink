@@ -91,6 +91,11 @@ class Prefs(context: Context) {
         get() = (p.getString("relay", "") ?: "") to (p.getString("relay_key", "") ?: "")
         set(value) = p.edit().putString("relay", value.first.trim()).putString("relay_key", value.second.trim()).apply()
 
+    /** "Keep the screen on": hold it on while linked, not only while the mouse is here. */
+    var keepScreenOn: Boolean
+        get() = p.getBoolean("keep_screen_on", false)
+        set(value) = p.edit().putBoolean("keep_screen_on", value).apply()
+
     /** Remember an address that worked, first in line next time. */
     fun rememberAddress(address: String) {
         val now = pairing ?: return

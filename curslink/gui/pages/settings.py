@@ -245,6 +245,17 @@ class SettingsPage(Page):
             "a password manager stay where they are. Copies bigger than 25 MB aren't shared."), self.clipboard)
         self.add(self.clipboard_card)
 
+        # -- screen (both) ----------------------------------------------------------
+        self.screen_card = Card("Screen", rows=True)
+        self.keep_screen = Toggle("Keep my screen on")
+        self.keep_screen.clicked.connect(lambda on: None if self._loading else self.app.set_keep_screen_on(on))
+        self.screen_card.add_row(text_block(
+            "Keep my screen on",
+            "While Curslink is linked to another device, this screen doesn't dim, lock or go to sleep, "
+            "so it's ready when the pointer comes over. It sleeps as usual once the link drops."),
+            self.keep_screen)
+        self.add(self.screen_card)
+
         # -- network (both) ---------------------------------------------------------
         self.network = NetworkCard(lambda on: self.set_config("network", "optimise", on), self.check_network)
         self.add(self.network)
@@ -396,6 +407,8 @@ class SettingsPage(Page):
                                                  str(agent_gaze.get("camera_name", "") or ""))
             role_table = raw.get(self._role_table(), {})
             self.clipboard.setChecked(bool(role_table.get("clipboard", True)) if isinstance(role_table, dict) else True)
+            self.keep_screen.setChecked(bool(role_table.get("keep_screen_on", False))
+                                        if isinstance(role_table, dict) else False)
             net = raw.get("network", {})
             self.network.optimise.setChecked(bool(net.get("optimise", True)) if isinstance(net, dict) else True)
             u = raw.get("update", {})
