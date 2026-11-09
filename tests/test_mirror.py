@@ -982,3 +982,22 @@ def test_a_held_chat_goes_onto_the_screen_in_front_instead_of_behind_it():
     router.on_pointer(700, 300)
     router.on_pointer(900, 500)  # nothing held: it stays on the PC, as mirror mode does
     assert router.is_local and (router.x, router.y) == (900, 500)
+
+
+def test_no_glow_or_label_behind_the_mirror_but_the_way_in_still_shows():
+    from curslink.edgehint import EdgeIndicator
+    from curslink.layout import Fit
+
+    lay = desk()
+    lay.fits = (Fit(("pc", "main"), ("lap", "main"), 850, 500, 0.5),)
+    sent = []
+    edges = EdgeIndicator(lay, lambda d: True, lambda device, data: sent.append((device, data)),
+                          name=lambda d: d, kind=lambda d: "mac")
+    edges.update("pc", 900, 590)  # under the laptop, which shows this part of the PC
+    assert [d for d, data in sent if "role" in data] == ["lap"]
+    assert dict(sent)["lap"]["role"] == "to"
+    # Without mirroring, the pointer's own side shows as ever.
+    sent2 = []
+    EdgeIndicator(desk(mirror=False), lambda d: True, lambda device, data: sent2.append((device, data)),
+                  name=lambda d: d, kind=lambda d: "mac").update("pc", 790, 500)
+    assert any(data.get("role") == "from" for _d, data in sent2)
