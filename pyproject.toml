@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "curslink"
-version = "0.4.43"
+version = "0.4.44"
 description = "Look at a device and your mouse and keyboard follow: gaze and edge based input switching across computers."
 readme = "README.md"
 license = "LicenseRef-Curslink"
