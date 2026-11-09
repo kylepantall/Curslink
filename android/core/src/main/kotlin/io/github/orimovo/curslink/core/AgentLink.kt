@@ -72,7 +72,11 @@ data class EdgeCommand(
 }
 
 /** How this device describes itself in hello. */
-class Hello(val name: String, val platform: String, val screens: List<Map<String, Any>>)
+class Hello(
+    val name: String, val platform: String, val screens: List<Map<String, Any>>,
+    /** The screen's real size, as curslink.screensize.physical_sizes gives a computer's (mirror mode sizes by it). */
+    val screenMm: List<Map<String, Any>> = emptyList(),
+)
 
 enum class LinkState { WAITING, CONNECTING, CONNECTED }
 
@@ -299,6 +303,7 @@ class AgentLink(
                 "name" to me.name,
                 "platform" to me.platform,
                 "screens" to me.screens,
+                "screen_mm" to me.screenMm.ifEmpty { null },
                 "features" to features,
                 "auth" to Tls.helloAuth(p.key, tls.binding, p.myId),
                 "ping_s" to pingSeconds,

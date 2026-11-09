@@ -33,12 +33,14 @@ class FitTuneDialog(QDialog):
 
     saved = Signal(object)
 
-    def __init__(self, behind: dict, front: dict, saved_fit: tuple[float, float, float] | None, send, parent=None):
+    def __init__(self, behind: dict, front: dict, saved_fit: tuple[float, float, float] | None, send, parent=None,
+                 start: dict | None = None):
         super().__init__(parent)
         self.behind, self.front, self.send = behind, front, send
         self.saved_fit = tuple(saved_fit) if saved_fit else None
         self.fit: tuple[float, float, float] | None = None  # as the service last said
-        self.moved = False
+        # ``start``: where to begin (a fit command, such as the one-click place); Save keeps it.
+        self.moved = start is not None
         self._done = False
         self.setWindowTitle("Fine-tune overlap")
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
@@ -46,7 +48,8 @@ class FitTuneDialog(QDialog):
         intro = QLabel(f"Coloured lines and a ring now cross {behind['name']}, and the mirror on {front['name']} "
                        "draws them too. Sit where you normally do and adjust the mirror right there until every "
                        "line carries on straight past the bezel and the ring is round:\n\n"
-                       "• drag it to move it\n• scroll on it to zoom\n• drag a side or corner to stretch it\n\n"
+                       "• drag it to move it (or with a finger, on a phone)\n• scroll or pinch on it to zoom\n"
+                       "• drag a side or corner to stretch it\n\n"
                        "Then Save here.")
         intro.setWordWrap(True)
         lay.addWidget(intro)
@@ -69,7 +72,7 @@ class FitTuneDialog(QDialog):
         row.addWidget(save)
         lay.addLayout(row)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.command(hold=True, tune=True)
+        self.command(hold=True, tune=True, **(start or {}))
 
     # -- changes ---------------------------------------------------------------
     def command(self, **data) -> None:

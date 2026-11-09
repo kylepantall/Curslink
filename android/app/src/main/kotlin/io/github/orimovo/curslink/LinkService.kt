@@ -118,7 +118,7 @@ class LinkService : Service() {
             mirror = Mirrors(),
             clipboard = ::copiedElsewhere,
             pairing = { prefs.pairing },
-            hello = { Hello(prefs.name, platform(), screens()) },
+            hello = { Hello(prefs.name, platform(), screens(), screenMm()) },
             discover = ::candidates,
             onState = { s, detail ->
                 state = s to detail
@@ -190,6 +190,21 @@ class LinkService : Service() {
     private fun screens(): List<Map<String, Any>> {
         val (w, h) = currentLayout()
         return listOf(mapOf("x" to 0, "y" to 0, "width" to w, "height" to h, "name" to "phone"))
+    }
+
+    /** How big the screen really is, in mm (its pixels over the panel's dpi), for mirror mode. */
+    private fun screenMm(): List<Map<String, Any>> {
+        val (w, h) = currentLayout()
+        val px = Screen.sizePx(this)
+        val dm = resources.displayMetrics
+        val dpi = (dm.xdpi + dm.ydpi) / 2
+        if (dpi <= 0f) return emptyList()
+        val a = px.x / dpi * 25.4
+        val b = px.y / dpi * 25.4
+        // Upright, like the layout's size.
+        val (mw, mh) = if ((w >= h) == (a >= b)) a to b else b to a
+        return listOf(mapOf("x" to 0, "y" to 0, "width" to w, "height" to h,
+            "width_mm" to Math.round(mw * 10) / 10.0, "height_mm" to Math.round(mh * 10) / 10.0))
     }
 
     private fun currentLayout(): Pair<Int, Int> = prefs.layoutSize ?: Screen.naturalSizeDp(this)

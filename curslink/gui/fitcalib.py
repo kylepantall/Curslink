@@ -265,8 +265,12 @@ class FitCalibration(QObject):
 
     finished = Signal(object)
 
-    def __init__(self, behind: dict, front: dict, local_device: str, send):
+    def __init__(self, behind: dict, front: dict, local_device: str, send, one_click: bool = False):
         super().__init__()
+        # Mirror mode: the click on the screen behind places the screen in
+        # front, at its real size, and the rest is done on the mirror itself;
+        # ``finished`` then gives {"place": [x, y], "corner": [u, v]}.
+        self.one_click = one_click
         self.ends = [behind, front]
         self.local = local_device
         self.send = send
@@ -311,6 +315,8 @@ class FitCalibration(QObject):
 
         remote: dict[str, dict] = {}
         for i, end in enumerate(self.ends):
+            if self.one_click and i == 1:
+                continue  # only the click behind; the screen in front is lined up on its mirror
             entry = self.entry(i)
             if end["device"] != self.local:
                 remote.setdefault(end["device"], {"screens": []})["screens"].append(entry)
@@ -359,6 +365,11 @@ class FitCalibration(QObject):
     def add(self, x: float, y: float) -> None:
         w, h = self.size(self.active)
         self.points[self.active] = (max(0.0, min(w, x)), max(0.0, min(h, y)))
+        if self.active == 0 and self.one_click:
+            u, v = corner_at(self.corners[0], 1.0, 1.0)
+            self.stop()
+            self.finished.emit({"place": [round(c, 1) for c in self.points[0]], "corner": [u, v]})
+            return
         if self.active == 0:
             self.active = 1
             self.render()
