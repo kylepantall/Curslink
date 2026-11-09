@@ -494,7 +494,7 @@ def test_router_still_lets_go_for_agents_that_cant(layout):
     assert transport.of_type("button")[-1][2] == {"button": "left", "pressed": False}
 
 
-async def test_files_start_sending_when_the_drag_crosses(new_drag, tmp_path):
+async def test_files_are_sent_only_once_let_go(new_drag, tmp_path):
     handoff, router, transport, helper, injected = new_drag
     f = tmp_path / "big.bin"
     f.write_bytes(b"x" * 100)
@@ -506,7 +506,7 @@ async def test_files_start_sending_when_the_drag_crosses(new_drag, tmp_path):
     (_, _, data), = transport.of_type("drag")
     tid = data["id"]
     assert data["card"]["items"] == [{"name": "big.bin", "dir": False}]
-    assert [t for _, t, _ in transport.bulk][0] == "file_begin"   # before any drop
+    assert transport.bulk == []                                    # carried: only the card
     assert handoff.on_button("left", False) is True
     assert transport.of_type("drag")[-1][2] == {"drop": True, "id": tid}
     await settle()
@@ -525,7 +525,7 @@ async def test_carrying_it_home_stops_the_transfer(new_drag, tmp_path):
     tid = transport.of_type("drag")[0][2]["id"]
     router.go_home("hotkey")
     assert transport.of_type("drag")[-1][2] == {"hide": True, "id": tid}
-    assert handoff.carry_out is None
+    assert handoff.carry_id is None and transport.bulk == []
 
 
 async def test_a_file_dragged_home_from_an_agent(new_drag, tmp_path):
@@ -537,9 +537,10 @@ async def test_a_file_dragged_home_from_an_agent(new_drag, tmp_path):
     card = {"name": "photo.jpg", "kind": "JPG image", "size": 3, "count": 1, "ext": "JPG",
             "items": [{"name": "photo.jpg", "dir": False}]}
     handoff.on_drag_out("laptop", {"id": "t9", "card": card})
-    assert transport.of_type("fetch")[-1][2] == {"id": "t9"}          # fetched straight away
+    assert not transport.of_type("fetch")                              # nothing moves while it's held
     assert any(h.startswith("card ") for h in helper)                  # no real drags here: the card
     assert handoff.on_button("left", False) is True                    # dropped here
+    assert transport.of_type("fetch")[-1][2] == {"id": "t9"}          # ...so now it's fetched
     send = lambda t, **d: handoff.on_files("laptop", decode(encode(t, **d)))  # noqa: E731
     send("file_begin", id="t9", count=1, total=3, card=card, **{"from": "Laptop"})
     send("file_item", id="t9", i=0, path="photo.jpg", size=3)

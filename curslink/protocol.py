@@ -33,7 +33,15 @@ Host -> agent
                                        the network optimiser is doing, in words)
     drag         {card} | {hide: true} a file drag is being carried onto this
                                        device: show (or take down) the
-                                       placeholder that follows the pointer
+                                       placeholder that follows the pointer.
+                                       A held drag may pass over several devices
+                                       (each gets card, then hide); only the one
+                                       it's let go of on gets drop, then file_*.
+                                       Files an agent handed over (drag_out) and
+                                       let go of on another agent are fetched
+                                       from the first and passed on frame by
+                                       frame; the target's file_result goes
+                                       back to the first as file_result
     file_*                             a dropped file, see curslink.files.transfer
     drag_out     {}                    input is leaving for the host with the left
                                        button held: is it a file? End the drag here
