@@ -486,7 +486,16 @@ off at and a 20 s hold so nothing flaps:
   by the next and the newest goes when its turn comes; a click, key or
   leave sends the held one first. A good link sends every move at once;
 * all of Curslink's sockets are marked DSCP EF, which most Wi-Fi access
-  points send in the WMM voice queue, ahead of bulk traffic.
+  points send in the WMM voice queue, ahead of bulk traffic;
+* the agent keeps its Wi-Fi radio awake while input is on it (and for 5 s
+  after): its UDP probes go every 40 ms instead of every 0.5 s. A dozing
+  adapter only wakes for the access point's beacons, so on a quiet link the
+  first moves after a pause waited 30-100 ms there (the link felt faster
+  while Settings > Network's mDNS check ran, which kept the radio busy);
+* on Windows, host or agent holds each connected Wi-Fi adapter in media
+  streaming mode with background scans off (`curslink/net/wlan.py`), so it
+  neither dozes nor leaves the channel for a scan (the 100 ms to 1 s+ gaps in
+  an agent's log). Windows undoes both when Curslink exits.
 
 An agent connected through the relay looks for the host on the LAN every
 30 s and reconnects directly once it answers there (never while input is on
