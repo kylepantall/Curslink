@@ -353,12 +353,19 @@ def make_drag_source(tid: str, paths: list[str], info: dict):
     button goes down on it (pressed for us by the host or agent), it starts
     a real drag of ``paths`` with the card as the image. Reports
     ``nativedrag-ready``, ``nativedrag-started`` and ``nativedrag-ended
-    <action>`` on stdout."""
+    <action>`` on stdout.
+
+    On Windows the drag also starts as soon as the left button is down
+    anywhere (Windows' drag and drop only needs the button held), in case
+    the press landed beside this window. On a Mac, if no press has arrived
+    within MAC_PRESS_WAIT_MS, AppKit starts the drag without one."""
     from PySide6.QtCore import QMimeData, QPoint, Qt, QTimer, QUrl
-    from PySide6.QtGui import QColor, QCursor, QDrag, QPainter
+    from PySide6.QtGui import QColor, QCursor, QDrag, QGuiApplication, QPainter
     from PySide6.QtWidgets import QWidget
 
     size = 48
+    windows = sys.platform == "win32"
+    cocoa = sys.platform == "darwin" and QGuiApplication.platformName() == "cocoa"
 
     class Source(QWidget):
         def __init__(self):
@@ -374,6 +381,8 @@ def make_drag_source(tid: str, paths: list[str], info: dict):
         def follow(self) -> None:
             pos = QCursor.pos()
             self.move(pos.x() - size // 2, pos.y() - size // 2)
+            if windows and not self.dragging and _win_left_down():
+                QTimer.singleShot(0, self.start_drag)
 
         def paintEvent(self, _e) -> None:  # noqa: N802
             p = QPainter(self)
@@ -381,7 +390,11 @@ def make_drag_source(tid: str, paths: list[str], info: dict):
             p.end()
 
         def mousePressEvent(self, e) -> None:  # noqa: N802
-            if self.dragging or e.button() != Qt.MouseButton.LeftButton:
+            if e.button() == Qt.MouseButton.LeftButton:
+                self.start_drag()
+
+        def start_drag(self) -> None:
+            if self.dragging:
                 return
             self.dragging = True
             self.timer.stop()
@@ -389,8 +402,7 @@ def make_drag_source(tid: str, paths: list[str], info: dict):
             mime.setUrls([QUrl.fromLocalFile(p) for p in paths])
             drag = QDrag(self)
             drag.setMimeData(mime)
-            pm = card_pixmap(info)
-            drag.setPixmap(pm)
+            drag.setPixmap(card_pixmap(info))
             drag.setHotSpot(QPoint(-14, -14))
             _say(f"nativedrag-started {tid}")
             action = drag.exec(Qt.DropAction.CopyAction | Qt.DropAction.MoveAction, Qt.DropAction.CopyAction)
@@ -399,38 +411,47 @@ def make_drag_source(tid: str, paths: list[str], info: dict):
             _say(f"nativedrag-ended {tid} {name}")
             self.close()
 
-    w = Source()
-    w.show()
-    w.raise_()
-    from PySide6.QtGui import QGuiApplication
-
-    if sys.platform == "darwin" and QGuiApplication.platformName() == "cocoa":
-        # No press needed: AppKit starts the drag from this window straight
-        # away and follows the real button, which is already held down.
-        def start() -> None:
-            w.dragging = True
-            w.timer.stop()
+        def start_appkit(self) -> None:
+            """macOS, when no press came: an AppKit drag of its own."""
+            if self.dragging or not self.isVisible():
+                return
+            self.dragging = True
+            self.timer.stop()
+            _say("log no press reached the drag source; starting the drag without one")
             try:
-                # The drag image would sit still: macOS only moves it on
-                # mouse-dragged events, which go to whoever got the button's
-                # mouse-down (on another computer, here). So the drag carries
-                # an empty image and the card keeps following the pointer.
-                started = mac_begin_drag(w, paths, None,
-                                         lambda op: (_say(f"nativedrag-ended {tid} {op}"), w.close()))
+                # Without the Mac's own mouse-down the drag image would sit
+                # still (mouse-dragged events go to whoever got the down), so
+                # it carries an empty image and the card follows the pointer.
+                started = mac_begin_drag(self, paths, None,
+                                         lambda op: (_say(f"nativedrag-ended {tid} {op}"), self.close()))
             except Exception as exc:  # pragma: no cover - macOS only
                 _say(f"log the Mac drag didn't start: {type(exc).__name__}: {exc}")
                 started = False
             if started:
                 _say(f"nativedrag-started {tid} card")  # keep the card up
             else:
-                w.dragging = False
-                w.timer.start(8)
-                _say(f"nativedrag-ready {tid}")  # fall back to a press
+                self.dragging = False
+                self.timer.start(8)
 
-        QTimer.singleShot(0, start)
-    else:
-        _say(f"nativedrag-ready {tid}")
+    w = Source()
+    w.show()
+    w.raise_()
+    _say(f"nativedrag-ready {tid}")
+    if cocoa:
+        QTimer.singleShot(MAC_PRESS_WAIT_MS, w.start_appkit)
     return w
+
+
+MAC_PRESS_WAIT_MS = 400
+
+
+def _win_left_down() -> bool:
+    try:
+        import ctypes
+
+        return bool(ctypes.windll.user32.GetAsyncKeyState(0x01) & 0x8000)  # VK_LBUTTON
+    except Exception:
+        return False
 
 
 _MAC_SOURCE = None

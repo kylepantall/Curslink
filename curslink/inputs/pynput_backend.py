@@ -690,9 +690,17 @@ def press_left_here() -> None:
     try:
         import Quartz
 
-        ev = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventLeftMouseDown, mac_cursor(),
-                                            Quartz.kCGMouseButtonLeft)
-        Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
+        # The button is physically held already (it went down while input was
+        # on the other computer, and the event tap kept it from apps, not from
+        # the window server). A second down would be ignored, so let go first:
+        # then this down makes the drag source's app the one the window server
+        # sends the mouse-dragged events to, which moves the drag and tells
+        # the apps under it.
+        at = mac_cursor()
+        for kind in (Quartz.kCGEventLeftMouseUp, Quartz.kCGEventLeftMouseDown):
+            ev = Quartz.CGEventCreateMouseEvent(None, kind, at, Quartz.kCGMouseButtonLeft)
+            Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
+            time.sleep(0.02)
     except Exception:  # pragma: no cover - macOS only
         log.warning("couldn't press the button to start the drag", exc_info=True)
 
