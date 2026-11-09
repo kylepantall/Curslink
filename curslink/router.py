@@ -222,6 +222,10 @@ class Router:
         x, y = screen.from_os(ox, oy)
         self._moved_at = self.clock()
         if self.settings.edge_switching:
+            carried = self._carried_to_front(screen, x, y)
+            if carried is not None:
+                self.switch_to(*carried, "edge")
+                return
             front = self.layout.covered_by(self.local_id, x, y)
             if front is not None:
                 # The real cursor went into a part of this screen that another
@@ -273,6 +277,11 @@ class Router:
                 if not self._edge_armed:
                     self._edge_armed = not self.layout.edge_pushes(self.active_device, self.x, self.y, ARM_PX)
                 return
+        if self.settings.edge_switching:
+            carried = self._carried_to_front(here, nx, ny)
+            if carried is not None:
+                self.switch_to(*carried, "edge")
+                return
         self._set_screen(here)
         self.x, self.y = nx, ny
         self.on_moved()
@@ -284,6 +293,22 @@ class Router:
             self.transport.send(self.active_device, "move", x=ox, y=oy)
         else:
             self.transport.send(self.active_device, "move", x=ox, y=oy, ts=round(ts * 1000.0, 2))
+
+    def _carried_to_front(self, here, x: float, y: float):
+        """Mirror mode keeps the pointer on the screen behind where another
+        device's screen covers it (that one shows it). But holding something
+        that can go on there (an Isolink chat), it goes to the screen in
+        front, as when that part isn't mirrored: ``(screen, x, y)`` there."""
+        if not self.layout.pointer_through:
+            return None
+        for front, (bx, by, bw, bh), (tx, ty, tw, th) in self.layout.covered_parts(here):
+            if front.device_id == here.device_id or not (bx <= x < bx + bw and by <= y < by + bh):
+                continue
+            if not (self.available(front.device_id) and self.carries_drag(here.device_id, front.device_id)):
+                return None
+            fx, fy = tx + (x - bx) * tw / max(1, bw), ty + (y - by) * th / max(1, bh)
+            return (front, *front.clamp(fx, fy))
+        return None
 
     def _just_came_from(self, device_id: str) -> bool:
         if self._arrived is None:
