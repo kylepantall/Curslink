@@ -127,6 +127,10 @@ class Router:
         # ``to`` (an Isolink floating chat, see curslink.popups), so gaze may
         # move input mid-drag.
         self.carries_drag: Callable[[str, str], bool] = lambda from_device, to_device: False
+        # takes_drag(device): another agent can take a file drag handed over
+        # by the one input leaves (it shows the card, and the files go there
+        # if it's let go of there), so drag_out is asked for agent to agent too.
+        self.takes_drag: Callable[[str], bool] = lambda device_id: False
         self._blocked_said = ""
         # After every change of where the pointer is (any device, any
         # screen): mirror mode follows the screen in use and the pointer on it.
@@ -310,6 +314,14 @@ class Router:
             return (front, *front.clamp(fx, fy))
         return None
 
+    def _hands_drag_to(self, from_device: str, to_device: str) -> bool:
+        """A file drag held on agent ``from_device`` goes on on ``to_device``
+        (this computer, or another agent that takes files), rather than
+        being let go of where it is."""
+        if from_device == to_device or from_device == self.local_id or not self.can_drag_out(from_device):
+            return False
+        return to_device == self.local_id or self.takes_drag(to_device)
+
     def _just_came_from(self, device_id: str) -> bool:
         if self._arrived is None:
             return False
@@ -376,7 +388,7 @@ class Router:
             return
         if self._remote_buttons and not (
                 self._remote_buttons == {"left"} and (
-                    (target.device_id == self.local_id and self.can_drag_out(self.active_device))
+                    self._hands_drag_to(self.active_device, target.device_id)
                     or self.carries_drag(self.active_device, target.device_id))):
             return  # never yank the pointer away mid-drag (unless it carries a file home, or a chat)
         if self.clock() - self._moved_at < GAZE_HOLD_S:
@@ -453,10 +465,11 @@ class Router:
             elif self.transport.is_connected(old):
                 for key in sorted(self._remote_keys):
                     self.transport.send(old, "key", key=self.key_for(old, key), pressed=False)
-                # A drag leaving that device for this one may be a file: the
-                # device finds out and ends its drag itself, rather than let go
-                # of the button wherever its pointer stopped.
-                dragging_out = new == self.local_id and "left" in self._remote_buttons and self.can_drag_out(old)
+                # A drag leaving that device (for this one, or for another that
+                # takes files) may be a file: the device finds out and ends its
+                # drag itself, rather than let go of the button wherever its
+                # pointer stopped.
+                dragging_out = "left" in self._remote_buttons and self._hands_drag_to(old, new)
                 for button in sorted(self._remote_buttons):
                     if not (dragging_out and button == "left"):
                         self.transport.send(old, "button", button=button, pressed=False)

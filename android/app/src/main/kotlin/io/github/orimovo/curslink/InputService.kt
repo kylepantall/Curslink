@@ -287,6 +287,12 @@ class InputService : AccessibilityService() {
         queueShape()
     }
 
+    /** A file dragged here from a computer: its card next to the pointer (null: take it down). See Drops. */
+    fun dragCard(title: String?, line: String = "") = main.post {
+        if (title != null) ensureOverlay()
+        view?.showCard(title, line)
+    }
+
     /** The edge indicator (see EdgeGlow): drawn even while the pointer is elsewhere, for the "heading here" bar. */
     fun edge(cmd: io.github.orimovo.curslink.core.EdgeCommand) = main.post {
         if (!cmd.hide && !cmd.flash) ensureOverlay()

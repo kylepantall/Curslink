@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import logging
 import ssl
 import time
@@ -97,7 +98,8 @@ class HostServer:
         self.on_file_result: Callable[[str, dict], None] = lambda device_id, data: None
         # (device_id, drag_out frame data): what a drag leaving that agent carries.
         self.on_drag_out: Callable[[str, dict], None] = lambda device_id, data: None
-        # (device_id, file_* frame) -> reply frame or None: files an agent sends us.
+        # (device_id, file_* frame) -> reply frame or None: files an agent sends us
+        # (or an awaitable: read no more from that agent until it's done).
         self.on_files: Callable[[str, Message], bytes | None] = lambda device_id, msg: None
         # (device_id, frame data): what that agent's Isolink says (isolink), and
         # whether it opened a floating chat carried to it (popup_result).
@@ -218,7 +220,7 @@ class HostServer:
         if transport.is_closing():
             return
         if transport.get_write_buffer_size() > MAX_BUFFER_BYTES:
-            log.warning("%s is not keeping up; dropping connection", device_id)
+            log.warning("%s is not keeping up; dropping connection", conn.device_id)
             transport.abort()
             return
         path = conn.udp
@@ -323,7 +325,12 @@ class HostServer:
                     if msg is None:
                         break
                     conn.last_seen = loop.time()
-                    self._on_message(conn, msg)
+                    pending = self._on_message(conn, msg)
+                    if pending is not None:
+                        # A frame passed on to another agent: read no more from
+                        # this one until it's gone (see files.handoff.on_files).
+                        await pending
+                        conn.last_seen = loop.time()
             finally:
                 pinger.cancel()
                 if tuner is not None:
@@ -352,7 +359,9 @@ class HostServer:
             with contextlib.suppress(Exception):
                 await writer.wait_closed()
 
-    def _on_message(self, conn: AgentConnection, msg: Message) -> None:
+    def _on_message(self, conn: AgentConnection, msg: Message):
+        """Applies a frame. Returns an awaitable when reading more from this
+        agent must wait for something (only on_files does that)."""
         if msg.t == "bye":
             if msg.get("reason") == "paused":
                 self.paused.add(conn.device_id)
@@ -385,8 +394,11 @@ class HostServer:
             self.on_clip(conn.device_id, msg.t, dict(msg.data))
         elif msg.t.startswith("file_"):
             reply = self.on_files(conn.device_id, msg)
+            if inspect.isawaitable(reply):
+                return reply
             if reply and not conn.writer.transport.is_closing():
                 conn.writer.write(reply)
+        return None
 
     # ------------------------------------------------------- link quality
     def link_report(self, device_id: str) -> dict | None:

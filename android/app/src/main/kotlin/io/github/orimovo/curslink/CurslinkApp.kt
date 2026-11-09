@@ -17,5 +17,10 @@ class CurslinkApp : Application() {
         nm.createNotificationChannel(
             NotificationChannel(LinkService.CHANNEL_PAIR, "Pairing requests", NotificationManager.IMPORTANCE_HIGH),
         )
+        nm.createNotificationChannel(
+            NotificationChannel(LinkService.CHANNEL_FILES, "Dropped files", NotificationManager.IMPORTANCE_DEFAULT).apply {
+                description = "Files dragged here from a computer and let go of on the phone: tap to see them in Downloads."
+            },
+        )
     }
 }

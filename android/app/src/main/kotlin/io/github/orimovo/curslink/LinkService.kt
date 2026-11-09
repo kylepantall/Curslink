@@ -44,6 +44,7 @@ class LinkService : Service() {
         private const val TAG = "CurslinkLink"
         const val CHANNEL_LINK = "link"
         const val CHANNEL_PAIR = "pair"
+        const val CHANNEL_FILES = "files"
         private const val NOTE_LINK = 1
         private const val NOTE_PAIR = 2
 
@@ -126,6 +127,7 @@ class LinkService : Service() {
             handler = Input(),
             mirror = Mirrors(),
             clipboard = ::copiedElsewhere,
+            files = Drops.session(this),
             pairing = { prefs.pairing },
             hello = { Hello(prefs.name, platform(), screens(), screenMm()) },
             discover = ::candidates,
