@@ -12,6 +12,7 @@ can find its host without a configured address.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import ipaddress
 import logging
 import re
@@ -176,8 +177,17 @@ class Advertiser:
         self.control_port = control_port
         self._zc = None
         self._info = None
+        self._addresses: list[str] = []
+        self._watch: asyncio.Task | None = None
+
+    # How often to look for a change of this computer's addresses.
+    WATCH_S = 10.0
 
     async def start(self) -> None:
+        await self._register()
+        self._watch = asyncio.create_task(self._watch_addresses())
+
+    async def _register(self) -> None:
         from zeroconf import ServiceInfo
         from zeroconf.asyncio import AsyncZeroconf
 
@@ -185,6 +195,7 @@ class Advertiser:
         if self.control_port:
             props["cport"] = str(self.control_port)
         addresses = local_addresses()
+        self._addresses = sorted(set(addresses))
         self._info = ServiceInfo(
             SERVICE_TYPE,
             _instance_name(self.me),
@@ -199,14 +210,48 @@ class Advertiser:
         log.info("advertising %s on the LAN for pairing (port %d) as %s, %s", self.me.name, self.pairing_port,
                  local_hostname(), ", ".join(addresses) or "no LAN address")
 
-    async def close(self) -> None:
+    async def _unregister(self) -> None:
         if self._zc is None:
             return
+        zc, self._zc = self._zc, None
         try:
-            await self._zc.async_unregister_all_services()
+            await zc.async_unregister_all_services()
         finally:
-            await self._zc.async_close()
-            self._zc = None
+            await zc.async_close()
+
+    async def _watch_addresses(self) -> None:
+        """Advertise again when this computer's addresses change.
+
+        The advert names the addresses, and zeroconf's sockets are bound to
+        them, both as they were at start. When the router hands out new ones
+        (it restarted, Wi-Fi rejoined, a VPN reconnected) devices looking for
+        us would keep finding the old address and couldn't reconnect, and
+        zeroconf logs "Can't assign requested address" for the dead sockets.
+        """
+        while True:
+            await asyncio.sleep(self.WATCH_S)
+            now = sorted(set(local_addresses()))
+            if now == self._addresses:
+                continue
+            log.info("network: this computer's addresses changed (%s -> %s); advertising again",
+                     ", ".join(self._addresses) or "none", ", ".join(now) or "none")
+            try:
+                await self._unregister()
+            except Exception as exc:  # the old sockets may already be dead
+                log.debug("closing the old advert: %s", exc)
+            try:
+                await self._register()
+            except Exception as exc:
+                self._addresses = now  # don't retry every few seconds; try again on the next change
+                log.warning("can't advertise on the LAN (%s)", exc)
+
+    async def close(self) -> None:
+        if self._watch is not None:
+            self._watch.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._watch
+            self._watch = None
+        await self._unregister()
 
 
 async def browse(timeout: float = 3.0, exclude: str | None = None, want: str | None = None) -> list[Found]:
