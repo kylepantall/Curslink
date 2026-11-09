@@ -18,10 +18,22 @@ import android.view.View
  * while that screen is in use (see core/Mirror.kt). Each one fades in, flashes
  * its inner edges, shows a small glass tag with the other device's name for a
  * few seconds, and draws that screen's pointer. Fills the screen, draws only
- * the mirrors, and lets every touch through. Main thread only.
+ * the mirrors, and lets every touch through. While one is being lined up it
+ * is outlined and draws the alignment guides (the same lines the screen
+ * behind shows). Touching the phone puts the mirrors away until it has been
+ * left alone for a few seconds. Main thread only.
  */
 class MirrorView(context: Context) : View(context) {
+    /** A mirror wanted now: where (pixels on the screen), and while it's lined up, the guides. */
+    data class Want(
+        val rect: RectF, val label: String, val edges: Set<String>,
+        val tune: Boolean = false, val guides: List<Double>? = null, val src: List<Double>? = null,
+    )
+
     private class Mirror(var rect: RectF, var label: String, var edges: Set<String>) {
+        var tune = false
+        var guides: List<Double>? = null
+        var src: List<Double>? = null
         var bitmap: Bitmap? = null
         var shownAt = 0L
         var closingAt = 0L
@@ -47,18 +59,44 @@ class MirrorView(context: Context) : View(context) {
         lineTo(10.4f * d, 19.4f * d); lineTo(7.5f * d, 12.4f * d); lineTo(13.2f * d, 12.4f * d); close()
     }
 
+    private val dash = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE; strokeWidth = 3f * d; color = accent
+        pathEffect = android.graphics.DashPathEffect(floatArrayOf(9f * d, 6f * d), 0f)
+    }
+    private val guide = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
+
+    // Touched by hand: the mirrors stay away until this long after the last touch.
+    private var awayUntil = 0L
+    private var awayFrom = 0L
+
     val showing: Boolean get() = mirrors.values.any { it.bitmap != null && it.closingAt == 0L }
 
-    /** The mirrors wanted now, with their rectangles in pixels on the screen. */
-    fun set(wanted: Map<String, Triple<RectF, String, Set<String>>>) {
+    /** Is any mirror there to be put away by a touch? */
+    val anyMirror: Boolean get() = mirrors.values.any { it.closingAt == 0L }
+
+    /** The mirrors wanted now. */
+    fun set(wanted: Map<String, Want>) {
         val now = SystemClock.uptimeMillis()
         for ((id, m) in mirrors) if (id !in wanted && m.closingAt == 0L) m.closingAt = now
         for ((id, w) in wanted) {
-            val m = mirrors[id]
-            if (m == null || m.closingAt != 0L) mirrors[id] = Mirror(w.first, w.second, w.third)
-            else { m.rect = w.first; m.label = w.second; m.edges = w.third }
+            var m = mirrors[id]
+            if (m == null || m.closingAt != 0L) { m = Mirror(w.rect, w.label, w.edges); mirrors[id] = m }
+            else { m.rect = w.rect; m.label = w.label; m.edges = w.edges }
+            m.tune = w.tune; m.guides = w.guides; m.src = w.src
         }
+        // Lining one up: it shows even if the phone was just touched.
+        if (wanted.values.any { it.tune }) awayUntil = 0L
         invalidate()
+    }
+
+    /** The phone was touched by hand: put the mirrors away while it's in use. */
+    fun touchedByHand() {
+        val now = SystemClock.uptimeMillis()
+        if (mirrors.values.any { it.tune }) return
+        if (now >= awayUntil) awayFrom = now
+        awayUntil = now + AWAY_MS
+        invalidate()
+        postInvalidateDelayed(AWAY_MS + 20)
     }
 
     fun image(id: String, bitmap: Bitmap) {
@@ -84,21 +122,75 @@ class MirrorView(context: Context) : View(context) {
             if (m.closingAt != 0L && m.bitmap == null) { gone += id; continue }
             val bmp = m.bitmap ?: continue
             val r = m.rect
-            val alpha = if (m.closingAt != 0L) {
+            val base = if (m.closingAt != 0L) {
                 val k = (now - m.closingAt) / FADE_MS
                 if (k >= 1f) { gone += id; continue }
                 1f - k
             } else minOf(1f, (now - m.shownAt) / FADE_MS)
+            val alpha = base * away(now).also { if (it in 0.001f..0.999f) animating = true }
+            if (alpha <= 0f) continue
             val age = now - m.shownAt
             if (alpha < 1f || age < TAG_MS + 600) animating = true
             pix.alpha = (alpha * 255).toInt()
             canvas.drawBitmap(bmp, null, r, pix)
             drawEdges(canvas, m, alpha, age)
             m.pointer?.let { (px, py) -> drawPointer(canvas, r.left + px * r.width(), r.top + py * r.height(), alpha) }
-            if (age < TAG_MS + 500) drawTag(canvas, m, alpha * (if (age < TAG_MS) 1f else maxOf(0f, 1f - (age - TAG_MS) / 500f)))
+            if (m.tune) {
+                drawGuides(canvas, guideRect(m))
+                canvas.drawRect(RectF(r.left + 1.5f * d, r.top + 1.5f * d, r.right - 1.5f * d, r.bottom - 1.5f * d), dash)
+                drawTag(canvas, m, 1f, "Line up the coloured lines · drag to move · scroll to zoom · drag a side to stretch")
+            } else if (age < TAG_MS + 500) drawTag(canvas, m, alpha * (if (age < TAG_MS) 1f else maxOf(0f, 1f - (age - TAG_MS) / 500f)))
         }
         gone.forEach { mirrors.remove(it)?.bitmap?.recycle() }
         if (animating) postInvalidateOnAnimation()
+    }
+
+    /** 1 normally; fading to 0 when touched by hand, and back once left alone. */
+    private fun away(now: Long): Float {
+        if (awayUntil == 0L) return 1f
+        if (now < awayUntil) return maxOf(0f, 1f - (now - awayFrom) / FADE_MS)
+        val k = (now - awayUntil) / FADE_MS
+        if (k >= 1f) { awayUntil = 0L; return 1f }
+        return k
+    }
+
+    /** Where the guides' area (on the screen behind) falls on this mirror, which shows [Mirror.src] of there. */
+    private fun guideRect(m: Mirror): RectF {
+        val r = m.rect
+        val g = m.guides ?: return r
+        val s = m.src ?: return r
+        if (s[2] <= 0 || s[3] <= 0) return r
+        val kx = r.width() / s[2].toFloat()
+        val ky = r.height() / s[3].toFloat()
+        return RectF(r.left + (g[0] - s[0]).toFloat() * kx, r.top + (g[1] - s[1]).toFloat() * ky,
+            r.left + (g[0] - s[0] + g[2]).toFloat() * kx, r.top + (g[1] - s[1] + g[3]).toFloat() * ky)
+    }
+
+    /** The guides (curslink/mirror/helper.py guide_shapes): three lines across and down, both diagonals, a ring. */
+    private fun drawGuides(c: Canvas, g: RectF) {
+        val w = maxOf(1f, g.width())
+        val h = maxOf(1f, g.height())
+        val far = 20 * maxOf(w, h) + 10_000f
+        val shapes = mutableListOf<Pair<Int, FloatArray>>()
+        for (f in floatArrayOf(0.25f, 0.5f, 0.75f)) {
+            val y = g.top + f * h
+            shapes += GUIDE_H to floatArrayOf(g.left - far, y, g.right + far, y)
+            val x = g.left + f * w
+            shapes += GUIDE_V to floatArrayOf(x, g.top - far, x, g.bottom + far)
+        }
+        val n = far / w
+        shapes += GUIDE_D to floatArrayOf(g.left - w * n, g.top - h * n, g.right + w * n, g.bottom + h * n)
+        shapes += GUIDE_D to floatArrayOf(g.right + w * n, g.top - h * n, g.left - w * n, g.bottom + h * n)
+        val ring = (minOf(w, h) / 2 + kotlin.math.hypot(w, h) / 2) / 2
+        for (halo in listOf(true, false)) {
+            guide.strokeWidth = if (halo) 4.5f * d else 2f * d
+            for ((color, p) in shapes) {
+                guide.color = if (halo) Color.argb(150, 0, 0, 0) else color
+                c.drawLine(p[0], p[1], p[2], p[3], guide)
+            }
+            guide.color = if (halo) Color.argb(150, 0, 0, 0) else GUIDE_O
+            c.drawCircle(g.centerX(), g.centerY(), ring, guide)
+        }
     }
 
     private fun drawEdges(c: Canvas, m: Mirror, alpha: Float, age: Long) {
@@ -132,9 +224,13 @@ class MirrorView(context: Context) : View(context) {
         c.restore()
     }
 
-    private fun drawTag(c: Canvas, m: Mirror, alpha: Float) {
+    private fun drawTag(c: Canvas, m: Mirror, alpha: Float, say: String? = null) {
         if (alpha <= 0f) return
-        val label = "${m.label.ifEmpty { "Behind" }} · live"
+        var label = say ?: "${m.label.ifEmpty { "Behind" }} · live"
+        // A small mirror: say as much as fits.
+        while (say != null && label.contains(" · ") && text.measureText(label) + 46f * d > m.rect.width()) {
+            label = label.substringBeforeLast(" · ")
+        }
         val w = text.measureText(label) + 30f * d
         val h = 24f * d
         val r = m.rect
@@ -155,5 +251,10 @@ class MirrorView(context: Context) : View(context) {
         private const val FADE_MS = 220f
         private const val FLASH_MS = 600L
         private const val TAG_MS = 3500L
+        private const val AWAY_MS = 6000L
+        private val GUIDE_H = Color.rgb(56, 225, 255)
+        private val GUIDE_V = Color.rgb(255, 79, 216)
+        private val GUIDE_D = Color.rgb(255, 214, 10)
+        private val GUIDE_O = Color.rgb(93, 255, 122)
     }
 }
