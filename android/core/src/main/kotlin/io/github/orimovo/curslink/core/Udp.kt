@@ -13,7 +13,7 @@ import java.util.Base64
  * Datagram: "CL", version, kind, connection id (8), sequence (u64), the
  * body XORed with HMAC(enc, kind + seq), then a 16-byte HMAC tag.
  */
-class UdpOffer(val port: Int, val id: ByteArray, val key: ByteArray)
+class UdpOffer(val port: Int, val id: ByteArray, val key: ByteArray, val address: String? = null)
 
 class AgentUdp(offer: UdpOffer, private val onMove: (Double, Double, Double) -> Unit) {
     companion object {
@@ -27,13 +27,19 @@ class AgentUdp(offer: UdpOffer, private val onMove: (Double, Double, Double) -> 
         private const val ALIVE_MS = 1600L
         private fun bodySize(kind: Int) = when (kind) { PROBE -> 1; ACK -> 8; MOVE -> 24; else -> -1 }
 
+        /** An IPv4 literal that isn't unspecified, loopback or multicast. */
+        internal fun probeable(address: String): Boolean {
+            val parts = address.split(".").map { p -> p.toIntOrNull()?.takeIf { p.length <= 3 && it in 0..255 } ?: return false }
+            return parts.size == 4 && parts[0] != 0 && parts[0] != 127 && parts[0] < 224
+        }
+
         fun parseOffer(udp: kotlinx.serialization.json.JsonObject?): UdpOffer? {
             udp ?: return null
             val id = udp["id"]?.strOrNull()?.let { runCatching { Base64.getDecoder().decode(it) }.getOrNull() }
             val key = udp["key"]?.strOrNull()?.let { runCatching { Base64.getDecoder().decode(it) }.getOrNull() }
             val port = udp["port"].numOrNull()?.toInt()
             if (id == null || id.size != 8 || key == null || key.size != 32 || port == null || port !in 1..65535) return null
-            return UdpOffer(port, id, key)
+            return UdpOffer(port, id, key, udp["address"]?.strOrNull()?.takeIf(::probeable))
         }
     }
 
@@ -41,6 +47,7 @@ class AgentUdp(offer: UdpOffer, private val onMove: (Double, Double, Double) -> 
     private val enc = Crypto.hmac(offer.key, "curslink-udp-enc".utf8())
     private val mac = Crypto.hmac(offer.key, "curslink-udp-mac".utf8())
     private val port = offer.port
+    private val address = offer.address  // the host's reply address, if not the one we dialled
     private var socket: DatagramSocket? = null
     @Volatile private var ackedAt = 0L
     private var seqOut = 0L
@@ -78,7 +85,7 @@ class AgentUdp(offer: UdpOffer, private val onMove: (Double, Double, Double) -> 
 
     fun start(hostIp: String) {
         val s = DatagramSocket()
-        s.connect(InetSocketAddress(hostIp, port))
+        s.connect(InetSocketAddress(address ?: hostIp, port))
         socket = s
         val prober = Thread({
             try {

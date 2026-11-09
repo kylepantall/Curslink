@@ -124,3 +124,27 @@ def test_mirror_park_leaves_a_hidden_cursor_alone():
 def test_restore_windows_is_a_no_op_elsewhere(monkeypatch):
     monkeypatch.setattr(cursorhide.sys, "platform", "linux")
     cursorhide.restore_windows()
+
+
+def test_leave_moves_the_cursor_aside_then_hides_it():
+    sink = Sink()
+    session = AgentSession(sink, lambda *a: None)
+    hider, _backend, loop, _ = make()
+    session.cursor = hider
+    session.handle(Message("enter", {"x": 5, "y": 6}))
+    session.handle(Message("leave", {"x": 0, "y": 0, "park": [1279, 400]}))
+    assert sink.moves[-1] == (1279, 400) and hider.hidden
+
+
+def test_no_park_while_a_drag_leaving_is_ending():
+    class Busy:
+        busy = True
+
+        def on_button(self, *a): pass
+
+    sink = Sink()
+    session = AgentSession(sink, lambda *a: None)
+    session.drag_out = Busy()
+    session.handle(Message("enter", {"x": 5, "y": 6}))
+    session.handle(Message("leave", {"park": [1279, 400]}))
+    assert sink.moves == [(5, 6)]

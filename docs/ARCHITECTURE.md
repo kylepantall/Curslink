@@ -282,6 +282,11 @@ Only one device has the pointer, so every other one hides its own cursor
 an agent on `leave`, showing it again on `enter`, when the host goes away,
 and as soon as its own mouse moves it (checked every 0.1 s while hidden);
 a host while input is grabbed for another device (macOS always did).
+A hidden cursor still hovers, so `leave` carries `park` (the middle of the
+right edge of the screen the pointer left, in that device's OS pixels) and
+the agent moves its cursor there first: left by an edge, it otherwise sat
+on title bar buttons or taskbar icons whose tooltips kept popping up over
+the mirror. Not while a file drag leaving the device is still ending.
 macOS uses `CGDisplayHideCursor` with "SetsCursorInBackground"; Windows
 swaps every standard system cursor for a blank one (`SetSystemCursor`) and
 reloads the user's scheme to show it (`SPI_SETCURSORS`), which outlives the
@@ -397,8 +402,10 @@ TLS session (`welcome.udp`), only if `hello.features` lists `"udp"`. The
 agent probes the host twice a second from its own socket, which also lets
 the replies through its firewall; the host acknowledges each probe and
 sends moves by UDP only while the agent's probes say it is hearing those
-acknowledgements. When they stop (network change, firewall), moves go back
-to TCP within about 1.6 s. Datagrams are encrypted (HMAC-SHA256 keystream)
+acknowledgements. A host on two networks at once offers the address its
+replies would come from (`welcome.udp.address`) and the agent probes that,
+since its socket drops datagrams from any other. When acknowledgements stop
+(network change, firewall), moves go back to TCP within about 1.6 s. Datagrams are encrypted (HMAC-SHA256 keystream)
 and authenticated (truncated HMAC-SHA256), with strictly increasing
 sequence numbers against replay. The agent drops any move older by `ts`
 than the newest it has seen on either channel, and ignores UDP moves while
