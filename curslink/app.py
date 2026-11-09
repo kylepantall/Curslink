@@ -1145,7 +1145,7 @@ async def run_agent(cfg: AgentConfig) -> None:
     smoother = PointerSmoother(sink.move_to) if cfg.smooth_pointer else None
     session = AgentSession(
         sink,
-        overlay.show if overlay and cfg.animations else (lambda effect, x, y: None),
+        overlay.show if overlay and cfg.animations else (lambda effect, x, y, box=None: None),
         smoother=smoother,
     )
     if cfg.hide_cursor:

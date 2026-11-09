@@ -494,7 +494,11 @@ class Router:
                 # was left, often on the very edge it left by, and the next
                 # nudge used to send input straight back (and blink twice).
                 self._edge_armed = reason == "edge"
-                self.transport.send(new, "enter", x=ox, y=oy, effect=effect)
+                # With the screen as the layout has it, in the same OS pixels:
+                # the agent places the landing effect as a fraction of it, as
+                # here (its own screen list can be in other pixels, Windows scaling).
+                self.transport.send(new, "enter", x=ox, y=oy, effect=effect,
+                                    box=[screen.os_x, screen.os_y, screen.width, screen.height])
             else:
                 self.transport.send(new, "move", x=ox, y=oy)
 

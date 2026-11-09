@@ -1360,3 +1360,22 @@ def test_mirror_quality_must_be_one_of_the_choices(tmp_path):
     assert _mirror_quality({"mirror_quality": "lossless"}) == "lossless"
     with pytest.raises(ConfigError):
         _mirror_quality({"mirror_quality": "ultra"})
+
+
+def test_the_landing_effect_goes_by_the_hosts_screen_box():
+    """Kyle: the landing animation played in the wrong place coming out of
+    a mirrored part. The agent placed it by its own screen list, which with
+    Windows scaling can be in other pixels than the point it got."""
+    from curslink.net.client import AgentSession
+    from curslink.protocol import Message
+
+    shown = []
+    session = AgentSession(FakeSink(), lambda *a: shown.append(a))
+    session.handle(Message("enter", {"x": 1211, "y": 331, "effect": "pop", "box": [0, 0, 2560, 1600]}))
+    session.handle(Message("enter", {"x": 5, "y": 6, "effect": "pop"}))  # an older host: no box
+    assert shown == [("pop", 1211, 331, (0, 0, 2560, 1600)), ("pop", 5, 6)]
+    transport = Transport({"lap"}, {"lap"})
+    host, router, _local = make_host(desk(), transport)
+    router.switch_to(router.layout.screen("lap", "main"), 1000, 500, "edge")
+    enter = transport.of("enter", "lap")[-1]
+    assert enter["box"] == [0, 0, 500, 300]

@@ -281,6 +281,10 @@ front of it shows the part it covers, live (`curslink.mirror`).
   a device's overlays are raised back above a mirror that comes up. A
   mirror closes at once (no fade), so its last picture of the pointer that
   just left never lingers.
+- `enter` carries `box`, the screen as the host's layout has it in the same
+  OS pixels, and the agent places the landing effect as a fraction of it,
+  not by its own screen list (which Windows scaling can put in other
+  pixels: the effect played off where the pointer landed).
 - Diagnostics bundles carry the config's `[layout]` (screens, fits) as
   `layout.toml`, and nothing else of it.
 - Crossings between lined-up screens go by the fit: `Layout.find_crossing`
