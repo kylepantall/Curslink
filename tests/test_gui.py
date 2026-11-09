@@ -1057,3 +1057,40 @@ def test_installing_an_update_restarts_instead_of_exec_in_place(desktop, qapp, m
     monkeypatch.setattr(type(a), "restart", lambda self, just_updated=False: seen.setdefault("restart", just_updated))
     a.install_update()
     assert seen == {"relaunch": None, "restart": True}
+
+
+def test_quit_takes_out_event_filters_and_runs_once(desktop, qapp, monkeypatch):
+    """macOS exits from inside quit(), deleting widgets while Python filters
+    are still installed: those crashed on the way out (0.4.39)."""
+    from PySide6.QtCore import QEvent, QObject
+    from PySide6.QtWidgets import QApplication, QWidget
+
+    seen = []
+
+    class Filter(QObject):
+        def eventFilter(self, obj, event):  # noqa: N802
+            seen.append(event.type())
+            return False
+
+    f = Filter()
+    qapp.installEventFilter(f)
+    desktop.app_filters.append(f)
+    quits = []
+    monkeypatch.setattr(QApplication, "quit", staticmethod(lambda: quits.append(1)))
+    stops = []
+    monkeypatch.setattr(desktop.service, "stop", lambda: stops.append(1))
+
+    desktop.quit()
+    assert desktop.quitting
+    assert desktop.app_filters == []
+    seen.clear()
+    w = QWidget()
+    w.show()
+    qapp.sendEvent(w, QEvent(QEvent.Type.User))
+    w.close()
+    assert seen == []
+    # Closing the window while quitting (as NSApplication terminate: does) doesn't quit again.
+    desktop.window.close()
+    desktop.quit()
+    assert quits == [1]
+    assert stops == [1]
