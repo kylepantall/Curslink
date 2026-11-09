@@ -218,6 +218,16 @@ class ConfigFile:
         inline.update(mapping)
         self.set("agent", "modifier_map", inline)
 
+    def set_mirror_joined(self, table: dict[str, Any]) -> None:
+        """``[layout].mirror_joined``: ``"device/screen"`` behind -> ``"all"``
+        or a list of the joined screens that keep it mirrored."""
+        if not table:
+            self.remove("layout", "mirror_joined")
+            return
+        inline = tomlkit.inline_table()
+        inline.update(table)
+        self.set("layout", "mirror_joined", inline)
+
     # -- calibrated edges -----------------------------------------------------
     def links(self) -> list[dict[str, Any]]:
         return list(self.raw().get("layout", {}).get("links", []))

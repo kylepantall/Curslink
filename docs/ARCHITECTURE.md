@@ -237,6 +237,12 @@ front of it shows the part it covers, live (`curslink.mirror`).
   device behind keep the covered part (`Layout.pointer_through`), so the
   pointer stays on the screen in use there; the host sends where it is in
   the mirror (`mirror_pointer`) and the mirror draws it.
+- Joined screens: `[layout.mirror_joined]` keeps a screen behind mirrored
+  while the pointer is on a screen joined to it (`Layout.joined`: sharing an
+  edge within the router's gap tolerance, or an edge link, directly or along
+  a row, never through a screen in front of it), all of them or the ones
+  listed (`Layout.mirrored_while`). `streams_for` adds those screens'
+  streams to the ones of the screen in use.
 - Lining up: screens are laid out in their own pixels, which aren't the
   same size on every monitor, so the layout's overlap is only roughly what's
   covered. "Line up overlap…" on the Layout page takes one click on each

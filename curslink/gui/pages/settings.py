@@ -176,6 +176,9 @@ class SettingsPage(Page):
             "on Wi-Fi; Standard is lightest. The mirror can't be sharper than the screen behind: where that "
             "screen has fewer pixels per inch than the one in front, it's scaled up once to fit."),
             self.mirror_quality)
+        # Rows for screens behind others: keep mirroring while on a screen joined to it.
+        self.joined_rows: list = []
+        self.joined_toggles: dict[tuple[str, str | None], Toggle] = {}
         self.mirror_note = label("Turn on Allow overlap on the Layout page and put one screen in front of "
                                  "another to use this.", "small", wrap=True)
         self.mirror_card.body.addWidget(self.mirror_note)
@@ -356,6 +359,7 @@ class SettingsPage(Page):
             self.mirror_quality.set_value(str(layout_raw.get("mirror_quality", "high")))
             self.mirror_quality_row.setVisible(overlap and self.mirror.isChecked())
             self.mirror_note.setVisible(not overlap)
+            self.load_joined(raw, overlap and self.mirror.isChecked() and role == "host")
             self.agent_keys_card.setVisible(role == "agent")
             if role == "host":
                 custom = len(raw.get("keymap", {}) or {})
@@ -401,6 +405,97 @@ class SettingsPage(Page):
             self.config_text.setText(str(self.app.config_path))
         finally:
             self._loading = False
+
+    # -- mirroring on joined screens ---------------------------------------------
+    @staticmethod
+    def joined_choices(raw: dict) -> list[tuple[str, str, list[tuple[str, str]]]]:
+        """Screens behind others with screens joined to them, edge to edge:
+        ``("device/screen", its name, [("device/screen", name), ...])``."""
+        from curslink.config import ConfigError, parse_layout
+
+        try:
+            layout = parse_layout(raw)
+        except ConfigError:
+            return []
+        layout.allow_overlap = True  # (only shown with it on)
+        names = dict(SettingsPage.monitors(raw))
+        out = []
+        for screen in layout.screens():
+            if not layout.covering(screen):
+                continue
+            joined = [f"{s.device_id}/{s.id}" for s in layout.joined(screen)]
+            if joined:
+                key = f"{screen.device_id}/{screen.id}"
+                out.append((key, names.get(key, key), [(k, names.get(k, k)) for k in joined]))
+        return out
+
+    @staticmethod
+    def joined_on(raw: dict, behind: str, joined: list[str]) -> set[str]:
+        """Of ``joined``, the screens that keep ``behind`` mirrored."""
+        table = raw.get("layout", {}).get("mirror_joined", {})
+        which = table.get(behind) if isinstance(table, dict) else None
+        if which == "all":
+            return set(joined)
+        return {k for k in which if k in joined} if isinstance(which, list) else set()
+
+    def load_joined(self, raw: dict, show: bool) -> None:
+        choices = self.joined_choices(raw) if show else []
+        wanted = [(b, None) for b, _, js in choices if js] + [(b, j) for b, _, js in choices if len(js) > 1
+                                                               for j, _ in js]
+        if sorted(wanted, key=str) != sorted(self.joined_toggles, key=str):
+            for row in self.joined_rows:
+                row.setParent(None)
+                row.deleteLater()
+            self.joined_rows, self.joined_toggles = [], {}
+            for behind, name, joined in choices:
+                title = f"Keep mirroring {name} on joined screens"
+                toggle = Toggle(title)
+                toggle.clicked.connect(lambda on, b=behind: self.set_joined(b, None, on))
+                self.joined_toggles[(behind, None)] = toggle
+                listed = ", ".join(n for _, n in joined)
+                self.joined_rows.append(self.mirror_card.add_row(text_block(
+                    title,
+                    f"Its mirror stays on while the pointer is on a screen joined to it ({listed}), not only "
+                    "while it's on this one. The mirror still shows just the part that's covered."), toggle))
+                if len(joined) > 1:
+                    for key, jname in joined:
+                        sub = Toggle(f"While on {jname}")
+                        sub.clicked.connect(lambda on, b=behind, k=key: self.set_joined(b, k, on))
+                        self.joined_toggles[(behind, key)] = sub
+                        lab = label(f"While on {jname}", "small")
+                        lab.setContentsMargins(24, 0, 0, 0)
+                        self.joined_rows.append(self.mirror_card.add_row(lab, sub))
+        for behind, _, joined in choices:
+            keys = [k for k, _ in joined]
+            on = self.joined_on(raw, behind, keys)
+            self.joined_toggles[(behind, None)].setChecked(bool(on))
+            for key in keys:
+                if (behind, key) in self.joined_toggles:
+                    self.joined_toggles[(behind, key)].setChecked(key in on)
+                    self.joined_toggles[(behind, key)].setEnabled(bool(on))
+
+    def set_joined(self, behind: str, key: str | None, on: bool) -> None:
+        """Turn keeping ``behind`` mirrored on or off: on all its joined
+        screens (``key`` None), or on one of them."""
+        if self._loading:
+            return
+        cfg = self.app.config()
+        raw = cfg.raw()
+        joined = next((js for b, _, js in self.joined_choices(raw) if b == behind), [])
+        keys = [k for k, _ in joined]
+        if key is None:
+            now = set(keys) if on else set()
+        else:
+            now = self.joined_on(raw, behind, keys)
+            (now.add if on else now.discard)(key)
+        table = dict(raw.get("layout", {}).get("mirror_joined", {}) or {})
+        if not now:
+            table.pop(behind, None)
+        else:
+            table[behind] = "all" if now == set(keys) else [k for k in keys if k in now]
+        cfg.set_mirror_joined(table)
+        cfg.save()
+        self.app.config_saved()
 
     # -- per-monitor jumps -------------------------------------------------------
     @staticmethod

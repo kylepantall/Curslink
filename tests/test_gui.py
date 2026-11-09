@@ -356,6 +356,39 @@ def test_settings_turn_monitor_jumps_on_and_off(desktop, qapp):
     assert desktop.config().get("gaze", "jump_screens") == []
 
 
+def test_settings_keep_mirroring_a_screen_while_on_ones_joined_to_it(desktop, qapp):
+    from curslink.config import host_config
+
+    desktop.window.pages["setup"].create()
+    cfg = desktop.config()
+    cfg.add_device("laptop", "Work laptop")
+    me = cfg.get("host", "device_id")
+    for d in cfg.doc["devices"]:
+        if d["id"] == me:
+            d["screens"] = [{"id": "b", "x": 0, "y": 0, "width": 3440, "height": 1440},
+                            {"id": "c", "x": 3440, "y": 0, "width": 1920, "height": 1080, "os_x": 3440},
+                            {"id": "d", "x": 5360, "y": 0, "width": 1920, "height": 1080, "os_x": 5360}]
+        else:
+            d["screens"] = [{"id": "main", "x": -200, "y": 900, "width": 1000, "height": 600, "z": 1}]
+    cfg.set("layout", "allow_overlap", True)
+    cfg.set("layout", "mirror", True)
+    cfg.save()
+    desktop.config_saved(restart=False)
+    page = desktop.window.pages["settings"]
+    page.load()
+    every = page.joined_toggles[(f"{me}/b", None)]
+    assert not every.isChecked()
+    every.click()
+    assert desktop.config().raw()["layout"]["mirror_joined"] == {f"{me}/b": "all"}
+    assert host_config(desktop.config().raw()).layout.mirror_joined == {(me, "b"): "all"}
+    page.joined_toggles[(f"{me}/b", f"{me}/d")].click()  # only C now
+    assert desktop.config().raw()["layout"]["mirror_joined"] == {f"{me}/b": [f"{me}/c"]}
+    assert page.joined_toggles[(f"{me}/b", f"{me}/c")].isChecked()
+    assert not page.joined_toggles[(f"{me}/b", f"{me}/d")].isChecked()
+    page.joined_toggles[(f"{me}/b", None)].click()
+    assert "mirror_joined" not in desktop.config().raw()["layout"]
+
+
 def test_a_screen_the_camera_couldnt_see_is_tried_again_not_skipped(desktop, qapp):
     desktop.window.pages["setup"].create()
     cfg = desktop.config()

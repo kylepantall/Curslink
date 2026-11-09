@@ -298,7 +298,9 @@ def parse_layout(raw: dict[str, Any]) -> Layout:
     mirror = mirror and allow_overlap
     try:
         return Layout.from_devices(devices, allow_overlap, links, pointer_through=mirror and mirror_pointer,
-                                   mirror=mirror, fits=parse_fits(raw.get("layout", {}).get("fit", []), devices))
+                                   mirror=mirror, fits=parse_fits(raw.get("layout", {}).get("fit", []), devices),
+                                   mirror_joined=parse_mirror_joined(raw.get("layout", {}).get("mirror_joined", {}),
+                                                                     devices))
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
 
@@ -380,6 +382,35 @@ def parse_fits(value: Any, devices: list[Device]) -> list[Fit]:
             raise ConfigError(f"[[layout.fit]] #{i + 1}: x and y must be numbers and scale more than 0")
         if all(r in known for r in refs):
             out.append(Fit(refs[0], refs[1], float(nums[0]), float(nums[1]), float(nums[2])))
+    return out
+
+
+def parse_mirror_joined(value: Any, devices: list[Device]) -> dict:
+    """``[layout.mirror_joined]``: screens behind others (mirror mode) whose
+    mirrors stay on while the pointer is on a screen joined to them, edge to
+    edge, not only on them::
+
+        [layout.mirror_joined]
+        "kyles-mac/screen1" = "all"                    # any screen joined to it
+        "kyles-mac/screen2" = ["kyles-mac/screen3"]    # only these
+
+    Screens no longer in the layout are skipped."""
+    if not isinstance(value, dict):
+        raise ConfigError("[layout].mirror_joined must be a table")
+    known = {(d.id, s.id) for d in devices for s in d.screens}
+    out: dict = {}
+    for key, which in value.items():
+        if not isinstance(key, str) or "/" not in key:
+            raise ConfigError(f'[layout.mirror_joined]: {key!r} must be "device/screen"')
+        ref = tuple(key.split("/", 1))
+        if which == "all":
+            pick: Any = "all"
+        elif isinstance(which, list) and all(isinstance(v, str) and "/" in v for v in which):
+            pick = frozenset(r for r in (tuple(v.split("/", 1)) for v in which) if r in known)
+        else:
+            raise ConfigError(f'[layout.mirror_joined] {key}: must be "all" or a list of "device/screen"')
+        if ref in known and pick:
+            out[ref] = pick
     return out
 
 
