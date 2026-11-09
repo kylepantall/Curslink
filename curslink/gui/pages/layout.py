@@ -836,6 +836,10 @@ class LayoutPage(Page):
                     saved = (float(t["x"]), float(t["y"]), float(t["scale"]))
                 except (KeyError, TypeError, ValueError):
                     saved = None
+        if start is None and saved is not None and far_from_layout(saved, b.layout_rect(), f.layout_rect()):
+            # A line-up nowhere near where the layout puts it (an old one gone
+            # wrong): start from the layout's spot, at its real size.
+            start = {"reset": True}
         dialog = FitTuneDialog({"key": behind, "name": b.device_name}, {"key": front, "name": f.device_name},
                                saved, self.app.service.send, self, start=start)
         dialog.saved.connect(lambda fit, b=behind, f=front: self.fit_tuned(b, f, fit))
@@ -1054,3 +1058,14 @@ class LayoutPage(Page):
                       "Move a screen next to another device's.", "warn", wrap=True)
             self.edges_box.addWidget(w)
         self.fit_bottom_row()
+
+
+def far_from_layout(fit: tuple[float, float, float], behind: tuple, front: tuple) -> bool:
+    """Is a saved fit's middle further than the screen in front's own size from
+    where the layout puts that middle (both on the screen behind, its pixels)?"""
+    x, y, k = fit
+    bx, by = behind[0], behind[1]
+    fx, fy, fw, fh = front
+    saved = (x + k * fw / 2, y + k * fh / 2)
+    laid = (fx - bx + fw / 2, fy - by + fh / 2)
+    return ((saved[0] - laid[0]) ** 2 + (saved[1] - laid[1]) ** 2) ** 0.5 > max(fw, fh)
