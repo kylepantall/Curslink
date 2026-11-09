@@ -85,6 +85,8 @@ class HostConfig:
     isolink: bool = True
     # Mirror mode's frames a second ([layout] mirror_fps; on with [layout] mirror, see curslink.mirror).
     mirror_fps: int = 30
+    # How sharp a mirror's picture is ([layout] mirror_quality, see curslink.mirror.QUALITIES).
+    mirror_quality: str = "high"
     # Share what's copied with the agents ([host] clipboard; see curslink.clipboard).
     clipboard: bool = True
     # Copies bigger than this (MB) stay on their own device ([host] clipboard_max_mb).
@@ -339,6 +341,15 @@ def parse_links(value: Any, devices: list[Device]) -> list[EdgeLink]:
     return out
 
 
+def _mirror_quality(layout: Any) -> str:
+    from curslink.mirror import QUALITIES
+
+    value = layout.get("mirror_quality", "high") if isinstance(layout, dict) else "high"
+    if value not in QUALITIES:
+        raise ConfigError(f"[layout].mirror_quality must be one of {', '.join(QUALITIES)}")
+    return value
+
+
 def parse_fits(value: Any, devices: list[Device]) -> list[Fit]:
     """``[[layout.fit]]``: calibrated overlaps, where a screen in front
     really stands on the one behind it (see curslink.layout.Fit)::
@@ -478,6 +489,7 @@ def host_config(raw: dict[str, Any], base_dir: Path = Path(".")) -> HostConfig:
         files=bool(raw.get("files", {}).get("enabled", True)) if isinstance(raw.get("files", {}), dict) else True,
         isolink=_enabled(raw.get("isolink", {}), "[isolink]"),
         mirror_fps=max(1, min(30, _int(raw.get("layout", {}), "mirror_fps", 30))),
+        mirror_quality=_mirror_quality(raw.get("layout", {})),
         clipboard=bool(host.get("clipboard", True)),
         clipboard_max_mb=_clipboard_max_mb(host, "[host]"),
         hide_cursor=bool(host.get("hide_cursor", True)),

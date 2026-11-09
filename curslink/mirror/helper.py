@@ -42,6 +42,7 @@ import json
 import logging
 import sys
 import time
+import weakref
 
 from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QPoint, QPointF, QRect, QRectF, Qt, QTimer
 from PySide6.QtGui import (QColor, QCursor, QFont, QFontMetricsF, QGuiApplication, QImage, QLinearGradient,
@@ -60,10 +61,9 @@ FADE_S = 0.22
 FLASH_S = 0.6
 TAG_S = 3.5
 REFRESH_S = 2.0
-# Tiles: their side in the screen's own pixels, the JPEG quality they start
-# at, and a resend of all of them this often (in case one went missing).
+# Tiles: their side in the screen's own pixels, and a resend of all of them
+# this often (in case one went missing). Their quality: the capture's.
 TILE = 256
-TILE_QUALITY = 90
 TILE_REFRESH_S = 6.0
 # The pointer's look is sent while it's this close to the captured area
 # (logical pixels), so it's right as soon as it gets there.
@@ -141,6 +141,26 @@ def spec_to_logical(spec: dict) -> tuple[float, float, float, float, int] | None
     return os_to_logical(_screens(), spec.get("os"), sys.platform == "win32")
 
 
+def encode_tile(part: QImage, quality: str) -> bytes:
+    """A tile at a capture's ``quality`` (curslink.mirror.QUALITIES): PNG
+    for lossless (JPEG at the top quality if that's too big for a frame)."""
+    from curslink.mirror import QUALITIES
+
+    how = QUALITIES.get(quality, QUALITIES["high"])
+    if how == "png":
+        data = QByteArray()
+        buf = QBuffer(data)
+        buf.open(QIODevice.OpenModeFlag.WriteOnly)
+        part.save(buf, "PNG")
+        buf.close()
+        raw = bytes(data.data())
+        if len(raw) * 4 / 3 + 4 <= MAX_B64:
+            return raw
+        how = 98
+    raw, _q, _s = fit_jpeg(part, int(how), 1.0)
+    return raw
+
+
 def fit_jpeg(image: QImage, quality: int, scale: float, limit: int = MAX_B64) -> tuple[bytes, int, float]:
     """``image`` as a JPEG whose base64 fits :data:`MAX_B64`: lowers the
     quality, then the size, until it does. Returns the JPEG and the quality
@@ -214,9 +234,62 @@ def mac_cursor_windows(quartz, infos) -> list[int]:
     return out
 
 
+# Windows of this process a capture leaves out: mirrors (never one inside
+# another) and the alignment guides (drawn on the mirror already). The edge
+# indicator and the landing effect stay in, so a mirror shows them as drawn here.
+_unseen: "weakref.WeakSet[QWidget]" = weakref.WeakSet()
+
+
+def raise_overlays() -> None:
+    """Put this process's other windows (the edge indicator, the landing
+    effect) back above a mirror that just came up over them."""
+    from PySide6.QtWidgets import QApplication
+
+    for widget in QApplication.topLevelWidgets():
+        try:
+            if widget.isVisible() and widget not in _unseen:
+                widget.raise_()
+        except RuntimeError:
+            continue
+
+
+def keep_out_of_captures(widget: QWidget) -> None:
+    from curslink.capturehide import exclude_from_capture
+
+    exclude_from_capture(widget)
+    _unseen.add(widget)
+
+
+def _mac_window_number(widget: QWidget) -> int | None:  # pragma: no cover - macOS only
+    try:
+        import objc
+
+        window = objc.objc_object(c_void_p=int(widget.winId())).window()
+        return int(window.windowNumber()) if window is not None else None
+    except Exception:
+        return None
+
+
+def mac_unseen_windows() -> set[int] | None:
+    """The window numbers of :data:`_unseen`, or None if any can't be had."""
+    out = set()
+    for widget in list(_unseen):
+        try:
+            if not widget.isVisible():
+                continue
+        except RuntimeError:  # deleted on the C++ side
+            continue
+        number = _mac_window_number(widget)
+        if number is None:
+            return None
+        out.add(number)
+    return out
+
+
 def mac_grab(x: float, y: float, w: float, h: float) -> QImage | None:
     """macOS: the screen in a rectangle of points, through Quartz, without
-    this process's own windows (the edge indicator, mirrors), or None."""
+    this process's mirrors and guides (or, if those can't be told apart,
+    without any of its windows), or None."""
     try:
         import Quartz
     except ImportError:  # pragma: no cover - macOS only
@@ -238,8 +311,10 @@ def mac_grab(x: float, y: float, w: float, h: float) -> QImage | None:
                 me = os.getpid()
                 infos = Quartz.CGWindowListCopyWindowInfo(Quartz.kCGWindowListOptionOnScreenOnly,
                                                           Quartz.kCGNullWindowID) or []
-                ids = [int(i["kCGWindowNumber"]) for i in infos
-                       if int(i.get("kCGWindowOwnerPID", -1)) != me and "kCGWindowNumber" in i]
+                unseen = mac_unseen_windows()
+                ids = [int(i["kCGWindowNumber"]) for i in infos if "kCGWindowNumber" in i
+                       and (int(i["kCGWindowNumber"]) not in unseen if unseen is not None
+                            else int(i.get("kCGWindowOwnerPID", -1)) != me)]
                 cursor = set(mac_cursor_windows(Quartz, infos)) & set(ids)
                 mac_grab_has_cursor = bool(cursor)
                 if mac_grab_has_cursor != _said_cursor:
@@ -399,7 +474,7 @@ class Capture:
                 if self.tiles.get((x, y)) == digest:
                     continue
                 self.tiles[(x, y)] = digest
-                raw, _q, _s = fit_jpeg(part, TILE_QUALITY, 1.0)
+                raw = encode_tile(part, self.spec.get("quality", "high"))
                 frame = {"id": self.id, "jpg": base64.b64encode(raw).decode("ascii"), "w": w, "h": h,
                          "tile": [x, y, part.width(), part.height()]}
                 self.out("mirror_frame " + json.dumps(frame, separators=(",", ":")))
@@ -519,9 +594,7 @@ class GuideOverlay(QWidget):
                      Qt.WidgetAttribute.WA_TransparentForMouseEvents, Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow):
             self.setAttribute(attr, True)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        from curslink.capturehide import exclude_from_capture
-
-        exclude_from_capture(self)
+        keep_out_of_captures(self)
         self.covered = QRectF()
         self.ok = self.set(spec)
 
@@ -577,9 +650,7 @@ class MirrorWindow(QWidget):
         self.setMouseTracking(self.tune)
         self._drag: tuple[str, QPointF] | None = None  # (which: "move" or the sides, last global point)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        from curslink.capturehide import exclude_from_capture
-
-        exclude_from_capture(self)  # a mirror never ends up in another one
+        keep_out_of_captures(self)  # a mirror never ends up in another one
         self.pixmap: QPixmap | None = None
         # Put together from tiles: the picture, and which tiles have come.
         self.canvas: QImage | None = None
@@ -632,6 +703,7 @@ class MirrorWindow(QWidget):
                 self.setWindowOpacity(0.0)
                 self.show()
                 self.raise_()
+                raise_overlays()
             self.timer.start(16)
         self.update()
 
@@ -645,7 +717,7 @@ class MirrorWindow(QWidget):
         if not (0 < w <= 16384 and 0 < h <= 16384 and 0 <= x < w and 0 <= y < h and tw > 0 and th > 0):
             return False
         part = QImage()
-        if not part.loadFromData(raw, "JPG"):
+        if not part.loadFromData(raw):  # JPEG, or PNG for lossless
             return False
         if self.canvas is None or (self.canvas.width(), self.canvas.height()) != (w, h):
             self.canvas = QImage(w, h, QImage.Format.Format_RGB32)
@@ -671,12 +743,11 @@ class MirrorWindow(QWidget):
         self.update()
 
     def close_soon(self) -> None:
-        if not self.isVisible():
-            self.deleteLater()
-            return
-        if not self.closing_at:
-            self.closing_at = time.monotonic()
-            self.timer.start(16)
+        # At once, no fade: its last picture (the pointer that just left, as
+        # it was there) mustn't linger next to the pointer here.
+        self.timer.stop()
+        self.hide()
+        self.deleteLater()
 
     def tick(self) -> None:
         now = time.monotonic()

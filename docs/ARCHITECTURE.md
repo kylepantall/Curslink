@@ -274,14 +274,24 @@ front of it shows the part it covers, live (`curslink.mirror`).
   window level), the grab already has it, so it isn't drawn in again. Agents list
   `mirror_cursor`; only an older agent behind still gets `mirror_pointer`
   (and the older `cursor` look beside frames).
+- The edge indicator and landing effect are drawn by each device on its
+  own screen, at its own pixels, and are no longer kept out of captures:
+  where they're under a mirror, the mirror streams them as drawn there.
+  Captures leave out only mirrors and guides (`keep_out_of_captures`), and
+  a device's overlays are raised back above a mirror that comes up. A
+  mirror closes at once (no fade), so its last picture of the pointer that
+  just left never lingers.
+- Diagnostics bundles carry the config's `[layout]` (screens, fits) as
+  `layout.toml`, and nothing else of it.
 - Crossings between lined-up screens go by the fit: `Layout.find_crossing`
   looks for the screen in front where the line-up put it
   (`Layout.placed`), not where the layout's rectangle has it, so the whole
   real edge crosses (and shows its glow and landing effect).
 - Full resolution: a capture with `tiles` (the device in front lists
   `mirror_tiles`; this computer always does) sends the covered area at the
-  screen behind's own pixels, never scaled down, as 256 px JPEG tiles at
-  quality 90 (`"tile": [x, y, w, h]`), only those that changed, and all of
+  screen behind's own pixels, never scaled down, as 256 px tiles (PNG for
+  `[layout] mirror_quality = "lossless"`, else JPEG at 95 for "high", the
+  default, or 80 for "standard") (`"tile": [x, y, w, h]`), only those that changed, and all of
   them every 6 s. `MirrorSource` keeps up to 16 tiles in flight and a
   newer copy of a waiting tile replaces it in place. The mirror puts them
   together and scales the whole once onto the screen in front. Older

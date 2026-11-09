@@ -263,19 +263,6 @@ def _screen_os(screen: Screen) -> list[int]:
     return [screen.os_x, screen.os_y, screen.width, screen.height]
 
 
-def _under_mirror(layout: Layout, here: Screen, x: float, y: float) -> bool:
-    """Mirror mode: is (x, y) in the part of ``here`` that another device's
-    screen covers and shows? A bar or label there would sit behind that
-    screen (and is kept out of its mirror), so the pointer's own side shows
-    nothing; the screen it heads to still marks where it comes in."""
-    if not layout.mirror:
-        return False
-    for front, (px, py, pw, ph), _there in layout.covered_parts(here):
-        if front.device_id != here.device_id and px <= x < px + pw and py <= y < py + ph:
-            return True
-    return False
-
-
 def device_kind(platform: str) -> str:
     """``hello.platform`` (or sys.platform) -> the icon to show."""
     p = (platform or "").lower()
@@ -339,13 +326,14 @@ class EdgeIndicator:
         if hint is not None:
             target = hint.target.device_id
             near = round(hint.near, 3)
-            if not _under_mirror(self.layout, hint.here, x, y):
-                wanted[device_id] = {
-                    "role": "from", "rect": _os_rect(hint.here, hint.rect), "side": hint.side,
-                    "a": round(hint.a), "b": round(hint.b), "at": round(hint.at), "near": near,
-                    "name": self.name(target), "kind": self.kind(target),
-                    "screen": hint.here.id, "screen_os": _screen_os(hint.here),
-                }
+            # Drawn on this screen even under a mirror: the mirror streams it to the
+            # screen in front as this screen shows it.
+            wanted[device_id] = {
+                "role": "from", "rect": _os_rect(hint.here, hint.rect), "side": hint.side,
+                "a": round(hint.a), "b": round(hint.b), "at": round(hint.at), "near": near,
+                "name": self.name(target), "kind": self.kind(target),
+                "screen": hint.here.id, "screen_os": _screen_os(hint.here),
+            }
             wanted[target] = {
                 "role": "to", "rect": _os_rect(hint.target, hint.trect), "side": hint.target_side,
                 "a": round(hint.ta), "b": round(hint.tb), "at": round(hint.tat), "near": near,

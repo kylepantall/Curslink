@@ -50,6 +50,9 @@ MAX_FPS = 30
 # Frames a capture may have on their way before one is shown; past that the
 # newest waits (replacing any older waiting one) for an answer.
 IN_FLIGHT = 2
+# A mirror's picture ([layout] mirror_quality): tiles as PNG (every pixel as
+# it is), or as JPEG at that quality.
+QUALITIES = {"lossless": "png", "high": 95, "standard": 80}
 # Tiles (see the helper's Capture) a capture may have on their way at once.
 TILES_IN_FLIGHT = 16
 # The pointer in a mirror is sent at most this often.
@@ -203,7 +206,7 @@ def screen_os(screen: Screen) -> list[int]:
 def device_states(streams: list[Stream], names: dict[str, str], fps: int,
                   tuning: tuple[str, str] | None = None, anchors: dict | None = None,
                   cast: Callable[[Stream], bool] | None = None,
-                  tiles: Callable[[Stream], bool] | None = None) -> dict[str, dict]:
+                  tiles: Callable[[Stream], bool] | None = None, quality: str = "high") -> dict[str, dict]:
     """What each device should capture and show for ``streams`` (the payload
     of its ``mirror`` frame). Devices with nothing to do aren't listed.
 
@@ -224,6 +227,7 @@ def device_states(streams: list[Stream], names: dict[str, str], fps: int,
             src["captures"][-1]["cursor"] = True
         if tiles is not None and tiles(s):
             src["captures"][-1]["tiles"] = True
+            src["captures"][-1]["quality"] = quality
         dst = out.setdefault(s.target.device_id, {"captures": [], "shows": []})
         dst["shows"].append({"id": s.id, "screen": s.target.id, "os": s.os_rect(s.target),
                              "screen_os": screen_os(s.target), "size": list(s.shown[2:]),
@@ -489,13 +493,14 @@ class MirrorHost:
     an agent connects or goes."""
 
     def __init__(self, layout: Layout, router, server, local: MirrorPeer | None, fps: int = DEFAULT_FPS,
-                 clock: Callable[[], float] = time.monotonic):
+                 clock: Callable[[], float] = time.monotonic, quality: str = "high"):
         self.layout = layout
         self.router = router
         self.server = server
         self.local = local
         self.local_id = router.local_id
         self.fps = max(1, min(MAX_FPS, int(fps)))
+        self.quality = quality if quality in QUALITIES else "high"
         self.clock = clock
         self.names = {d.id: d.name for d in layout.devices.values()}
         self.streams: dict[str, Stream] = {}
@@ -604,7 +609,7 @@ class MirrorHost:
         self._pointer = {sid: p for sid, p in self._pointer.items() if sid in self.streams}
         states = device_states(streams, self.names, self.fps, self.tuning, self._anchors,
                                cast=lambda s: self.router.screen == s.source and self._captures_cursor(s.source.device_id),
-                               tiles=lambda s: self._takes_tiles(s.target.device_id))
+                               tiles=lambda s: self._takes_tiles(s.target.device_id), quality=self.quality)
         for device in set(self.sent) | set(states):
             state = states.get(device, EMPTY)
             if self.sent.get(device, EMPTY) == state:

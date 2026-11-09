@@ -635,7 +635,7 @@ def start_mirror(cfg: HostConfig, router: Router, server: HostServer, overlay, l
         chain_helper_lines(overlay, loop, local)
     else:
         log.warning("mirror mode: this computer can't capture or show mirrors without Qt (PySide6)")
-    host = MirrorHost(cfg.layout, router, server, local, cfg.mirror_fps)
+    host = MirrorHost(cfg.layout, router, server, local, cfg.mirror_fps, quality=cfg.mirror_quality)
     host.on_fit = lambda fit: events.emit("fit", **fit)
     server.on_mirror = host.on_message
     router.on_moved = host.update
@@ -657,7 +657,7 @@ def start_mirror(cfg: HostConfig, router: Router, server: HostServer, overlay, l
     if cfg.layout.set_physical(router.local_id, physical_sizes()):
         log_sizes(cfg.layout, router.local_id)
     host.refresh()
-    log.info("mirror mode on (%d fps)", host.fps)
+    log.info("mirror mode on (%d fps, %s quality)", host.fps, host.quality)
     return host
 
 

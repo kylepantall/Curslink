@@ -984,7 +984,9 @@ def test_a_held_chat_goes_onto_the_screen_in_front_instead_of_behind_it():
     assert router.is_local and (router.x, router.y) == (900, 500)
 
 
-def test_no_glow_or_label_behind_the_mirror_but_the_way_in_still_shows():
+def test_the_glow_and_label_show_under_the_mirror_too_which_streams_them():
+    """Kyle: draw them as the device behind would; the mirror shows that
+    part of its screen, so they come through it as drawn there."""
     from curslink.edgehint import EdgeIndicator
     from curslink.layout import Fit
 
@@ -994,8 +996,8 @@ def test_no_glow_or_label_behind_the_mirror_but_the_way_in_still_shows():
     edges = EdgeIndicator(lay, lambda d: True, lambda device, data: sent.append((device, data)),
                           name=lambda d: d, kind=lambda d: "mac")
     edges.update("pc", 900, 590)  # under the laptop, which shows this part of the PC
-    assert [d for d, data in sent if "role" in data] == ["lap"]
-    assert dict(sent)["lap"]["role"] == "to"
+    assert sorted(d for d, data in sent if "role" in data) == ["lap", "pc"]
+    assert dict(sent)["lap"]["role"] == "to" and dict(sent)["pc"]["role"] == "from"
     # Without mirroring, the pointer's own side shows as ever.
     sent2 = []
     EdgeIndicator(desk(mirror=False), lambda d: True, lambda device, data: sent2.append((device, data)),
@@ -1309,3 +1311,52 @@ def test_a_mac_capture_that_has_the_cursor_in_it_casts_that_one(qapp, monkeypatc
     cap.grab()
     assert calls == []  # not looked up, so not drawn in
     cap.stop()
+
+
+def test_a_diagnostics_bundle_has_the_layout_but_no_secret(tmp_path):
+    from curslink.diagnostics import layout_text
+
+    cfg = tmp_path / "curslink.toml"
+    cfg.write_text('secret = "hush"\n[host]\nport = 1\n[layout]\nmirror = true\n'
+                   '[[layout.fit]]\nbehind = "pc/main"\nfront = "lap/main"\nx = 1.5\ny = 2\nscale = 0.5\n')
+    text = layout_text(cfg)
+    assert "hush" not in text and "port" not in text
+    assert "mirror = true" in text and 'behind = "pc/main"' in text
+
+
+def test_lossless_tiles_are_png_and_the_mirror_reads_them(qapp, monkeypatch):
+    from curslink.mirror import device_states
+    from curslink.mirror.helper import MirrorHelper, encode_tile
+    from PySide6.QtGui import QColor, QImage
+
+    part = QImage(64, 64, QImage.Format.Format_RGB32)
+    part.fill(QColor(10, 200, 30))
+    assert encode_tile(part, "lossless").startswith(b"\x89PNG")
+    assert encode_tile(part, "high").startswith(b"\xff\xd8")
+    cap, out = _still_capture(qapp, monkeypatch, {"id": "c", "screen": "main", "os": [10, 10, 120, 80], "fps": 1,
+                                                 "tiles": True, "quality": "lossless"}, size=(100, 50))
+    out.clear()
+    cap.grab()
+    frame = json.loads(out[0].partition(" ")[2])
+    assert base64.b64decode(frame["jpg"]).startswith(b"\x89PNG")
+    helper = MirrorHelper(lambda line: None)
+    helper.handle("mirror " + json.dumps({"captures": [], "shows": [{"id": "c", "screen": "main",
+                                                                        "os": [200, 150, 160, 100]}]}))
+    helper.handle("mirror_image " + json.dumps(frame))
+    window = helper.windows["c"]
+    assert window.isVisible() and window.canvas.pixelColor(5, 5) == QColor("teal")
+    window.close()
+    cap.stop()
+    # The host passes the setting on with tiles.
+    s = Stream(Screen("main", "pc", 0, 0, 100, 100), Screen("main", "lap", 50, 50, 100, 100), (50, 50, 50, 50))
+    states = device_states([s], {}, 30, tiles=lambda _s: True, quality="lossless")
+    assert states["pc"]["captures"][0]["quality"] == "lossless"
+
+
+def test_mirror_quality_must_be_one_of_the_choices(tmp_path):
+    from curslink.config import ConfigError, _mirror_quality
+
+    assert _mirror_quality({}) == "high"
+    assert _mirror_quality({"mirror_quality": "lossless"}) == "lossless"
+    with pytest.raises(ConfigError):
+        _mirror_quality({"mirror_quality": "ultra"})
