@@ -61,6 +61,7 @@ class Curslink(QObject):
         self._hint = None
         self.release: update.Release | None = None
         self.quitting = False
+        self.app_filters: list = []  # app-wide event filters, removed before quitting
         self.window = None
         self.tray = None
         diagnostics.on_crash(lambda path: call_on_main(
@@ -394,11 +395,33 @@ class Curslink(QObject):
         self.quit()
 
     def quit(self) -> None:
+        if self.quitting:
+            # Quitting closes the window, whose closeEvent comes back here
+            # (on macOS from inside NSApplication terminate:): don't start
+            # a second quit inside the first.
+            return
         self.quitting = True
         self.service.stop()
         if self.tray is not None:
             self.tray.hide()
+        self.remove_event_filters()
         QApplication.quit()
+
+    def remove_event_filters(self) -> None:
+        """Take out every Python event filter before Qt tears down.
+
+        On macOS QApplication.quit() ends in NSApplication terminate:, which
+        calls exit() straight away: C++ destructors then delete the widgets
+        while Python is still loaded, and each deletion sends events through
+        the filters. A Python filter called then reads a half-destroyed
+        event and the app crashes on the way out."""
+        qt = QApplication.instance()
+        for f in self.app_filters:
+            if qt is not None:
+                qt.removeEventFilter(f)
+        self.app_filters.clear()
+        if self.window is not None and hasattr(self.window, "remove_event_filters"):
+            self.window.remove_event_filters()
 
 
 class WindowLog(QObject):
@@ -564,6 +587,7 @@ def main(argv: list[str] | None = None) -> int:
 
     theme.manager(prefs.theme).apply()
     app = Curslink(prefs)
+    app.app_filters.append(window_log)
     server = _listen(name, app)  # noqa: F841 - kept alive by its parent
     app.instance_lock = instance_lock  # held until this copy exits
 
