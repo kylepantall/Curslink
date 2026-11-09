@@ -957,3 +957,19 @@ def test_the_helpers_adjustments_reach_the_mirror_peer():
     finally:
         loop.close()
     assert [g.split()[0] for g in got] == ["mirror_tune", "mirror_frame"] and other == ["drag_end {}"]
+
+
+def test_a_held_chat_goes_onto_the_screen_in_front_instead_of_behind_it():
+    lay = desk()
+    transport = Transport({"lap"}, {"lap"})
+    router = Router(lay, "pc", FakeCapture(), FakeSink(), transport, FakeOverlay())
+    dragging = {"on": True}
+    router.carries_drag = lambda src, dst: dragging["on"] and (src, dst) == ("pc", "lap")
+    router.on_pointer(700, 300)
+    router.on_pointer(900, 500)  # holding an Isolink chat: it goes to the laptop
+    assert router.active_device == "lap" and (router.x, router.y) == (900, 500)
+    router.go_home("test")
+    dragging["on"] = False
+    router.on_pointer(700, 300)
+    router.on_pointer(900, 500)  # nothing held: it stays on the PC, as mirror mode does
+    assert router.is_local and (router.x, router.y) == (900, 500)
