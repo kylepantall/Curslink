@@ -1499,3 +1499,23 @@ def test_lining_up_in_mirror_mode_takes_one_click_behind(qapp):
     from curslink.gui.fitcalib import corner_at
 
     assert got == [{"place": [1600.0, 950.0], "corner": list(corner_at(corner, 1.0, 1.0))}]
+
+
+def test_placing_it_again_while_adjusting_moves_the_guides_there():
+    transport = Transport({"lap"}, {"lap"})
+    host, router, local = make_host(desk(), transport, [])
+    host.fit({"behind": "pc/main", "front": "lap/main", "hold": True, "tune": True})
+    old = transport.of("mirror", "lap")[-1]["shows"][0]["guides"]
+    host.fit({"behind": "pc/main", "front": "lap/main", "place": [100, 100], "corner": [0, 0],
+              "hold": True, "tune": True})
+    show, = transport.of("mirror", "lap")[-1]["shows"]
+    assert show["guides"] != old and show["guides"] == show["src"]
+
+
+def test_fine_tuning_starts_from_the_layout_when_the_saved_line_up_is_far_off():
+    pytest.importorskip("PySide6.QtCore")
+    from curslink.gui.pages.layout import far_from_layout
+
+    ultrawide, phone = (0, 0, 3440, 1440), (1500, 1000, 384, 832)
+    assert far_from_layout((570.2, 1321.3, 0.3149), ultrawide, phone)     # Kyle's old one, on the left
+    assert not far_from_layout((1520, 1010, 0.8), ultrawide, phone)       # roughly where it's laid out
