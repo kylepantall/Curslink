@@ -127,7 +127,8 @@ class HostServer:
 
     async def start(self) -> None:
         any_port = self.port == 0
-        for attempt in range(5):
+        tries = 20  # Windows can hold back big ranges of UDP ports (Hyper-V, WinNAT)
+        for attempt in range(tries):
             self._server = await asyncio.start_server(
                 self.handle_streams, self.host, 0 if any_port else self.port, ssl=self.ssl_context,
                 limit=STREAM_LIMIT,
@@ -138,8 +139,9 @@ class HostServer:
                 break
             # A port the OS picked can be free for TCP but taken for UDP
             # (Windows, often); then pick another rather than lose UDP.
-            await self._start_udp(warn=not any_port or attempt == 4)
-            if self.udp is not None or not any_port or attempt == 4:
+            last = attempt == tries - 1
+            await self._start_udp(warn=not any_port or last)
+            if self.udp is not None or not any_port or last:
                 break
             self._server.close()
             await self._server.wait_closed()
