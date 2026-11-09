@@ -1,4 +1,4 @@
-"""The switch animation: a "pop" ring or a "blink" pulse where the pointer lands.
+"""The switch animation where the pointer lands: "pop" (a soft halo that\ngathers in on the pointer) or "blink" (a pulse).
 
 The GUI toolkit wants to own the main thread (macOS insists on it) while
 the host and agent run asyncio there, so the overlay is a small long-lived
@@ -35,6 +35,7 @@ log = logging.getLogger(__name__)
 SIZE = 180
 ACCENT = "#3fa9ff"
 DURATION_S = 0.3
+HALO_S = 0.55
 
 
 def helper_command() -> list[str]:
@@ -263,7 +264,7 @@ def make_effect_widget(effect: str, x: int, y: int):
     """One pop or blink at OS position (x, y), already showing; it closes
     itself when done."""
     from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, QTimer
-    from PySide6.QtGui import QColor, QGuiApplication, QPainter, QPen
+    from PySide6.QtGui import QColor, QGuiApplication, QPainter, QPen, QRadialGradient
     from PySide6.QtWidgets import QWidget
 
     screens = []
@@ -300,7 +301,7 @@ def make_effect_widget(effect: str, x: int, y: int):
             self.timer.start(12)
 
         def progress(self) -> float:
-            return (time.monotonic() - self.start) / DURATION_S
+            return (time.monotonic() - self.start) / (HALO_S if self.effect == "pop" else DURATION_S)
 
         def tick(self) -> None:
             if self.progress() >= 1:
@@ -316,15 +317,24 @@ def make_effect_widget(effect: str, x: int, y: int):
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             c = QPointF(cx, cy)
             if self.effect == "pop":
-                accent.setAlphaF(max(0.0, 1 - p * 0.6))
-                r = 10 + _ease_out(p) * (SIZE / 2 - 14)
-                painter.setPen(QPen(accent, max(1.0, 9 * (1 - p))))
+                # A soft halo that gathers in on the pointer and fades: it
+                # shows where the pointer is now, quietly (the edge glow and
+                # label already showed the crossing).
+                fade = (1 - p) ** 1.5
+                r = 15 + 26 * (1 - _ease_out(p))
+                glow = QRadialGradient(c, r + 14)
+                for pos, a in ((0.0, 0.32), (r / (r + 14), 0.16), (1.0, 0.0)):
+                    col = QColor(accent)
+                    col.setAlphaF(a * fade)
+                    glow.setColorAt(pos, col)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(glow)
+                painter.drawEllipse(c, r + 14, r + 14)
+                ring = QColor(accent)
+                ring.setAlphaF(0.75 * fade)
+                painter.setPen(QPen(ring, 2))
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawEllipse(c, r, r)
-                dot = 7 * (1 - p)
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(accent)
-                painter.drawEllipse(QRectF(c.x() - dot, c.y() - dot, 2 * dot, 2 * dot))
             else:  # blink: one quick flash that fades
                 accent.setAlphaF(1.0 if p < 0.5 else max(0.0, 2 - 2 * p))
                 painter.setPen(QPen(accent, 6))

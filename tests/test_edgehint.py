@@ -200,6 +200,13 @@ def test_length_fades_out_at_both_ends():
         assert max(a for _, a in stops) >= 0.35
 
 
+def settle(ov) -> None:
+    """Run the helper's fade to its end, as if time had passed."""
+    for _ in range(20):
+        ov._ticked -= 1
+        ov._tick()
+
+
 def test_helper_draws_the_bar_and_label():
     QtWidgets = pytest.importorskip("PySide6.QtWidgets")
     from curslink.edgeoverlay import EdgeOverlay
@@ -208,8 +215,7 @@ def test_helper_draws_the_bar_and_label():
     ov = EdgeOverlay(lambda x, y: (x, y))
     ov.handle({"role": "from", "rect": [0, 0, 1000, 800], "side": "right", "a": 100, "b": 700, "at": 400,
                "near": 1, "name": "WKS82261", "kind": "windows"})
-    for _ in range(40):
-        ov._tick()
+    settle(ov)
     assert ov.bar.isVisible() and ov.label.isVisible()
     g = ov.bar.geometry()
     assert (g.right() + 1, g.top(), g.height()) == (1000, 100, 600)
@@ -220,8 +226,7 @@ def test_helper_draws_the_bar_and_label():
     assert edge_px.alpha() > 150 and end_px.alpha() < 40  # bright by the pointer, faded at the end
     # Heading here: the bar only.
     ov.handle({"role": "to", "rect": [0, 0, 1000, 800], "side": "left", "a": 0, "b": 800, "at": 400, "near": 1})
-    for _ in range(5):
-        ov._tick()
+    settle(ov)
     assert ov.bar.isVisible() and not ov.label.isVisible()
     ov.handle({"flash": True})
     ov.flash_at -= 10  # long past
@@ -310,3 +315,30 @@ def test_helper_places_the_bar_by_fractions_of_the_screen():
     bar = ov.bar.geometry()
     assert abs(bar.top() - (g.y() + g.height() / 2)) <= 2  # halfway down, as in the layout
     assert abs(bar.width() - g.width()) <= 2
+
+
+def test_glow_is_one_smooth_falloff_and_fades_with_the_mirror():
+    pytest.importorskip("PySide6.QtWidgets")
+    from curslink import edgeoverlay
+    from curslink.mirror import helper
+
+    stops = edgeoverlay.glow_stops(64, dark=True)
+    alphas = [a for _, a in stops]
+    assert alphas == sorted(alphas, reverse=True) and alphas[-1] == 0.0  # brightest on the edge, gone at the far side
+    assert len(set(round(a, 3) for a in alphas)) > 20  # a curve, not a few solid bands
+    assert edgeoverlay.FADE_S == helper.FADE_S and edgeoverlay.FLASH_S == helper.FADE_S
+
+
+def test_bar_renders_at_the_screens_resolution():
+    QtWidgets = pytest.importorskip("PySide6.QtWidgets")
+    from curslink.edgeoverlay import Bar
+
+    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    bar = Bar()
+    bar.side, bar.at = "top", 200
+    bar.resize(400, 64)
+    img = bar.render(1.0, dpr=2.0)
+    assert (img.width(), img.height()) == (800, 128)
+    column = [img.pixelColor(400, y).alpha() for y in range(0, 128)]
+    assert column[0] > 150 and column[-1] < 5
+    assert len(set(column)) > 40  # changes smoothly, pixel by pixel

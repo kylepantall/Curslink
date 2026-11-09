@@ -346,16 +346,16 @@ def test_gaze_waits_while_the_mouse_is_moving(parts):
     assert router.active_device == "laptop"
 
 
-def test_the_animation_plays_where_the_pointer_leaves_and_where_it_lands(parts):
+def test_the_animation_plays_only_where_the_pointer_lands(parts):
     router, _, _, transport, overlay = parts
     router.on_pointer(3839, 500)              # leave the desktop's right edge
-    assert overlay.shown[-1][1:] == (3839, 500)
+    assert not overlay.shown                  # nothing where it leaves (the edge glow shows that)
     enter = transport.of_type("enter")[-1][2]
-    assert enter["x"] <= 2                      # and land on the laptop's left edge
+    assert enter["x"] <= 2 and enter["effect"] == "pop"  # it lands on the laptop's left edge
     router.clock = lambda: 1e9
-    router.on_motion(-50, 0)                    # back home: the laptop shows where it left
+    router.on_motion(-50, 0)                    # back home
     leave = transport.of_type("leave")[-1][2]
-    assert leave["x"] <= 2 and leave["effect"] == "pop"
+    assert leave["x"] <= 2 and leave["effect"] == "none"
     assert overlay.shown[-1][1] > 3700          # and home shows where it came in
 
 

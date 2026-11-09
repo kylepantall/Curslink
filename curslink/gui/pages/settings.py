@@ -86,7 +86,7 @@ class SettingsPage(Page):
         effects = QHBoxLayout()
         self.effect_group = QButtonGroup(self)
         track, seg = seg_track()
-        for key, text in (("pop", "Pop"), ("blink", "Blink"), ("none", "None")):
+        for key, text in (("pop", "Halo"), ("blink", "Blink"), ("none", "None")):
             b = button(text, "seg")
             b.setCheckable(True)
             b.setProperty("effect", key)
