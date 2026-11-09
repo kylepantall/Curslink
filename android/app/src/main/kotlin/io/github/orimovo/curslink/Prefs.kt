@@ -76,6 +76,17 @@ class Prefs(context: Context) {
             e.apply()
         }
 
+    /** Paused by hand (the app, the notification or the Quick Settings
+     *  tile): off the computer until resumed, even after a restart. */
+    var paused: Boolean
+        get() = p.getBoolean("paused", false)
+        set(value) = p.edit().putBoolean("paused", value).apply()
+
+    /** Pause by itself while a call (phone or app) is on, and come back after. */
+    var pauseDuringCalls: Boolean
+        get() = p.getBoolean("pause_during_calls", true)
+        set(value) = p.edit().putBoolean("pause_during_calls", value).apply()
+
     var relay: Pair<String, String>
         get() = (p.getString("relay", "") ?: "") to (p.getString("relay_key", "") ?: "")
         set(value) = p.edit().putString("relay", value.first.trim()).putString("relay_key", value.second.trim()).apply()

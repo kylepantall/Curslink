@@ -336,6 +336,7 @@ class DevicesPage(Page):
                 "devices-empty", "Nothing paired yet",
                 f"Open Curslink on {other}, on the same network, and pair with it below."))
         connected = {a.device_id for a in self.app.status.agents.values() if a.connected}
+        paused = {a.device_id for a in self.app.status.agents.values() if a.paused and not a.connected}
         if self.app.status.host_state == "connected":
             connected |= {p.device_id for p in peers if p.role == "host"}
         self.draw_phone(peers)
@@ -345,7 +346,7 @@ class DevicesPage(Page):
             on = p.device_id in connected
             widgets = [
                 text_block(p.name, f"{p.role.title()} · id {p.device_id} · paired {when}"),
-                pill("Connected" if on else "Offline", "on" if on else "off"),
+                pill("Connected" if on else ("Paused" if p.device_id in paused else "Offline"), "on" if on else "off"),
             ]
             edge = self.edge_picker(p) if self.app.role == "host" and p.role == "agent" else None
             if edge is not None:

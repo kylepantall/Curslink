@@ -64,6 +64,14 @@ class LinkService : Service() {
         fun start(context: Context) {
             ContextCompat.startForegroundService(context, Intent(context, LinkService::class.java))
         }
+
+        /** Pause (off the computer until resumed) or resume, from anywhere. */
+        fun setPaused(context: Context, on: Boolean) {
+            Prefs(context).paused = on
+            instance?.applyPause() ?: runCatching { start(context) }
+            PauseTile.refresh(context)
+            changed()
+        }
     }
 
     /** A computer asking to pair: the app's window asks for the code. */
@@ -79,6 +87,7 @@ class LinkService : Service() {
     private var link: AgentLink? = null
     private var mirror: MirrorCapturer? = null
     private var wifiLock: WifiManager.WifiLock? = null
+    private var calls: CallWatcher? = null
     // Clipboard sync, text only: what a computer copied goes on the phone's
     // clipboard; what's copied here goes to the computers. Android only lets
     // an app read the clipboard while it's on screen, so copies made in other
@@ -121,13 +130,22 @@ class LinkService : Service() {
             hello = { Hello(prefs.name, platform(), screens(), screenMm()) },
             discover = ::candidates,
             onState = { s, detail ->
-                state = s to detail
+                state = s to (if (s == LinkState.PAUSED) pauseWhy() else detail)
                 if (s == LinkState.CONNECTED) link?.via?.substringBefore(":")?.takeIf { !it.startsWith("relay") }?.let(prefs::rememberAddress)
                 updateNotification()
+                PauseTile.refresh(this)
                 changed()
             },
             log = { AppLog.i(TAG, it) },
-        ).also { it.start() }
+        )
+        // Taking a call: get the computer's pointer (and any mirror) off the
+        // phone until it's over, unless that's turned off.
+        calls = CallWatcher(this) { on ->
+            AppLog.i(TAG, if (on) "a call started" else "the call ended")
+            applyPause()
+        }.also { it.start() }
+        applyPause()
+        link?.start()
         (getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager).registerDefaultNetworkCallback(netCallback)
     }
 
@@ -138,12 +156,28 @@ class LinkService : Service() {
         instance = null
         runCatching { (getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager).unregisterNetworkCallback(netCallback) }
         runCatching { clipboard.removePrimaryClipChangedListener(clipListener) }
+        calls?.stop()
         link?.stop()
         mirror?.close()
         pairingServer?.close()
         discovery.stop()
         releaseWifi()
         super.onDestroy()
+    }
+
+    /** Paused by hand, or for a call (when that's on). */
+    val pausedForCall: Boolean
+        get() = !prefs.paused && prefs.pauseDuringCalls && calls?.inCall == true
+
+    private fun pauseWhy() = if (prefs.paused) "paused" else if (pausedForCall) "call" else ""
+
+    /** Pause or resume the link to match the settings and any call. */
+    fun applyPause() {
+        val want = prefs.paused || pausedForCall
+        link?.setPaused(want, if (prefs.paused) "paused here" else "a call is on")
+        if (want && state.first == LinkState.PAUSED) state = LinkState.PAUSED to pauseWhy()
+        updateNotification()
+        changed()
     }
 
     /** Pairing or settings changed: connect again with them. */
@@ -342,18 +376,28 @@ class LinkService : Service() {
         val (s, detail) = state
         val text = when {
             p == null -> "Not paired yet. Open Curslink to pair with your computer."
+            s == LinkState.PAUSED && detail == "call" -> "Paused for your call. Back on ${p.hostName} when it ends."
+            s == LinkState.PAUSED -> "Paused. ${p.hostName}'s mouse and keyboard won't come over until you resume."
             s == LinkState.CONNECTED -> "Linked to ${p.hostName}" + if (detail.startsWith("relay")) " through your relay" else ""
             else -> "Looking for ${p.hostName}…"
         }
         val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
-        return NotificationCompat.Builder(this, CHANNEL_LINK)
+        val b = NotificationCompat.Builder(this, CHANNEL_LINK)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(getString(R.string.app_name))
             .setContentText(text)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
             .setOngoing(true)
             .setSilent(true)
             .setContentIntent(open)
-            .build()
+        if (p != null) {
+            val resume = prefs.paused
+            val action = Intent(this, PauseReceiver::class.java)
+                .setAction(if (resume) PauseReceiver.ACTION_RESUME else PauseReceiver.ACTION_PAUSE)
+            val pi = PendingIntent.getBroadcast(this, 2, action, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+            b.addAction(0, if (resume) "Resume" else "Pause", pi)
+        }
+        return b.build()
     }
 
     private fun updateNotification() {

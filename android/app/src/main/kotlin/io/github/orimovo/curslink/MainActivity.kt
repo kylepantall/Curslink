@@ -14,6 +14,7 @@ import android.text.InputType
 import android.view.Gravity
 import android.view.View
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -112,12 +113,29 @@ class MainActivity : AppCompatActivity() {
         val (state, detail) = LinkService.state
         val status = when {
             pairing == null -> "Not paired with a computer yet."
+            prefs.paused -> "Paused. ${pairing.hostName}'s mouse and keyboard won't come over to the phone until you resume."
+            state == LinkState.PAUSED -> "Paused for your call. Curslink comes back on by itself when the call ends."
             state == LinkState.CONNECTED -> "Linked to ${pairing.hostName}" +
                 (if (detail.startsWith("relay")) " through your relay." else " on this network.") +
                 " Move the pointer past the phone's edge on the computer to use it here."
             else -> "Looking for ${pairing.hostName}…" + if (detail.isNotEmpty() && detail != "not paired") "\n$detail" else ""
         }
         root.addView(text(status, 16f))
+        if (pairing != null) {
+            root.addView(button(if (prefs.paused) "Resume" else "Pause") {
+                LinkService.setPaused(this, !prefs.paused)
+                render()
+            })
+            root.addView(CheckBox(this).apply {
+                text = "Pause during calls"
+                isChecked = prefs.pauseDuringCalls
+                setOnCheckedChangeListener { _, on ->
+                    prefs.pauseDuringCalls = on
+                    LinkService.instance?.applyPause()
+                }
+            })
+            root.addView(text("Also on the notification, and as a Quick Settings tile: edit your tiles and drag Curslink in.", 13f))
+        }
 
         root.addView(text("Set up", 20f, bold = true, top = 24))
         step(accessibilityOn(), "Mouse and keyboard",
@@ -186,6 +204,7 @@ class MainActivity : AppCompatActivity() {
             append("This phone: ${prefs.name} (${prefs.deviceId})\n")
             append(pairing?.let { "Paired with: ${it.hostName} (${it.hostId}), addresses ${it.addresses.joinToString().ifEmpty { "none" }}, port ${it.controlPort}" +
                 (if (it.hasRelay) ", relay ${it.relay}" else ", no relay") } ?: "Not paired")
+            append("\nPaused: ${if (prefs.paused) "yes" else "no"}, pause during calls: ${if (prefs.pauseDuringCalls) "on" else "off"}")
             append("\nLink: $state${if (detail.isNotEmpty()) " ($detail)" else ""}")
             append("\nMouse and keyboard (accessibility): ${if (accessibilityOn()) "on" else "off"}")
             append("\nIgnoring battery optimisation: ${(getSystemService(POWER_SERVICE) as PowerManager).isIgnoringBatteryOptimizations(packageName)}")
