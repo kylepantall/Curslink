@@ -1001,3 +1001,55 @@ def test_no_glow_or_label_behind_the_mirror_but_the_way_in_still_shows():
     EdgeIndicator(desk(mirror=False), lambda d: True, lambda device, data: sent2.append((device, data)),
                   name=lambda d: d, kind=lambda d: "mac").update("pc", 790, 500)
     assert any(data.get("role") == "from" for _d, data in sent2)
+
+
+# -- the agent's idle cursor ---------------------------------------------------
+def _parking():
+    from curslink.mirror import CursorPark
+    from curslink.net.client import AgentSession
+    from curslink.protocol import Message
+
+    sink = FakeSink()
+    session = AgentSession(sink, lambda effect, x, y: None)
+    timers = []
+    park = CursorPark(session, lambda delay, fn: timers.append(fn))
+    peer = MirrorPeer(lambda line: None, lambda t, **data: None, on_shows=park.shows)
+    show = {"id": "s1", "screen": "main", "os": [900, 0, 1020, 400], "screen_os": [0, 0, 1920, 1080]}
+
+    def fire():
+        while timers:
+            timers.pop(0)()
+    return sink, session, peer, show, fire, Message
+
+
+def test_an_agents_idle_cursor_moves_off_a_mirror_once_each_time_input_leaves():
+    sink, session, peer, show, fire, Message = _parking()
+    session.handle(Message("enter", {"x": 1200, "y": 2}))
+    session.handle(Message("leave", {}))
+    sink.calls.clear()
+    peer.handle("mirror", {"captures": [], "shows": [show]})
+    fire()
+    assert sink.calls == [("move", 1919, 540)]  # the right edge's middle: a pixel of it shows, no hot corner
+    peer.handle("mirror", {"captures": [], "shows": []})
+    peer.handle("mirror", {"captures": [], "shows": [show]})
+    fire()
+    assert sink.calls == [("move", 1919, 540)]  # not again (you may be using this computer's own mouse)
+    session.handle(Message("enter", {"x": 1200, "y": 2}))
+    session.handle(Message("leave", {}))
+    sink.calls.clear()
+    peer.handle("mirror", {"captures": [], "shows": [show]})
+    fire()
+    assert sink.calls == [("move", 1919, 540)]
+
+
+def test_the_cursor_stays_while_input_is_here_or_a_mirror_is_being_adjusted():
+    sink, session, peer, show, fire, Message = _parking()
+    session.handle(Message("enter", {"x": 1200, "y": 2}))
+    sink.calls.clear()
+    peer.handle("mirror", {"captures": [], "shows": [show]})
+    fire()
+    assert sink.calls == []
+    session.handle(Message("leave", {}))
+    peer.handle("mirror", {"captures": [], "shows": [dict(show, tune=True)]})
+    fire()
+    assert sink.calls == []

@@ -1120,10 +1120,11 @@ async def run_agent(cfg: AgentConfig) -> None:
     session.on_hint = lambda data: events.emit("hint", **data)
     mirror = None
     if mirror_on and overlay is not None:
-        from curslink.mirror import LatestWriter, MirrorPeer
+        from curslink.mirror import CursorPark, LatestWriter, MirrorPeer
 
         writer = LatestWriter(overlay.command)
-        mirror = MirrorPeer(overlay.command, client.send, writer.put)
+        park = CursorPark(session, asyncio.get_running_loop().call_later)
+        mirror = MirrorPeer(overlay.command, client.send, writer.put, park.shows)
         session.mirror = mirror
         chain_helper_lines(overlay, asyncio.get_running_loop(), mirror)
     clipboard = None

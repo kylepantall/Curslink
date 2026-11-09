@@ -78,6 +78,9 @@ class AgentSession:
         # go here (as sent, before [agent].modifier_map) instead of being typed.
         self.learn: Callable[[str, bool], None] | None = None
         self.active = False
+        # How many times input has come here (each "enter"): mirror mode's
+        # CursorPark moves this device's idle cursor aside once per time away.
+        self.entered = 0
         self.keys: set[str] = set()
         self.buttons: set[str] = set()
         # The newest move's ts (either channel): UDP can deliver one late, and
@@ -126,6 +129,7 @@ class AgentSession:
             self.smoother.snap()  # these happen where the pointer is now, not where playback is
         if t == "enter":
             self.active = True
+            self.entered += 1
             x, y = int(msg.data["x"]), int(msg.data["y"])
             if self.smoother is not None:
                 self.smoother.reset(x, y)
