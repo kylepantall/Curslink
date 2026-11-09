@@ -410,3 +410,15 @@ def test_no_crossing_animation_while_setting_up(parts):
     router.on_pointer(3839, 500)
     (_dev, _t, data), = transport.of_type("enter")
     assert data["effect"] == "none"
+
+
+def test_leaving_parks_the_idle_cursor_off_buttons(parts, layout):
+    """Left by its top edge, the hidden cursor sat on title bar buttons and
+    their tooltips kept popping up: the leave says where to put it."""
+    router, _, _, transport, _ = parts
+    router.on_pointer(3839, 500)
+    router.clock = lambda: 1e9
+    router.on_motion(-50, 0)
+    laptop = next(iter(layout.screens("laptop")))
+    leave = transport.of_type("leave")[-1][2]
+    assert leave["park"] == list(laptop.to_os(laptop.right - 1, laptop.y + laptop.height / 2))
