@@ -1147,6 +1147,7 @@ def _still_capture(qapp, monkeypatch, spec, size=(120, 80)):
 
     def image():
         real()  # finds where it captures
+        cap.has_cursor = False  # a still picture, without this computer's cursor in it
         return still
 
     monkeypatch.setattr(cap, "image", image)
