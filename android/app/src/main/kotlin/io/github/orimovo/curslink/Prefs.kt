@@ -96,6 +96,20 @@ class Prefs(context: Context) {
         get() = p.getBoolean("keep_screen_on", false)
         set(value) = p.edit().putBoolean("keep_screen_on", value).apply()
 
+    /** Update from GitHub releases by itself (see [Updater]). */
+    var autoUpdate: Boolean
+        get() = p.getBoolean("auto_update", true)
+        set(value) = p.edit().putBoolean("auto_update", value).apply()
+
+    var updateCheckedAt: Long
+        get() = p.getLong("update_checked_at", 0)
+        set(value) = p.edit().putLong("update_checked_at", value).apply()
+
+    /** Update notifications already shown ("out:0.4.57", "ready:0.4.57"), newest last. */
+    var updateNotified: List<String>
+        get() = (p.getString("update_notified", "") ?: "").split(",").filter { it.isNotEmpty() }
+        set(value) = p.edit().putString("update_notified", value.joinToString(",")).apply()
+
     /** Remember an address that worked, first in line next time. */
     fun rememberAddress(address: String) {
         val now = pairing ?: return

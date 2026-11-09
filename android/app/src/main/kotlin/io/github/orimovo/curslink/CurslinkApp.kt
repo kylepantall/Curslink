@@ -22,5 +22,10 @@ class CurslinkApp : Application() {
                 description = "Files dragged here from a computer and let go of on the phone: tap to see them in Downloads."
             },
         )
+        nm.createNotificationChannel(
+            NotificationChannel(Updater.CHANNEL_UPDATES, "Updates", NotificationManager.IMPORTANCE_DEFAULT).apply {
+                description = "A new version of Curslink is out or ready to install."
+            },
+        )
     }
 }
