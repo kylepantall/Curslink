@@ -226,7 +226,7 @@ def learned_fix(sent: str, wanted: str) -> tuple[str, str] | None:
 
 def normalize_char(char: str | None, vk: int | None) -> str | None:
     """Undo control-character mangling (Ctrl+A arrives as ``"\\x01"`` on Windows)."""
-    if char and len(char) == 1 and ord(char) >= 32 and char != "\x7f":
+    if char and len(char) == 1 and ord(char) >= 32 and char != "\x7f" and not is_private_use(char):
         return char
     if vk is not None and (0x41 <= vk <= 0x5A or 0x30 <= vk <= 0x39):
         return chr(vk).lower()
@@ -261,3 +261,41 @@ class Hotkey:
             if fam in self.parts:
                 self._fired = False
         return False
+
+
+# -- Mac keyboards typing on a PC ---------------------------------------------
+# The top row of a Mac keyboard has keys a PC has no key for (Mission Control,
+# Spotlight, Launchpad, Dictation, Do Not Disturb), in the places of F3 to F6.
+# A PC gets the F-key in that spot, so Option+F4 is Alt+F4 there. By keycode.
+MAC_TOP_ROW = {160: "f3", 131: "f4", 177: "f4", 176: "f5", 178: "f6"}
+# Keys a PC has nothing for at all: fn and the globe key.
+MAC_ONLY_KEYS = frozenset({63, 179})
+
+
+def is_private_use(char: str) -> bool:
+    """macOS hands function keys it has no name for over as characters in
+    the Unicode private use area (U+F700 and on): never something to type."""
+    return len(char) == 1 and 0xE000 <= ord(char) <= 0xF8FF
+
+
+def mac_pc_name(name: str, vk: int | None, base: str | None, held: set[str]) -> str | None:
+    """What a key typed on a Mac keyboard means to a PC, if that isn't
+    ``name`` itself; ``""`` for a key a PC has nothing for.
+
+    ``base`` is what the key types with no modifiers (or only Shift), and
+    ``held`` the modifier families held down. Option changes what letters
+    type (Option+D is "∂"), but on a PC that's Alt+D, a shortcut. Characters
+    a layout puts on Option on purpose (the UK "#" and "€", the German "@")
+    are kept; only letters that came out as something else go back to the
+    letter. With Cmd or Ctrl held it's a shortcut whatever the key."""
+    if vk is not None and vk in MAC_TOP_ROW:
+        return MAC_TOP_ROW[vk]
+    if vk is not None and vk in MAC_ONLY_KEYS:
+        return ""
+    if not base or len(base) != 1 or not base.isprintable() or len(name) != 1 or name == base:
+        return None
+    if held & {"cmd", "ctrl"}:
+        return base
+    if "alt" in held and base.isascii() and base.isalpha() and not name.isascii():
+        return base
+    return None
