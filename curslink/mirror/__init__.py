@@ -165,7 +165,9 @@ def apply_fit(layout: Layout, data: dict) -> tuple[float, float, float] | None:
     """Change one overlap's fit in ``layout`` right away, for fine-tuning from
     the Layout page (the ``fit {...}`` command). ``data`` names
     ``"behind"`` and ``"front"`` ("device/screen") and then either ``"x",
-    "y", "scale"``; or ``"dx", "dy"`` (move the picture, in the screen
+    "y", "scale"``; or ``"place": [x, y], "corner": [u, v]`` (that corner of
+    the screen in front, as fractions of it, clicked there, at its real size);
+    or ``"dx", "dy"`` (move the picture, in the screen
     behind's pixels) and/or ``"grow"`` (a factor); or ``"reset": true`` to
     drop the calibrated one. Returns the fit now in use, or None if ``data``
     doesn't make sense."""
@@ -180,6 +182,15 @@ def apply_fit(layout: Layout, data: dict) -> tuple[float, float, float] | None:
     try:
         if data.get("reset"):
             new = None
+        elif "place" in data:
+            # Lining up from one click: that corner of the screen in front
+            # (``corner``, fractions of it) is at ``place`` on the one behind
+            # (its pixels); its size, from the two screens' real sizes.
+            px, py = (float(v) for v in data["place"][:2])
+            u, v = (float(c) for c in data.get("corner", (0, 0))[:2])
+            sized = layout.sized_fit(behind, front)
+            k = sized.scale if sized is not None else 1.0
+            new = (px - u * front.width * k, py - v * front.height * k, k)
         elif "x" in data:
             new = (float(data["x"]), float(data["y"]), float(data["scale"]))
         else:

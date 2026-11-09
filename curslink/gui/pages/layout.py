@@ -769,9 +769,12 @@ class LayoutPage(Page):
             return {"device": item.device_id, "name": item.device_name, "rect": [x, y, w, h],
                     "screen": {**item.screen, "width": w, "height": h}}
 
-        self.calibration = FitCalibration(end(b), end(f), me, self.app.service.send)
+        # Mirror mode, linked: one click places it, the mirror does the rest.
+        one_click = bool(self.app.config().get("layout", "mirror", False)) and self.app.service.state == RUNNING
+        self.calibration = FitCalibration(end(b), end(f), me, self.app.service.send, one_click=one_click)
         self.calibration.finished.connect(lambda fit, b=behind, f=front: self.fit_calibrated(b, f, fit))
-        self._say_edge(f"Click on {b.device_name}'s screen first, then on {f.device_name}'s.")
+        self._say_edge(f"Click on {b.device_name}'s screen where {f.device_name}'s corner is." if one_click
+                       else f"Click on {b.device_name}'s screen first, then on {f.device_name}'s.")
         if not self.calibration.start():
             self.calibration = None
             self._say_edge("Couldn't find that screen on this computer.")
@@ -782,6 +785,13 @@ class LayoutPage(Page):
             self.pending_lineups = []
             self._say_edge("Not lined up: mirrors go by the screens' real sizes. "
                            "Use \u201cLine up overlap\u2026\u201d below to do it later.")
+            return
+        if isinstance(fit, dict):
+            # Placed by one click: straight on to lining it up on the mirror, from there.
+            self._say_edge("Now line up the coloured lines on the mirror: drag it, pinch or scroll to size it.")
+            self.tune_fit(behind, front, start=fit)
+            if self.calibration is not None:
+                self.calibration.finished.connect(lambda _code: self.next_lineup())
             return
         cfg = self.app.config()
         cfg.set_fit(behind, front, *fit)
@@ -798,7 +808,7 @@ class LayoutPage(Page):
             return
         self._say_edge("Overlap lined up. Mirror mode now shows exactly what the screen in front covers.")
 
-    def tune_fit(self, behind: str, front: str) -> None:
+    def tune_fit(self, behind: str, front: str, start: dict | None = None) -> None:
         """Nudge the mirror by eye while it's showing (see curslink.gui.fittune)."""
         from curslink.gui.fittune import FitTuneDialog
         from curslink.gui.service import RUNNING
@@ -827,7 +837,7 @@ class LayoutPage(Page):
                 except (KeyError, TypeError, ValueError):
                     saved = None
         dialog = FitTuneDialog({"key": behind, "name": b.device_name}, {"key": front, "name": f.device_name},
-                               saved, self.app.service.send, self)
+                               saved, self.app.service.send, self, start=start)
         dialog.saved.connect(lambda fit, b=behind, f=front: self.fit_tuned(b, f, fit))
         self.calibration = dialog
         dialog.finished.connect(lambda _code: setattr(self, "calibration", None))

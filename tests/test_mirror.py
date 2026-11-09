@@ -1462,3 +1462,40 @@ def test_parse_mirror_joined():
     raw["layout"]["mirror_joined"] = {"mac/b": 3}
     with pytest.raises(ConfigError):
         parse_layout(raw)
+
+
+def test_one_click_places_the_screen_in_front_at_its_real_size():
+    from curslink.mirror import apply_fit
+
+    lay = desk()
+    pc, lap = lay.screen("pc", "main"), lay.screen("lap", "main")
+    # Without real sizes, 1:1: its top-left corner where it was clicked.
+    assert apply_fit(lay, {"behind": "pc/main", "front": "lap/main", "place": [1500, 900], "corner": [0, 0]}) \
+        == (1500, 900, 1.0)
+    # With them, at its real size; the corner clicked stays where it was clicked.
+    lay.physical[("pc", "main")] = (pc.width / 4.0, pc.height / 4.0)      # 4 px per mm
+    lay.physical[("lap", "main")] = (lap.width / 8.0, lap.height / 8.0)   # 8 px per mm
+    x, y, k = apply_fit(lay, {"behind": "pc/main", "front": "lap/main", "place": [1500, 900], "corner": [1, 1]})
+    assert k == pytest.approx(0.5)
+    assert (x + lap.width * k, y + lap.height * k) == pytest.approx((1500, 900))
+
+
+def test_lining_up_in_mirror_mode_takes_one_click_behind(qapp):
+    from curslink.gui.fitcalib import FitCalibration
+
+    sent = []
+    behind = {"device": "mac", "name": "Mac", "rect": [0, 0, 3440, 1440],
+              "screen": {"id": "screen2", "os_x": 0, "os_y": 0, "width": 3440, "height": 1440}}
+    front = {"device": "phone", "name": "Phone", "rect": [1500, 900, 384, 832],
+             "screen": {"id": "phone", "os_x": 0, "os_y": 0, "width": 384, "height": 832}}
+    cal = FitCalibration(behind, front, "host", sent.append, one_click=True)
+    got = []
+    cal.finished.connect(got.append)
+    assert cal.start()
+    hint = json.loads(sent[1].partition(" ")[2])
+    assert list(hint["devices"]) == ["mac"]  # nothing asked of the phone
+    corner = cal.corners[0]
+    cal.on_event({"event": "picked", "device": "mac", "screen": "screen2", "x": 1600, "y": 950})
+    from curslink.gui.fitcalib import corner_at
+
+    assert got == [{"place": [1600.0, 950.0], "corner": list(corner_at(corner, 1.0, 1.0))}]

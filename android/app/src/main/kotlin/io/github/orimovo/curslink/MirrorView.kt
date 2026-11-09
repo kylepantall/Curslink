@@ -69,6 +69,38 @@ class MirrorView(context: Context) : View(context) {
     private var awayUntil = 0L
     private var awayFrom = 0L
 
+    /** Lining up: fingers on a mirror move it (one) and zoom it (two); what to send for which mirror. */
+    var onTune: (String, Map<String, Any?>) -> Unit = { _, _ -> }
+    private val fingers = io.github.orimovo.curslink.core.MirrorTuner(grab = 0.0)
+    private var touching: String? = null
+
+    /** Is a mirror being lined up (the window then takes touches)? */
+    val tuning: Boolean get() = mirrors.values.any { it.tune && it.closingAt == 0L }
+
+    @android.annotation.SuppressLint("ClickableViewAccessibility")
+    override fun onTouchEvent(e: android.view.MotionEvent): Boolean {
+        when (e.actionMasked) {
+            android.view.MotionEvent.ACTION_DOWN -> {
+                touching = mirrors.entries.firstOrNull { (_, m) ->
+                    m.tune && m.closingAt == 0L && m.rect.contains(e.x, e.y)
+                }?.key
+                fingers.touchEnd()
+            }
+            android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL -> {
+                fingers.touchEnd(); touching = null; return true
+            }
+        }
+        val id = touching ?: return true
+        val m = mirrors[id] ?: return true
+        val up = if (e.actionMasked == android.view.MotionEvent.ACTION_POINTER_UP) e.actionIndex else -1
+        val idx = (0 until e.pointerCount).filter { it != up }
+        val r = listOf(m.rect.left.toDouble(), m.rect.top.toDouble(), m.rect.width().toDouble(), m.rect.height().toDouble())
+        for (step in fingers.touch(r, DoubleArray(idx.size) { e.getX(idx[it]).toDouble() }, DoubleArray(idx.size) { e.getY(idx[it]).toDouble() })) {
+            onTune(id, step)
+        }
+        return true
+    }
+
     val showing: Boolean get() = mirrors.values.any { it.bitmap != null && it.closingAt == 0L }
 
     /** Is any mirror there to be put away by a touch? */
@@ -138,7 +170,7 @@ class MirrorView(context: Context) : View(context) {
             if (m.tune) {
                 drawGuides(canvas, guideRect(m))
                 canvas.drawRect(RectF(r.left + 1.5f * d, r.top + 1.5f * d, r.right - 1.5f * d, r.bottom - 1.5f * d), dash)
-                drawTag(canvas, m, 1f, "Line up the coloured lines · drag to move · scroll to zoom · drag a side to stretch")
+                drawTag(canvas, m, 1f, "Line up the coloured lines · drag to move · pinch or scroll to zoom · drag a side to stretch")
             } else if (age < TAG_MS + 500) drawTag(canvas, m, alpha * (if (age < TAG_MS) 1f else maxOf(0f, 1f - (age - TAG_MS) / 500f)))
         }
         gone.forEach { mirrors.remove(it)?.bitmap?.recycle() }
