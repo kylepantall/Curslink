@@ -84,7 +84,7 @@ class HostConfig:
     # Carry Isolink's floating chats to other devices ([isolink] enabled; see curslink.popups).
     isolink: bool = True
     # Mirror mode's frames a second ([layout] mirror_fps; on with [layout] mirror, see curslink.mirror).
-    mirror_fps: int = 15
+    mirror_fps: int = 30
     # Share what's copied with the agents ([host] clipboard; see curslink.clipboard).
     clipboard: bool = True
     # Copies bigger than this (MB) stay on their own device ([host] clipboard_max_mb).
@@ -477,7 +477,7 @@ def host_config(raw: dict[str, Any], base_dir: Path = Path(".")) -> HostConfig:
         pairing=pairing_config(raw, base_dir),
         files=bool(raw.get("files", {}).get("enabled", True)) if isinstance(raw.get("files", {}), dict) else True,
         isolink=_enabled(raw.get("isolink", {}), "[isolink]"),
-        mirror_fps=max(1, min(30, _int(raw.get("layout", {}), "mirror_fps", 15))),
+        mirror_fps=max(1, min(30, _int(raw.get("layout", {}), "mirror_fps", 30))),
         clipboard=bool(host.get("clipboard", True)),
         clipboard_max_mb=_clipboard_max_mb(host, "[host]"),
         hide_cursor=bool(host.get("hide_cursor", True)),

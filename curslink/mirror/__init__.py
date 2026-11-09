@@ -18,8 +18,12 @@ to the device in front (or draws itself). The device showing a frame answers
 ``mirror_ack``, which goes back to the device capturing it: it keeps at most
 :data:`IN_FLIGHT` frames unanswered, so a slow link drops frames rather than
 queueing them behind the pointer. Where the pointer on the screen behind is
-in the covered part (``[layout] mirror_pointer``, on by default), the host
-sends where (``mirror_pointer``) and the mirror draws it. An agent showing
+in the covered part, the device behind draws its real cursor (shape and
+all) into the picture it captures (capture ``cursor``), so the mirror casts
+it rather than drawing a copy. Only an older agent behind, which can't, gets
+the host's ``mirror_pointer`` and the mirror draws an arrow there. A device
+in front that takes tiles (capture ``tiles``) gets the covered area at the
+screen behind's own pixels, in tiles, only those that changed. An agent showing
 a mirror moves its own idle cursor (left wherever input last left it) to
 the side of the screen, so it doesn't sit on the mirror like a second
 pointer (:class:`CursorPark`).
@@ -41,11 +45,13 @@ from curslink.layout import Fit, Layout, Screen
 
 log = logging.getLogger(__name__)
 
-DEFAULT_FPS = 15
+DEFAULT_FPS = 30
 MAX_FPS = 30
 # Frames a capture may have on their way before one is shown; past that the
 # newest waits (replacing any older waiting one) for an answer.
 IN_FLIGHT = 2
+# Tiles (see the helper's Capture) a capture may have on their way at once.
+TILES_IN_FLIGHT = 16
 # The pointer in a mirror is sent at most this often.
 POINTER_EVERY_S = 1 / 90
 # An agent's idle cursor is moved off a mirror this long after it shows
@@ -195,19 +201,29 @@ def screen_os(screen: Screen) -> list[int]:
 
 
 def device_states(streams: list[Stream], names: dict[str, str], fps: int,
-                  tuning: tuple[str, str] | None = None, anchors: dict | None = None) -> dict[str, dict]:
+                  tuning: tuple[str, str] | None = None, anchors: dict | None = None,
+                  cast: Callable[[Stream], bool] | None = None,
+                  tiles: Callable[[Stream], bool] | None = None) -> dict[str, dict]:
     """What each device should capture and show for ``streams`` (the payload
     of its ``mirror`` frame). Devices with nothing to do aren't listed.
 
     The overlap being adjusted (``tuning``) gets alignment guides: ``guides``,
     the covered area when adjusting began (kept in ``anchors``, so the lines
     across the screen behind stay put while the mirror moves), in the screen
-    behind's OS pixels; its mirror also gets ``src``, what it shows of there."""
+    behind's OS pixels; its mirror also gets ``src``, what it shows of there.
+
+    ``cast(stream)``: the device behind draws its cursor into the picture
+    (capture ``cursor``). ``tiles(stream)``: the device in front takes it in
+    tiles at full resolution (capture ``tiles``)."""
     out: dict[str, dict] = {}
     for s in streams:
         src = out.setdefault(s.source.device_id, {"captures": [], "shows": []})
         src["captures"].append({"id": s.id, "screen": s.source.id, "os": s.os_rect(s.source),
                                 "screen_os": screen_os(s.source), "fps": fps})
+        if cast is not None and cast(s):
+            src["captures"][-1]["cursor"] = True
+        if tiles is not None and tiles(s):
+            src["captures"][-1]["tiles"] = True
         dst = out.setdefault(s.target.device_id, {"captures": [], "shows": []})
         dst["shows"].append({"id": s.id, "screen": s.target.id, "os": s.os_rect(s.target),
                              "screen_os": screen_os(s.target), "size": list(s.shown[2:]),
@@ -227,13 +243,14 @@ EMPTY = {"captures": [], "shows": []}
 
 class MirrorSource:
     """Frames a device captures, on their way to the device showing them,
-    :data:`IN_FLIGHT` at a time. The newest frame that had to wait goes as
-    soon as one is answered."""
+    :data:`IN_FLIGHT` at a time (:data:`TILES_IN_FLIGHT` tiles). The newest
+    frame that had to wait goes as soon as one is answered; a tile waits
+    behind others only for a newer copy of the same tile."""
 
     def __init__(self, send: Callable[..., None]):
         self.send = send
         self.flying: dict[str, int] = {}
-        self.waiting: dict[str, dict] = {}
+        self.waiting: dict[str, dict] = {}  # id -> {tile key (None: whole) -> frame}
 
     def reset(self, ids) -> None:
         """Only these captures are on now."""
@@ -243,15 +260,24 @@ class MirrorSource:
         for i in ids:
             self.flying.setdefault(i, 0)
 
+    @staticmethod
+    def _key(frame: dict):
+        tile = frame.get("tile")
+        return tuple(tile[:2]) if isinstance(tile, list) and len(tile) >= 2 else None
+
     def offer(self, frame: dict) -> None:
         sid = frame.get("id")
         if sid not in self.flying:
             return  # a capture that has stopped
-        if self.flying[sid] >= IN_FLIGHT:
-            older = self.waiting.get(sid)
+        key = self._key(frame)
+        if self.flying[sid] >= (IN_FLIGHT if key is None else TILES_IN_FLIGHT):
+            waiting = self.waiting.setdefault(sid, {})
+            older = waiting.get(key)
+            if key is None:
+                waiting.clear()  # a whole frame overtakes everything before it
             if older is not None and "cursor" in older and "cursor" not in frame:
                 frame = dict(frame, cursor=older["cursor"])  # the pointer's new look still has to go
-            self.waiting[sid] = frame
+            waiting[key] = frame  # a newer copy of a waiting tile keeps its place
             return
         self.flying[sid] += 1
         self.send("mirror_frame", **frame)
@@ -260,8 +286,11 @@ class MirrorSource:
         if sid not in self.flying:
             return
         self.flying[sid] = max(0, self.flying[sid] - 1)
-        frame = self.waiting.pop(sid, None)
-        if frame is not None:
+        waiting = self.waiting.get(sid)
+        if waiting:
+            frame = waiting.pop(next(iter(waiting)))
+            if not waiting:
+                self.waiting.pop(sid, None)
             self.offer(frame)
 
 
@@ -355,7 +384,9 @@ class MirrorPeer:
                     # The pointer's look behind (curslink.mirror.cursorshape): on
                     # its own, so a newer frame can't drop it on the way.
                     self.images(f"shape:{sid}", _command("mirror_shape", dict(data["cursor"], id=sid)))
-                self.images(sid, _command("mirror_image", {k: data[k] for k in ("id", "jpg", "w", "h") if k in data}))
+                tile = data.get("tile")
+                key = sid if not isinstance(tile, list) else f"{sid}@{tile[:2]}"
+                self.images(key, _command("mirror_image", {k: data[k] for k in ("id", "jpg", "w", "h", "tile") if k in data}))
             self.send("mirror_ack", id=sid)  # answered even if dropped, so the capture never stalls
         elif t == "mirror_pointer":
             if data.get("id") in self.showing:
@@ -469,7 +500,7 @@ class MirrorHost:
         self.names = {d.id: d.name for d in layout.devices.values()}
         self.streams: dict[str, Stream] = {}
         self.sent: dict[str, dict] = {}  # device -> the state it was last sent
-        self._screen: Screen | None = None
+        self._screen: tuple | None = None  # (screen mirrored, screen in use) last planned for
         self._pointer: dict[str, tuple[float, float] | None] = {}
         self._pointer_at = 0.0
         self._logged: set[str] = set()
@@ -560,8 +591,10 @@ class MirrorHost:
 
     def update(self) -> None:
         screen = self.held or self.router.screen
-        if screen != self._screen:
-            self._screen = screen
+        # Held, the pointer can be elsewhere: whether the picture casts it changes with it.
+        key = (screen, self.router.screen)
+        if key != self._screen:
+            self._screen = key
             self._plan(screen)
         self._send_pointer()
 
@@ -569,7 +602,9 @@ class MirrorHost:
         streams = streams_for(self.layout, screen, self.can)
         self.streams = {s.id: s for s in streams}
         self._pointer = {sid: p for sid, p in self._pointer.items() if sid in self.streams}
-        states = device_states(streams, self.names, self.fps, self.tuning, self._anchors)
+        states = device_states(streams, self.names, self.fps, self.tuning, self._anchors,
+                               cast=lambda s: self.router.screen == s.source and self._captures_cursor(s.source.device_id),
+                               tiles=lambda s: self._takes_tiles(s.target.device_id))
         for device in set(self.sent) | set(states):
             state = states.get(device, EMPTY)
             if self.sent.get(device, EMPTY) == state:
@@ -598,7 +633,7 @@ class MirrorHost:
             if device_id != self.local_id:
                 self.server.send(device_id, "mirror_ack", id=frame.get("id"))
             return
-        data = {k: frame[k] for k in ("id", "jpg", "w", "h", "cursor") if k in frame}
+        data = {k: frame[k] for k in ("id", "jpg", "w", "h", "cursor", "tile") if k in frame}
         self._to(stream.target.device_id, "mirror_frame", **data)
 
     def on_ack(self, device_id: str, sid) -> None:
@@ -628,7 +663,11 @@ class MirrorHost:
 
     # -- the pointer -------------------------------------------------------------
     def _captures_cursor(self, device_id: str) -> bool:
-        return device_id != self.local_id and self.server.supports(device_id, "mirror_cursor")
+        """Its captures show its real cursor (this computer's helper draws it in)."""
+        return device_id == self.local_id or self.server.supports(device_id, "mirror_cursor")
+
+    def _takes_tiles(self, device_id: str) -> bool:
+        return device_id == self.local_id or self.server.supports(device_id, "mirror_tiles")
 
     def _send_pointer(self) -> None:
         if not self.streams:
