@@ -569,14 +569,14 @@ async def test_not_a_file_and_carrying_on_cancel(new_drag):
 # ---------------------------------------------------------- the real drop
 
 
-def native(tmp_path, press=True):
+def native(tmp_path, press=True, end_watch=False):
     helper, calls = [], []
     popups = ReceivePopups(helper.append)
     receiver = FileReceiver(tmp_path / "Downloads", popups)
     drop = NativeDrop(helper.append, receiver, popups,
                       press=(lambda: calls.append("press")) if press else None,
                       release=lambda: calls.append("release"), cancel=lambda: calls.append("cancel"),
-                      root=tmp_path / "drops")
+                      root=tmp_path / "drops", end_watch=end_watch)
     return drop, receiver, helper, calls
 
 
@@ -631,6 +631,56 @@ async def test_files_that_arrive_first_drop_at_once(tmp_path):
     drop.let_go("d2", inject=True)
     await settle()
     assert calls == ["press", "release"]
+
+
+async def test_a_drag_that_misses_the_let_go_is_ended_then_saved(tmp_path, monkeypatch):
+    """0.4.46 on a Mac: the real drag sometimes kept going after the drop,
+    and every drag after it fell back to Downloads. Now the helper is told
+    to end it, then the files are saved to Downloads."""
+    import curslink.files.native as native_mod
+
+    monkeypatch.setattr(native_mod, "END_WAIT_S", 0.01)
+    monkeypatch.setattr(native_mod, "FOCUS_SETTLE_S", 0.0)
+    drop, receiver, helper, calls = native(tmp_path, end_watch=True)
+    drop.begin("s1", CARD)
+    drop.on_helper("nativedrag-ready s1")
+    drop.on_helper("nativedrag-started s1 card")
+    feed(receiver, "s1")
+    drop.let_go("s1", inject=False)                 # the real button-up went by...
+    await asyncio.sleep(0.05)                       # ...but no nativedrag-ended
+    assert "nativedrag end" in helper
+    assert "s1" not in drop.drops
+    assert (tmp_path / "Downloads" / "movie.mp4").read_bytes() == b"hi"
+    drop.on_helper("nativedrag-ended s1 copy")      # a late end changes nothing
+
+
+async def test_a_stuck_drag_is_ended_before_the_next_one(tmp_path):
+    drop, receiver, helper, calls = native(tmp_path, end_watch=True)
+    drop.begin("s2", CARD)
+    drop.on_helper("nativedrag-ready s2")
+    drop.on_helper("nativedrag-started s2 card")
+    feed(receiver, "s2")
+    drop.let_go("s2", inject=False)
+    drop.begin("s3", CARD)                          # before the watch fires
+    assert "nativedrag end" in helper
+    assert (tmp_path / "Downloads" / "movie.mp4").is_file()
+    assert set(drop.drops) == {"s3"}
+
+
+async def test_a_drag_that_ends_is_left_alone(tmp_path, monkeypatch):
+    import curslink.files.native as native_mod
+
+    monkeypatch.setattr(native_mod, "END_WAIT_S", 0.01)
+    drop, receiver, helper, calls = native(tmp_path, end_watch=True)
+    drop.begin("s4", CARD)
+    drop.on_helper("nativedrag-ready s4")
+    drop.on_helper("nativedrag-started s4 card")
+    feed(receiver, "s4")
+    drop.let_go("s4", inject=False)
+    drop.on_helper("nativedrag-ended s4 copy")
+    await asyncio.sleep(0.2)
+    assert "nativedrag end" not in helper
+    assert not (tmp_path / "Downloads" / "movie.mp4").exists()
 
 
 async def test_no_real_drag_saves_to_downloads(tmp_path):

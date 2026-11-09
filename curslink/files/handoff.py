@@ -40,6 +40,7 @@ import asyncio
 import json
 import logging
 import os
+import sys
 from typing import Callable
 
 from curslink.files.meta import Dragged, card, describe, human_size
@@ -134,7 +135,8 @@ class DragHandoff:
         popups = ReceivePopups(helper, emit)
         self.receiver = FileReceiver(None, popups)
         self.native = NativeDrop(helper, self.receiver, popups, press=native_press, release=release_held,
-                                 cancel=lambda: inject("release"), follow=follow)
+                                 cancel=lambda: inject("release"), follow=follow,
+                                 end_watch=sys.platform == "darwin")
         self.carry_out: Outgoing | None = None  # files on their way to the device carrying the drag
         router.can_drag_out = lambda device_id: server.supports(device_id, FILES_OUT_FEATURE)
         router.drag_out = self.ask_drag_out

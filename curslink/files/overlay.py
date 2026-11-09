@@ -373,6 +373,8 @@ def make_drag_source(tid: str, paths: list[str], info: dict):
             _overlay_attrs(self, click_through=False)
             self.resize(size, size)
             self.dragging = False
+            self.ended = False
+            self.tries = 0
             self.timer = QTimer(self)
             self.timer.timeout.connect(self.follow)
             self.timer.start(8)
@@ -408,9 +410,15 @@ def make_drag_source(tid: str, paths: list[str], info: dict):
             # Copy only: a file manager would otherwise move the placeholder
             # out of the temp folder while its bytes are still arriving.
             action = drag.exec(Qt.DropAction.CopyAction, Qt.DropAction.CopyAction)
+            self.ended = True
             name = {Qt.DropAction.CopyAction: "copy", Qt.DropAction.MoveAction: "move",
                     Qt.DropAction.LinkAction: "link"}.get(action, "none")
             _say(f"nativedrag-ended {tid} {name}")
+            self.close()
+
+        def appkit_ended(self, op: str) -> None:
+            self.ended = True
+            _say(f"nativedrag-ended {tid} {op}")
             self.close()
 
         def start_appkit(self) -> None:
@@ -424,16 +432,24 @@ def make_drag_source(tid: str, paths: list[str], info: dict):
                 # Without the Mac's own mouse-down the drag image would sit
                 # still (mouse-dragged events go to whoever got the down), so
                 # it carries an empty image and the card follows the pointer.
-                started = mac_begin_drag(self, paths, None,
-                                         lambda op: (_say(f"nativedrag-ended {tid} {op}"), self.close()))
+                started = mac_begin_drag(self, paths, None, self.appkit_ended)
             except Exception as exc:  # pragma: no cover - macOS only
                 _say(f"log the Mac drag didn't start: {type(exc).__name__}: {exc}")
                 started = False
             if started:
                 _say(f"nativedrag-started {tid} card")  # keep the card up
-            else:
-                self.dragging = False
-                self.timer.start(8)
+                return
+            self.dragging = False
+            self.tries += 1
+            if _MAC_DONE and self.tries <= MAC_START_TRIES:
+                # AppKit runs one drag at a time, and an earlier one that
+                # missed its let-go is still going: end it and try again.
+                _say(f"log an earlier Mac drag hasn't ended ({len(_MAC_DONE)}); ending it and trying again")
+                mac_end_drags()
+                QTimer.singleShot(MAC_RETRY_MS, self.start_appkit)
+                return
+            _say("log the Mac didn't start the drag")
+            self.timer.start(8)
 
     w = Source()
     w.show()
@@ -445,6 +461,8 @@ def make_drag_source(tid: str, paths: list[str], info: dict):
 
 
 MAC_PRESS_WAIT_MS = 400
+MAC_START_TRIES = 4
+MAC_RETRY_MS = 150
 
 
 def _win_left_down() -> bool:
@@ -519,10 +537,33 @@ def mac_begin_drag(widget, paths: list[str], pixmap, done) -> bool:
     if event is None:
         return False
     source = _mac_source_class().alloc().init()
-    _MAC_DONE[objc.pyobjc_id(source)] = done
+    key = objc.pyobjc_id(source)
+    _MAC_DONE[key] = done
     widget._mac_source = source  # keep it alive for the drag
     session = view.beginDraggingSessionWithItems_event_source_(items, event, source)
-    return session is not None
+    if session is None:
+        _MAC_DONE.pop(key, None)
+        return False
+    return True
+
+
+def mac_end_drags() -> int:
+    """macOS: end AppKit drags of ours that are still running (one that
+    missed its let-go), with a button-up of their own where the pointer is.
+    How many there were."""
+    if not _MAC_DONE or sys.platform != "darwin":
+        return 0
+    try:
+        from AppKit import NSApplication, NSEvent
+        from Foundation import NSProcessInfo
+
+        ev = NSEvent.mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure_(
+            2, NSEvent.mouseLocation(), 0, NSProcessInfo.processInfo().systemUptime(), 0, None, 0, 1, 0.0)  # 2: left up
+        if ev is not None:
+            NSApplication.sharedApplication().postEvent_atStart_(ev, True)
+    except Exception as exc:  # pragma: no cover - macOS only
+        _say(f"log couldn't end the Mac drag: {type(exc).__name__}: {exc}")
+    return len(_MAC_DONE)
 
 
 class FilesOverlay:
@@ -535,6 +576,7 @@ class FilesOverlay:
         self.card = None
         self.toast = None
         self.source = None
+        self.running: list = []  # drag sources whose drag hasn't ended yet
 
     def handle(self, line: str) -> bool:
         word, _, rest = line.strip().partition(" ")
@@ -577,8 +619,19 @@ class FilesOverlay:
                 if info is not None:
                     self.card = make_card(info)
         elif word == "nativedrag":
-            if self.source is not None and not self.source.dragging:
-                self.source.close()
+            if rest == "end":
+                n = mac_end_drags()
+                if n:
+                    _say(f"log ending {n} Mac drag(s) that missed the let-go")
+                return True
+            if self.source is not None:
+                if not self.source.dragging:
+                    self.source.close()
+                elif not self.source.ended:
+                    # Still dragging: keep its window (the drag's source)
+                    # alive until it ends, or AppKit is left without one.
+                    self.running.append(self.source)
+            self.running = [w for w in self.running if not w.ended]
             self.source = None
             if rest != "cancel":
                 info = _json(rest)
