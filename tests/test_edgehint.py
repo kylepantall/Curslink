@@ -291,3 +291,22 @@ def test_indicator_goes_dark_while_setting_up(layout):
     edges.pause(False)
     edges.update("desktop", 3839, 500)
     assert sent.last("desktop")["role"] == "from"
+
+
+def test_helper_places_the_bar_by_fractions_of_the_screen():
+    QtWidgets = pytest.importorskip("PySide6.QtWidgets")
+    from PySide6.QtGui import QGuiApplication
+
+    from curslink.edgeoverlay import EdgeOverlay
+
+    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    g = QGuiApplication.primaryScreen().geometry()
+    # Windows scaling: the layout has the screen bigger than Qt does (here 1.5x),
+    # and a plain pixel conversion would put the bar a third short.
+    ow, oh = round(g.width() * 1.5), round(g.height() * 1.5)
+    ov = EdgeOverlay(lambda x, y: (x, y))
+    ov.handle({"role": "to", "rect": [0, oh // 2, ow, oh - oh // 2], "side": "top", "a": 0, "b": ow,
+               "at": ow // 2, "near": 1, "screen": "main", "screen_os": [0, 0, ow, oh]})
+    bar = ov.bar.geometry()
+    assert abs(bar.top() - (g.y() + g.height() / 2)) <= 2  # halfway down, as in the layout
+    assert abs(bar.width() - g.width()) <= 2
