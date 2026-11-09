@@ -8,8 +8,9 @@ future Android agent (Kotlin) can speak it without any Python code.
 Host -> agent
     welcome      {device_id, features, udp}
                                        features: optional list, e.g. ["facing"]
-                                       udp (optional): {port, id, key} for moves
-                                       by UDP, see curslink.net.udp; only to an
+                                       udp (optional): {port, id, key, address}
+                                       for moves by UDP (address only when it
+                                       differs), see curslink.net.udp; only to an
                                        agent whose hello.features has "udp"
     enter        {x, y, effect}        agent now owns the pointer; warp to x, y
     leave        {effect, x, y}        host took control back; x, y (optional):

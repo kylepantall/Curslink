@@ -357,8 +357,10 @@ TLS session (`welcome.udp`), only if `hello.features` lists `"udp"`. The
 agent probes the host twice a second from its own socket, which also lets
 the replies through its firewall; the host acknowledges each probe and
 sends moves by UDP only while the agent's probes say it is hearing those
-acknowledgements. When they stop (network change, firewall), moves go back
-to TCP within about 1.6 s. Datagrams are encrypted (HMAC-SHA256 keystream)
+acknowledgements. A host on two networks at once offers the address its
+replies would come from (`welcome.udp.address`) and the agent probes that,
+since its socket drops datagrams from any other. When acknowledgements stop
+(network change, firewall), moves go back to TCP within about 1.6 s. Datagrams are encrypted (HMAC-SHA256 keystream)
 and authenticated (truncated HMAC-SHA256), with strictly increasing
 sequence numbers against replay. The agent drops any move older by `ts`
 than the newest it has seen on either channel, and ignores UDP moves while

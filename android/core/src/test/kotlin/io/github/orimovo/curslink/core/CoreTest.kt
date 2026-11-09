@@ -7,6 +7,7 @@ import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -133,5 +134,13 @@ class CoreTest {
         assertEquals("Mac", got[0].name)
         assertTrue(got[1].flash)
         assertTrue(got[2].hide)
+    }
+
+    @Test
+    fun udpOfferAddressMustBeAProbeableIpv4Literal() {
+        assertTrue(AgentUdp.probeable("192.168.68.72"))
+        for (bad in listOf("host.local", "127.0.0.1", "0.0.0.0", "224.0.0.1", "1.2.3", "1.2.3.256", "::1")) {
+            assertFalse(AgentUdp.probeable(bad), bad)
+        }
     }
 }

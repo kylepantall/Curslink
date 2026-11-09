@@ -155,3 +155,53 @@ async def test_a_picked_port_taken_for_udp_is_swapped_for_another(monkeypatch):
     await server.start()
     assert len(tries) == 2 and server.udp is not None and server.udp.port == server.port
     await server.close()
+
+
+def test_offer_names_the_address_only_when_given():
+    path = udp.HostPath("laptop")
+    assert "address" not in path.offer(24850)
+    assert path.offer(24850, "192.168.1.5")["address"] == "192.168.1.5"
+
+
+def test_reply_address_only_when_replies_leave_from_another_address(monkeypatch):
+    monkeypatch.setattr(udp, "routed_source", lambda peer: "192.168.68.72")
+    assert udp.reply_address("192.168.68.52", "192.168.68.83") == "192.168.68.72"
+    assert udp.reply_address("192.168.68.72", "192.168.68.83") is None
+    monkeypatch.setattr(udp, "routed_source", lambda peer: None)
+    assert udp.reply_address("192.168.68.52", "192.168.68.83") is None
+
+
+def test_agent_ignores_an_unusable_address():
+    key = udp.b64(os.urandom(32))
+    conn_id = udp.b64(os.urandom(8))
+    for bad in ("not an ip", "127.0.0.1", "0.0.0.0", "224.0.0.1", "::1", 7, None):
+        offer = {"port": 24850, "id": conn_id, "key": key, "address": bad}
+        assert udp.AgentUdp(offer, lambda x, y, ts: None).address is None
+    offer = {"port": 24850, "id": conn_id, "key": key, "address": "192.168.68.72"}
+    assert udp.AgentUdp(offer, lambda x, y, ts: None).address == "192.168.68.72"
+
+
+def test_agent_probes_the_offered_address_not_the_one_it_dialled():
+    async def go():
+        heard = asyncio.get_running_loop().create_future()
+
+        class Host(asyncio.DatagramProtocol):
+            def datagram_received(self, data, addr):
+                if not heard.done():
+                    heard.set_result(data)
+
+        transport, _ = await asyncio.get_running_loop().create_datagram_endpoint(Host, local_addr=("127.0.0.1", 0))
+        port = transport.get_extra_info("sockname")[1]
+        conn_id = os.urandom(8)
+        agent = udp.AgentUdp({"port": port, "id": udp.b64(conn_id), "key": udp.b64(os.urandom(32))},
+                             lambda x, y, ts: None)
+        agent.address = "127.0.0.1"  # probe_address refuses loopback, the only address a test can use
+        await agent.start("192.0.2.1")  # TEST-NET: nothing there
+        try:
+            assert udp.peek_id(await asyncio.wait_for(heard, 3)) == conn_id
+        finally:
+            agent._task.cancel()
+            agent.transport.close()
+            transport.close()
+
+    asyncio.run(go())

@@ -13,7 +13,8 @@ Setting up (all over the TLS connection first, so it's as private as that):
 * the agent lists ``"udp"`` in ``hello.features`` (only when it reached the
   host directly: through a relay there's no direct path);
 * the host answers with ``welcome.udp = {port, id, key}``: its UDP port, an
-  id for this connection and a fresh random key for it;
+  id for this connection and a fresh random key for it, plus ``address`` when
+  its replies would come from another of its addresses (see below);
 * the agent sends a PROBE datagram every ``PROBE_EVERY_S`` from its own
   socket to the host's address and that port; the host replies to each with
   an ACK. That lets the reply through the agent's firewall, and each probe
@@ -30,6 +31,13 @@ so a datagram can't be replayed, and one that arrives late is dropped.
 The agent also drops a move older (by its ``ts``) than the newest it has
 seen on either channel, so moves never step backwards.
 
+A host on two networks at once (Ethernet and Wi-Fi on one LAN, say) can be
+reached on one address while the OS routes its replies out of the other. The
+agent's socket only accepts datagrams from the address it sends to, so those
+replies would be dropped and UDP would look blocked. So the host works out
+the address it would reply from and offers it as ``address``, and the agent
+probes that one. An agent older than this ignores it and stays on TCP there.
+
 On a lossy link the network optimiser (:mod:`curslink.net.quality`) has the
 host send each move twice: the MOVE, then a few ms later a MOVE2 with the
 same sequence number and body. Whichever arrives first is taken and the
@@ -44,8 +52,10 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import ipaddress
 import logging
 import os
+import socket
 import struct
 import time
 from dataclasses import dataclass, field
@@ -132,6 +142,36 @@ def unb64(text) -> bytes | None:
         return None
 
 
+def routed_source(peer_ip: str) -> str | None:
+    """The local IPv4 address the OS would send from to reach ``peer_ip``.
+
+    Connecting a UDP socket only picks the route: nothing is sent.
+    """
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect((peer_ip, 9))
+            return sock.getsockname()[0]
+    except OSError:
+        return None
+
+
+def probe_address(value) -> str | None:
+    """``value`` if it's an IPv4 address an agent can sensibly probe, else None."""
+    if not isinstance(value, str):
+        return None
+    try:
+        ip = ipaddress.IPv4Address(value)
+    except ValueError:
+        return None
+    return None if ip.is_loopback or ip.is_unspecified or ip.is_multicast else value
+
+
+def reply_address(local_ip: str, peer_ip: str) -> str | None:
+    """The address to offer an agent, when it isn't the one the agent connected to."""
+    source = routed_source(peer_ip)
+    return probe_address(source) if source != local_ip else None
+
+
 # ------------------------------------------------------------------ host side
 @dataclass
 class HostPath:
@@ -156,8 +196,9 @@ class HostPath:
     def __post_init__(self):
         self.keys = Keys(self.key)
 
-    def offer(self, port: int) -> dict:
-        return {"port": port, "id": b64(self.conn_id), "key": b64(self.key)}
+    def offer(self, port: int, address: str | None = None) -> dict:
+        offer = {"port": port, "id": b64(self.conn_id), "key": b64(self.key)}
+        return {**offer, "address": address} if address else offer
 
     def usable(self, now: float) -> bool:
         return self.addr is not None and now - self.heard_at < ALIVE_S
@@ -268,6 +309,7 @@ class AgentUdp(asyncio.DatagramProtocol):
                 or not isinstance(port, int) or isinstance(port, bool) or not 0 < port < 65536):
             raise ValueError("the host's UDP offer is malformed")
         self.conn_id, self.keys, self.port = conn_id, Keys(key), port
+        self.address = probe_address(offer.get("address"))  # the host's reply address, if not the one we dialled
         self.on_move = on_move
         self.clock = clock
         self.transport: asyncio.DatagramTransport | None = None
@@ -285,7 +327,7 @@ class AgentUdp(asyncio.DatagramProtocol):
 
     async def start(self, host_ip: str) -> None:
         loop = asyncio.get_running_loop()
-        await loop.create_datagram_endpoint(lambda: self, remote_addr=(host_ip, self.port))
+        await loop.create_datagram_endpoint(lambda: self, remote_addr=(self.address or host_ip, self.port))
         self._task = asyncio.create_task(self._probe())
 
     def connection_made(self, transport) -> None:
