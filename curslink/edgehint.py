@@ -256,6 +256,13 @@ def find_hint(layout: Layout, device_id: str, x: float, y: float,
     return best
 
 
+def _screen_os(screen: Screen) -> list[int]:
+    """The whole screen as the layout has it, in its computer's OS pixels:
+    the overlay places ``rect`` as fractions of it (see
+    curslink.mirror.screen_os), so Windows scaling can't shift the bar."""
+    return [screen.os_x, screen.os_y, screen.width, screen.height]
+
+
 def _under_mirror(layout: Layout, here: Screen, x: float, y: float) -> bool:
     """Mirror mode: is (x, y) in the part of ``here`` that another device's
     screen covers and shows? A bar or label there would sit behind that
@@ -337,10 +344,12 @@ class EdgeIndicator:
                     "role": "from", "rect": _os_rect(hint.here, hint.rect), "side": hint.side,
                     "a": round(hint.a), "b": round(hint.b), "at": round(hint.at), "near": near,
                     "name": self.name(target), "kind": self.kind(target),
+                    "screen": hint.here.id, "screen_os": _screen_os(hint.here),
                 }
             wanted[target] = {
                 "role": "to", "rect": _os_rect(hint.target, hint.trect), "side": hint.target_side,
                 "a": round(hint.ta), "b": round(hint.tb), "at": round(hint.tat), "near": near,
+                "screen": hint.target.id, "screen_os": _screen_os(hint.target),
             }
         for device in list(self._shown):
             if device not in wanted:
