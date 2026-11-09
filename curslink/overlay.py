@@ -68,6 +68,9 @@ def screen_box(x: float, y: float) -> tuple[int, int, int, int] | None:
     return None
 
 
+ERR_LINES = 300
+
+
 class OverlayProcess:
     """Host/agent side handle to the helper process."""
 
@@ -90,12 +93,18 @@ class OverlayProcess:
                     helper_command(),
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
+                    # Its errors go in this process's log (they used to go
+                    # nowhere, so a failing helper left no trace).
+                    stderr=subprocess.PIPE,
                     text=True,
+                    errors="replace",
                     # The packaged helper is the console build: never let it
                     # open a console window of its own.
                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0,
                 )
                 threading.Thread(target=self._read, args=(self._proc,), name="curslink-overlay-out",
+                                 daemon=True).start()
+                threading.Thread(target=self._read_errors, args=(self._proc,), name="curslink-overlay-err",
                                  daemon=True).start()
                 for line in self.startup:
                     self._proc.stdin.write(line + "\n")
@@ -115,6 +124,23 @@ class OverlayProcess:
     def pid(self) -> int | None:
         proc = self._proc
         return proc.pid if proc is not None and proc.poll() is None else None
+
+    def _read_errors(self, proc: subprocess.Popen) -> None:
+        """The helper's stderr, into the log (at most ERR_LINES of it, so a
+        chatty Qt warning can't fill the log)."""
+        n = 0
+        try:
+            for line in proc.stderr:
+                line = line.rstrip()
+                if not line:
+                    continue
+                n += 1
+                if n <= ERR_LINES:
+                    log.info("overlay helper (stderr): %s", line)
+                elif n == ERR_LINES + 1:
+                    log.info("overlay helper (stderr): more lines left out")
+        except (OSError, ValueError):
+            pass
 
     def _read(self, proc: subprocess.Popen) -> None:
         try:

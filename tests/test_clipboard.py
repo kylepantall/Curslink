@@ -199,7 +199,8 @@ def test_helper_reports_copies_but_not_its_own(qapp, capsys, tmp_path):
     img.save(str(path), "PNG")
     helper.handle("clipset " + json.dumps({"kind": "image", "path": str(path)}))
     helper.read()
-    assert capsys.readouterr().out == ""
+    # Logged, not reported as a copy made here.
+    assert capsys.readouterr().out == "log clipboard: image 4x3 ready to paste\n"
 
     helper.set_at = 0  # long after: copying again is news
     board.setText("again")
@@ -217,6 +218,18 @@ def test_private_copies_are_not_shared():
     assert is_private(['application/x-qt-mime-type-name;value="org.nspasteboard.ConcealedType"'])
     assert is_private(['application/x-qt-windows-mime;value="ExcludeClipboardContentFromMonitorProcessing"'])
     assert not is_private(["text/plain"])
+
+
+def test_windows_yes_no_markers_read_their_value():
+    """Snipping Tool and others write CanIncludeInClipboardHistory = 1 (yes):
+    that's not private. Only 0 is."""
+    from curslink.clipboard.helper import is_private, private_marker
+
+    fmt = 'application/x-qt-windows-mime;value="CanIncludeInClipboardHistory"'
+    assert not is_private(["image/png", fmt], lambda f: (1).to_bytes(4, "little"))
+    assert private_marker([fmt], lambda f: (0).to_bytes(4, "little")) == "CanIncludeInClipboardHistory"
+    assert is_private([fmt])               # value unknown: careful
+    assert is_private([fmt], lambda f: b"")
 
 
 async def test_both_ways_over_a_real_link(tmp_path):

@@ -49,6 +49,7 @@ import asyncio
 import json
 import logging
 import os
+import sys
 from dataclasses import dataclass
 from typing import Callable
 
@@ -159,7 +160,8 @@ class DragHandoff:
         popups = ReceivePopups(helper, emit)
         self.receiver = FileReceiver(None, popups)
         self.native = NativeDrop(helper, self.receiver, popups, press=native_press, release=release_held,
-                                 cancel=lambda: inject("release"), follow=follow)
+                                 cancel=lambda: inject("release"), follow=follow,
+                                 end_watch=sys.platform == "darwin")
         self.carry_id: str | None = None      # the transfer id the carrying device knows the drag by
         router.can_drag_out = lambda device_id: server.supports(device_id, FILES_OUT_FEATURE)
         router.takes_drag = lambda device_id: server.supports(device_id, FILES_FEATURE)

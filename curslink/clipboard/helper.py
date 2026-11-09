@@ -48,13 +48,36 @@ PRIVATE_MARKERS = (
     "CanIncludeInClipboardHistory",
     "x-kde-passwordManagerHint",
 )
+# Windows formats that carry a DWORD saying yes or no: only 0 means "keep this
+# out of clipboard history / the cloud". Snipping Tool and others write 1 (yes,
+# share it), so their mere presence doesn't make a copy private.
+YES_NO_MARKERS = ("CanIncludeInClipboardHistory",)
 OWN_CHANGE_S = 1.5
 SETTLE_MS = 150
 MAC_POLL_MS = 300
 
 
-def is_private(formats) -> bool:
-    return any(marker in str(f) for f in formats for marker in PRIVATE_MARKERS)
+def private_marker(formats, read=None) -> str | None:
+    """The marker that makes a copy private (password managers), or None.
+    ``read(format)`` gives a format's bytes, for the yes/no markers; without
+    it they count as private."""
+    for f in formats:
+        for marker in PRIVATE_MARKERS:
+            if marker not in str(f):
+                continue
+            if marker in YES_NO_MARKERS and read is not None:
+                try:
+                    raw = bytes(read(f))
+                except Exception:  # pragma: no cover - a platform clipboard quirk
+                    raw = b""
+                if len(raw) >= 4 and int.from_bytes(raw[:4], "little") != 0:
+                    continue  # "yes, this may be shared"
+            return marker
+    return None
+
+
+def is_private(formats, read=None) -> bool:
+    return private_marker(formats, read) is not None
 
 
 def text_sig(text: str) -> tuple[str, str]:
@@ -172,8 +195,9 @@ class ClipboardHelper:
         mime = self.clipboard.mimeData()
         if mime is None:
             return None, None
-        if is_private(mime.formats()):
-            return ("private", ""), None
+        marker = private_marker(mime.formats(), lambda f: mime.data(f).data())
+        if marker is not None:
+            return ("private", marker), None
         if mime.hasUrls():
             paths = [u.toLocalFile() for u in mime.urls() if u.isLocalFile()]
             paths = [p for p in paths if p and os.path.exists(p)]
@@ -201,11 +225,15 @@ class ClipboardHelper:
             return
         own = time.monotonic() - self.set_at < OWN_CHANGE_S and sig[0] == self.set_kind
         self.last = sig
+        if sig[0] == "private":
+            _say(f"log clipboard: not sharing a copy marked private ({sig[1]})")
+            return
         if own or data is None:
             return
         if data["kind"] == "image":
             path = self._image_path()
             if not data.pop("image").save(path, "PNG"):
+                _say("log clipboard: couldn't save the copied image to share it")
                 return
             data["path"] = path
         _say("clip " + json.dumps(data, ensure_ascii=True, separators=(",", ":")))
@@ -227,9 +255,11 @@ class ClipboardHelper:
 
             image = QImage(data["path"])
             if image.isNull():
+                _say(f"log clipboard: couldn't read the image to paste ({data['path']})")
                 return
             self._mark(image_sig(image))
             self.clipboard.setImage(image)
+            _say(f"log clipboard: image {image.width()}x{image.height()} ready to paste")
         elif kind == "files" and isinstance(data.get("paths"), list):
             from PySide6.QtCore import QMimeData, QUrl
 
@@ -238,6 +268,31 @@ class ClipboardHelper:
             mime.setUrls([QUrl.fromLocalFile(p) for p in paths])
             self._mark(files_sig(paths))
             self.clipboard.setMimeData(mime)
+        else:
+            return
+        self._render_now()
+
+    def _render_now(self) -> None:
+        """Windows: Qt only promises what it put on the clipboard and draws
+        it when an app pastes, by calling back into this helper. Hand it all
+        to the system now, so a paste works while the helper is busy, and
+        after it has restarted or gone."""
+        if sys.platform != "win32" or self.clipboard is None:
+            return
+        from PySide6.QtGui import QGuiApplication
+
+        # Only Qt's own Windows clipboard puts an OLE data object there (not
+        # e.g. the offscreen platform the tests use), and only if it's ours.
+        if QGuiApplication.platformName() != "windows" or not self.clipboard.ownsClipboard():
+            return
+        try:
+            import ctypes
+
+            hr = ctypes.windll.ole32.OleFlushClipboard()
+        except (OSError, AttributeError):
+            return
+        if hr != 0:
+            _say(f"log clipboard: Windows didn't take the clipboard's contents (0x{hr & 0xFFFFFFFF:08x})")
 
     def flush(self) -> None:
         """The helper is leaving: on Windows, hand what we put on the

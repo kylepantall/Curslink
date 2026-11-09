@@ -45,6 +45,12 @@ START_TIMEOUT_S = 1.5   # the helper must have started the drag by then
 FOLLOW_EVERY_S = 0.08   # how often the window under a held drag is checked
 FOCUS_SETTLE_S = 0.15   # after bringing a window forward at the drop, before letting go
 KEEP_DROPS_S = 24 * 3600
+# A Mac's drag sometimes misses the let-go (0.4.46: dropping into some apps
+# left it running until a later click, and AppKit refuses a new drag while
+# one is running, so every drag after it fell back to Downloads). If it
+# hasn't ended this long after the drop, the helper is told to end it; if
+# that doesn't either, the files are saved to Downloads.
+END_WAIT_S = 2.0
 
 
 def staging_root() -> Path:
@@ -94,6 +100,7 @@ class NativeDrop:
         folder: Path | None = None,
         root: Path | None = None,
         follow=None,
+        end_watch: bool = False,
     ):
         """``press()``: the left button down here, under the pointer (None:
         no real drags on this device). ``release()``: let it go (a drop).
@@ -102,7 +109,8 @@ class NativeDrop:
         real drag (Downloads by default). ``follow``: an object whose
         ``tick(now)`` runs every FOLLOW_EVERY_S while a real drag is held and
         ``reset()`` when one starts (the Mac brings the window under the
-        pointer forward; see curslink.files.focus)."""
+        pointer forward; see curslink.files.focus). ``end_watch``: make sure
+        a real drag ends after the drop (see END_WAIT_S; the Mac)."""
         self.helper = helper
         self.receiver = receiver
         self.popups = popups
@@ -113,6 +121,7 @@ class NativeDrop:
         self.root = root or staging_root()
         self.drops: dict[str, Drop] = {}
         self.follow = follow
+        self.end_watch = end_watch
         self._following: asyncio.TimerHandle | None = None
         receiver_event = receiver.on_event
 
@@ -129,6 +138,12 @@ class NativeDrop:
     def begin(self, tid: str, card: dict) -> None:
         """A file drag arrived here: lay out its files and start a real drag."""
         self.end_all()
+        stale = [d for d in self.drops.values() if d.phase == "dragging" and d.released] if self.end_watch else []
+        for old in stale:
+            # Let go of, but its drag never ended: it would stop this one starting.
+            log.warning("drop: the last real drag still hasn't ended; ending it before this one")
+            trace("stale-drag", id=old.id)
+            self._give_up(old.id, now=True)
         names = [i for i in card.get("items") or [] if isinstance(i, dict)] or \
             [{"name": card.get("name") or "file", "dir": bool(card.get("dir"))}]
         staging = self.root / tid
@@ -298,6 +313,7 @@ class NativeDrop:
         if drop.phase == "dragging":
             if inject or drop.waited or drop.held:
                 self._drop_here()  # the OS drops the files where the pointer is
+            self._watch_end(drop.id)
             if drop.waited:
                 self.helper("toast " + json.dumps({"id": drop.id, "state": "done", "count": len(drop.tops),
                                                "total": drop.card.get("size", 0), "card": drop.card,
@@ -312,6 +328,41 @@ class NativeDrop:
         self.helper("toast " + json.dumps({"id": drop.id, "state": "done", "count": len(saved),
                                            "total": drop.card.get("size", 0), "card": drop.card,
                                            "folder": str(self.folder)}, separators=(",", ":")))
+
+    def _watch_end(self, tid: str) -> None:
+        if not self.end_watch:
+            return
+        try:
+            asyncio.get_running_loop().call_later(END_WAIT_S + FOCUS_SETTLE_S, self._check_ended, tid)
+        except RuntimeError:  # no loop (tests calling directly)
+            pass
+
+    def _check_ended(self, tid: str) -> None:
+        drop = self.drops.get(tid)
+        if drop is None or drop.phase != "dragging":
+            return
+        log.warning("drop: the real drag didn't end when you let go; ending it")
+        trace("drag-not-ended", id=tid)
+        self.helper("nativedrag end")
+        try:
+            asyncio.get_running_loop().call_later(END_WAIT_S, self._give_up, tid)
+        except RuntimeError:
+            pass
+
+    def _give_up(self, tid: str, now: bool = False) -> None:
+        """A real drag that won't end: save its files to Downloads (so they
+        land somewhere, and a late drop can't put them in some app later)."""
+        drop = self.drops.get(tid)
+        if drop is None or drop.phase != "dragging":
+            return
+        if not now:
+            log.warning("drop: the real drag still hasn't ended; saving the files to %s instead", self.folder)
+        self.helper("nativedrag end")
+        drop.phase = "fallback"
+        if drop.done:
+            self._finish(drop, False)
+        else:
+            drop.released = True  # saved when the rest arrives
 
     def _failed(self, tid: str) -> None:
         drop = self.drops.pop(tid, None)
