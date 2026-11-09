@@ -122,6 +122,14 @@ confirm_with_agents = true   # agents running their own camera ([agent.gaze])
 # mirror_pointer = true
 # mirror_fps = 30
 #
+# A screen behind can stay mirrored while the pointer is on any screen
+# joined to it edge to edge (or along a row of them), not only on it:
+# "all" of them, or just the ones listed. The mirror still shows only the
+# covered part. Settings > Overlapping screens sets this.
+# [layout.mirror_joined]
+# "kyles-mac/screen1" = "all"
+# "kyles-mac/screen2" = ["kyles-mac/screen3"]
+#
 # Screens are laid out in their own pixels, which differ in size between
 # monitors, so the layout only roughly says what a screen in front covers.
 # "Line up overlap…" on the Layout page (a click on each screen: where a
