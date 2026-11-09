@@ -47,7 +47,10 @@ Host -> agent
                                        device should capture and show now (all of
                                        it, each time); only to an agent whose
                                        hello.features has "mirror"
-    mirror_frame {id, jpg, w, h}       a captured frame for a mirror it shows
+    mirror_frame {id, jpg, w, h, cursor?}
+                                       a captured frame for a mirror it shows;
+                                       cursor: the pointer's look behind when it
+                                       changed (see curslink.mirror.cursorshape)
     mirror_pointer {id, x, y} | {id, hide}
                                        where the pointer is in a mirror it shows
                                        (0..1 across and down), or none
@@ -81,7 +84,8 @@ Agent -> host
                                        what this device's Isolink says (only to a
                                        host whose welcome.features has "popups")
     popup_result {chat, ok}            whether a popup_in chat opened here
-    mirror_frame {id, jpg, w, h}       a frame of a mirror it captures
+    mirror_frame {id, jpg, w, h, cursor?}
+                                       a frame of a mirror it captures
     mirror_tune {id, mx, my} | {id, grow, ax, ay}
                                        the mirror being adjusted was dragged or zoomed
     mirror_ack   {id}                  a frame of a mirror it shows was shown

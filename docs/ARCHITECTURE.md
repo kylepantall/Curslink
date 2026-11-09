@@ -253,6 +253,14 @@ front of it shows the part it covers, live (`curslink.mirror`).
   capture) and the mirror draws the same ones mapped through `src`; it's
   lined up when they carry on unbroken past the bezel. After the click
   line-up in mirror mode the Layout page goes straight on to this.
+- The pointer in a mirror has its real look: the capture reads the
+  system cursor (`curslink.mirror.cursorshape`: `NSCursor
+  currentSystemCursor` on macOS, `GetCursorInfo` on Windows) while the
+  pointer is over or near the captured area, and when it changes, sends it
+  with the next frame as `cursor` (PNG, size and hot spot in logical
+  pixels, and the captured width that scales it). The mirror draws it at
+  the hot spot instead of its own arrow (kept for Linux, phones and
+  anything it can't read).
 - An agent's own cursor stays wherever input last left it, which can be
   right on a mirror that comes up there (a second pointer next to the one
   the mirror draws). `CursorPark` moves it to the middle of that screen's
