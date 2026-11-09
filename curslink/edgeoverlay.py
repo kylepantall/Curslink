@@ -131,7 +131,9 @@ class Bar(_Overlay):
         self.colour = QColor("#007AFF")
 
     def paintEvent(self, _e) -> None:  # noqa: N802
-        strength = min(1.0, self.level * (0.9 + 0.5 * self.boost))
+        # Flaring on a crossing it goes from full to nothing in a straight
+        # line, like the mirror's fade (window opacity, linear).
+        strength = min(1.0, self.level) if self.boost > 0 else 0.9 * self.level
         if strength <= 0.003:
             return
         p = QPainter(self)
@@ -567,7 +569,7 @@ class EdgeOverlay:
                 self.level = 0.0
             else:
                 boost = 1 - t
-                self.level = 1 - t * t
+                self.level = 1 - t  # linear, as the mirror fades
         else:
             # Linear, at a whole fade per FADE_S.
             step = max(0.0, min(0.1, now - self._ticked)) / FADE_S

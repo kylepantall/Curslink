@@ -46,6 +46,22 @@ def helper_command() -> list[str]:
     return [sys.executable, "-m", "curslink.overlay"]
 
 
+def screen_box(x: float, y: float) -> tuple[int, int, int, int] | None:
+    """The screen at OS position (x, y) as this process sees it (the same
+    numbers the layout has): the helper places the animation as a fraction
+    of it, since with Windows scaling its own pixels differ (see
+    curslink.mirror.helper.spec_to_logical)."""
+    try:
+        from curslink.net.client import detect_screens
+
+        for s in detect_screens():
+            if s["x"] <= x < s["x"] + s["width"] and s["y"] <= y < s["y"] + s["height"]:
+                return s["x"], s["y"], s["width"], s["height"]
+    except Exception:  # pragma: no cover - whatever screeninfo does
+        log.debug("couldn't list the screens", exc_info=True)
+    return None
+
+
 class OverlayProcess:
     """Host/agent side handle to the helper process."""
 
@@ -109,7 +125,9 @@ class OverlayProcess:
     def show(self, effect: str, x: int, y: int) -> None:
         if effect not in ("pop", "blink"):
             return
-        self.command(f"{effect} {int(x)} {int(y)}")
+        box = screen_box(x, y)
+        extra = "" if box is None else " " + " ".join(str(int(v)) for v in box)
+        self.command(f"{effect} {int(x)} {int(y)}{extra}")
 
     def command(self, line: str) -> None:
         """One command line for the helper (see :mod:`curslink.files.overlay`)."""
@@ -260,9 +278,10 @@ def _mac_accessory() -> None:
         log.debug("couldn't make the overlay helper an accessory app", exc_info=True)
 
 
-def make_effect_widget(effect: str, x: int, y: int):
+def make_effect_widget(effect: str, x: int, y: int, box: tuple[int, int, int, int] | None = None):
     """One pop or blink at OS position (x, y), already showing; it closes
-    itself when done."""
+    itself when done. ``box``: the screen there, in the same OS pixels (see
+    :func:`screen_box`), to place it by fractions of that screen."""
     from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, QTimer
     from PySide6.QtGui import QColor, QGuiApplication, QPainter, QPen, QRadialGradient
     from PySide6.QtWidgets import QWidget
@@ -271,7 +290,15 @@ def make_effect_widget(effect: str, x: int, y: int):
     for sc in QGuiApplication.screens():
         g = sc.geometry()
         screens.append((g.x(), g.y(), g.width(), g.height(), sc.devicePixelRatio() or 1.0))
-    lx, ly = native_to_logical(screens, x, y, sys.platform == "win32")
+    placed = None
+    if box is not None:
+        from curslink.mirror.helper import spec_to_logical
+
+        placed = spec_to_logical({"os": [x, y, 1, 1], "screen_os": list(box), "screen": ""})
+    if placed is not None:
+        lx, ly = placed[0], placed[1]
+    else:
+        lx, ly = native_to_logical(screens, x, y, sys.platform == "win32")
     left, top, width, height, cx, cy = effect_box(screens, lx, ly)
     screen = QGuiApplication.screenAt(QPoint(round(lx), round(ly)))
 
@@ -402,9 +429,10 @@ def _run_qt_helper() -> None:
                 app.quit()
                 return
             parts = line.split()
-            if len(parts) == 3 and parts[0] in ("pop", "blink"):
+            if len(parts) in (3, 7) and parts[0] in ("pop", "blink"):
                 try:
-                    w = make_effect_widget(parts[0], int(parts[1]), int(parts[2]))
+                    box = tuple(int(v) for v in parts[3:7]) if len(parts) == 7 else None
+                    w = make_effect_widget(parts[0], int(parts[1]), int(parts[2]), box)
                 except ValueError:
                     log.debug("bad overlay command %r", line)
                     continue
@@ -475,7 +503,7 @@ def _run_tk_helper() -> None:
                 root.destroy()
                 return
             parts = line.split()
-            if len(parts) == 3 and parts[0] in ("pop", "blink"):
+            if len(parts) in (3, 7) and parts[0] in ("pop", "blink"):
                 try:
                     _spawn(root, parts[0], int(parts[1]), int(parts[2]))
                 except (ValueError, tk.TclError):
