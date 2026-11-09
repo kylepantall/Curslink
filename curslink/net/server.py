@@ -12,7 +12,7 @@ from typing import Callable
 
 from curslink.net import quality
 from curslink.net.framing import STREAM_LIMIT, read_message
-from curslink.net.udp import HostPath, HostUdp
+from curslink.net.udp import HostPath, HostUdp, reply_address
 from curslink.protocol import HOST_FEATURES, NETSTATS_FEATURE, UDP_FEATURE, Message, ProtocolError, encode
 
 log = logging.getLogger(__name__)
@@ -303,7 +303,8 @@ class HostServer:
             # on a datagram-era frame they don't know (they never get one).
             if self.udp is not None and UDP_FEATURE in conn.features:
                 conn.udp = self.udp.add(device_id)
-                welcome["udp"] = conn.udp.offer(self.udp.port)
+                local = writer.get_extra_info("sockname")
+                welcome["udp"] = conn.udp.offer(self.udp.port, reply_address(local[0], peer[0]) if local and peer else None)
             writer.write(encode("welcome", **welcome))
             log.info("agent %s (%s, %s) connected from %s", device_id, conn.name, conn.platform, peer)
             self.on_connect(conn)
