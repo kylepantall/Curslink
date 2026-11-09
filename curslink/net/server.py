@@ -117,6 +117,10 @@ class HostServer:
         # (device_id, hello.auth, TLS channel binding) -> allowed? See security.HelloVerifier.
         self.verify_hello = verify_hello
         self.connections: dict[str, AgentConnection] = {}
+        # Agents that said goodbye because they were paused there (a phone
+        # taking a call, say), rather than dropping off: device_id -> True.
+        # Cleared when they connect again.
+        self.paused: set[str] = set()
         self._server: asyncio.base_events.Server | None = None
         self.udp_enabled = udp
         self.udp: HostUdp | None = None
@@ -300,6 +304,7 @@ class HostServer:
             if self.optimise:
                 quality.mark_low_latency(quality.transport_socket(writer))
             self.connections[device_id] = conn
+            self.paused.discard(device_id)
             welcome = {"device_id": device_id, "features": list(self.features)}
             # Only for an agent that asked: older ones would drop the connection
             # on a datagram-era frame they don't know (they never get one).
@@ -349,6 +354,9 @@ class HostServer:
 
     def _on_message(self, conn: AgentConnection, msg: Message) -> None:
         if msg.t == "bye":
+            if msg.get("reason") == "paused":
+                self.paused.add(conn.device_id)
+                log.info("agent %s was paused there", conn.device_id)
             conn.writer.close()
         elif msg.t == "pong":
             ts = msg.get("ts")

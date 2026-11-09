@@ -78,7 +78,9 @@ class Hello(
     val screenMm: List<Map<String, Any>> = emptyList(),
 )
 
-enum class LinkState { WAITING, CONNECTING, CONNECTED }
+/** PAUSED: the person paused Curslink on this device (or a call did), so it
+ *  stays off the host until resumed. */
+enum class LinkState { WAITING, CONNECTING, CONNECTED, PAUSED }
 
 /**
  * Applies the host's frames, like curslink.net.client.AgentSession: keeps
@@ -157,6 +159,15 @@ class AgentSession(
         return null
     }
 
+    /** The connection ended: let go of everything and put the pointer (and
+     *  any edge light) away, since the host can't say leave any more. */
+    fun dropped() {
+        val was = active
+        releaseAll()
+        if (was) runCatching { handler.leave("none", null, null) }
+        runCatching { handler.edge(EdgeCommand(hide = true)) }
+    }
+
     fun releaseAll() {
         active = false
         val (k, b) = synchronized(this) {
@@ -193,6 +204,12 @@ class AgentLink(
     @Volatile private var udp: AgentUdp? = null
     @Volatile var via: String = ""
         private set
+    @Volatile private var io: FrameIO? = null
+
+    /** Paused: off the host (it can't send the pointer, mirrors or the edge
+     *  light here) until resumed. Set with [setPaused]. */
+    @Volatile var paused = false
+        private set
     private var thread: Thread? = null
     private val wake = Object()
 
@@ -210,6 +227,29 @@ class AgentLink(
         thread?.interrupt()
     }
 
+    /** Pause (say goodbye to the host and stay away) or resume (connect now). */
+    fun setPaused(on: Boolean, why: String = "paused") {
+        if (on == paused) return
+        paused = on
+        if (on) {
+            log("pausing ($why)")
+            val f = io ?: return reconnect()
+            val s = socket
+            // Off the caller's thread (Android's main thread can't touch the
+            // network). The host hangs up on a bye; closing first could cut it
+            // off unread, so close only if it hasn't in a moment.
+            Thread({
+                if (runCatching { f.send("bye", jsonOf("reason" to "paused")) }.isSuccess) {
+                    runCatching { Thread.sleep(1500) }
+                }
+                if (paused && socket === s) reconnect()
+            }, "curslink-bye").apply { isDaemon = true; start() }
+            return
+        }
+        log("resuming")
+        reconnect()
+    }
+
     /** Drop the current connection (or skip the wait) and try again now:
      *  the network changed, the screen rotated, pairing changed. */
     fun reconnect() {
@@ -224,6 +264,12 @@ class AgentLink(
     private fun runForever() {
         var backoff = 500L
         while (running) {
+            if (paused) {
+                onState(LinkState.PAUSED, "")
+                synchronized(wake) { if (running && paused) wake.wait() }
+                backoff = 500L
+                continue
+            }
             val p = pairing()
             if (p == null) {
                 onState(LinkState.WAITING, "not paired")
@@ -234,11 +280,13 @@ class AgentLink(
                 onState(LinkState.CONNECTING, "")
                 runOnce(p)
                 backoff = 500L
+                if (paused) continue
                 log("disconnected from host; reconnecting")
             } catch (e: InterruptedException) {
                 break
             } catch (e: Exception) {
                 if (!running) break
+                if (paused) continue
                 log("host unavailable: ${e.message ?: e.javaClass.simpleName}")
                 onState(LinkState.WAITING, e.message ?: e.javaClass.simpleName)
             }
@@ -286,12 +334,13 @@ class AgentLink(
         val opened = open(p)
         val s = opened.socket
         socket = s
-        if (!running) { s.close(); return }
+        if (!running || paused) { s.close(); return }
         session.newConnection()
         try {
             s.soTimeout = (pingSeconds * 4 * 1000).toInt().coerceAtLeast(10_000)
             val tls = Tls.connect(s.getInputStream(), s.getOutputStream(), p.myId, p.key)
             val io = FrameIO(tls.input, tls.output)
+            this.io = io
             val me = hello()
             val features = listOf("edge") + (if (opened.direct) listOf("udp") else emptyList()) +
                 // mirror_cursor: our captures show the pointer already (it's drawn on the screen).
@@ -324,8 +373,12 @@ class AgentLink(
             }
             session.mirror?.send = { t, data -> io.send(t, data) }
             session.clipboard?.send = { t, data -> io.send(t, data) }
+            if (paused) {  // paused while we were saying hello
+                runCatching { io.send("bye", jsonOf("reason" to "paused")) }
+                return
+            }
             onState(LinkState.CONNECTED, via)
-            while (running) {
+            while (running && !paused) {
                 val f = try {
                     io.read()
                 } catch (e: SocketTimeoutException) {
@@ -334,11 +387,12 @@ class AgentLink(
                 session.handle(f)?.let { (t, data) -> io.send(t, data) }
             }
         } finally {
+            io = null
             udp?.close()
             udp = null
             socket = null
             runCatching { s.close() }
-            session.releaseAll()
+            session.dropped()
             session.mirror?.let { m -> m.send = { _, _ -> }; m.reset() }
             session.clipboard?.reset()
         }

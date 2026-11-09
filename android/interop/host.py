@@ -8,6 +8,7 @@ copy of it. Talks to the test over stdout, one line per event:
     PAIRED <device id> <json>      the phone paired (json: what it said about itself)
     CONNECTED <device id> <json>   it connected (json: hello's screens, features)
     SENT <json>                    the input below went out (json: {"udp": bool})
+    GONE <device id> <paused>      it disconnected (paused: it said bye, paused)
 
 On each connection it sends: enter, a move, a left click, a scroll, "a"
 pressed and released, shift pressed (never released: the agent must let go
@@ -68,7 +69,11 @@ async def main() -> None:
         server.send(d, "leave", effect="blink", x=30, y=40)
         say("SENT", json.dumps({"udp": udp}))
 
-    server = HostServer(known, server_context(None, keys.get), on_connect=on_connect, host="127.0.0.1", port=0,
+    def on_disconnect(device_id: str) -> None:
+        say("GONE", device_id, json.dumps(device_id in server.paused))
+
+    server = HostServer(known, server_context(None, keys.get), on_connect=on_connect, on_disconnect=on_disconnect,
+                        host="127.0.0.1", port=0,
                         verify_hello=HelloVerifier(None, keys.get))
     await server.start()
     relay = RelayServer(RELAY_KEY, host="127.0.0.1", port=0)

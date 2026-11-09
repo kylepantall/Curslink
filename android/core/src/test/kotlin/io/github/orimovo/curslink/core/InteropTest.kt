@@ -88,6 +88,29 @@ class InteropTest {
             run(pairing, wantUdp = true)
             run(pairing.copy(addresses = emptyList()), wantUdp = false)  // through the relay only
 
+            // Paused (taking a call): the phone says goodbye, the host knows it
+            // was paused, and the phone stays away until resumed.
+            val states = LinkedBlockingQueue<LinkState>()
+            val pausing = AgentLink(handler, { pairing }, { Hello("Test Pixel", "Android 15", screens) },
+                onState = { s, _ -> states.put(s) }, log = { println("link: $it") })
+            pausing.start()
+            try {
+                next("CONNECTED")
+                pausing.setPaused(true)
+                assertEquals("pixel-test true", next("GONE"))
+                while (true) {
+                    val s = states.poll(10, TimeUnit.SECONDS) ?: fail("never paused")
+                    if (s == LinkState.PAUSED) break
+                }
+                Thread.sleep(1500)
+                assertTrue(lines.none { it.startsWith("CONNECTED ") }, "connected again while paused")
+                pausing.setPaused(false)
+                next("CONNECTED")
+            } finally {
+                pausing.stop()
+            }
+            assertEquals("pixel-test false", next("GONE"))
+
             // Known by key but not in the host's devices: the phone is told why, not just cut off.
             val why = LinkedBlockingQueue<String>()
             val stranger = AgentLink(handler, { pairing.copy(myId = "pixel-stranger", key = ByteArray(32) { 's'.code.toByte() }, relay = "") },

@@ -153,4 +153,25 @@ class CoreTest {
             assertFalse(AgentUdp.probeable(bad), bad)
         }
     }
+
+    @Test
+    fun aDroppedLinkPutsThePointerAwayAndLetsGo() {
+        val events = mutableListOf<String>()
+        val session = AgentSession(object : InputHandler {
+            override fun enter(x: Double, y: Double, effect: String) { events += "enter" }
+            override fun leave(effect: String, x: Double?, y: Double?) { events += "leave $effect" }
+            override fun move(x: Double, y: Double) {}
+            override fun button(name: String, pressed: Boolean) { events += "button $name $pressed" }
+            override fun scroll(dx: Double, dy: Double) {}
+            override fun key(key: String, pressed: Boolean) { events += "key $key $pressed" }
+            override fun edge(cmd: EdgeCommand) { events += if (cmd.hide) "edge hide" else "edge" }
+        })
+        session.handle(Frames.decode("""{"t":"enter","x":1,"y":2}"""))
+        session.handle(Frames.decode("""{"t":"key","key":"a","pressed":true}"""))
+        session.dropped()
+        assertEquals(listOf("enter", "key a true", "key a false", "leave none", "edge hide"), events)
+        events.clear()
+        session.dropped()  // not here any more: only the edge light is put away
+        assertEquals(listOf("edge hide"), events)
+    }
 }

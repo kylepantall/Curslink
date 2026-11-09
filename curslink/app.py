@@ -309,7 +309,7 @@ async def run_host(cfg: HostConfig) -> None:
     def agent_disconnected(device_id: str) -> None:
         edges.forget(device_id)
         router.on_disconnect(device_id)
-        events.emit("agent", device_id=device_id, connected=False)
+        events.emit("agent", device_id=device_id, connected=False, paused=device_id in server.paused)
 
     server.on_connect = agent_connected
     server.on_disconnect = agent_disconnected
