@@ -51,6 +51,12 @@ def screen_box(x: float, y: float) -> tuple[int, int, int, int] | None:
     numbers the layout has): the helper places the animation as a fraction
     of it, since with Windows scaling its own pixels differ (see
     curslink.mirror.helper.spec_to_logical)."""
+    if sys.platform != "win32":
+        # Only Windows' scaling makes this process's pixels differ from the
+        # helper's. (And on macOS screeninfo gives each screen's y from the
+        # bottom, as AppKit does, which put the animation on the Mac's other
+        # screens hundreds of pixels off.)
+        return None
     try:
         from curslink.net.client import detect_screens
 
@@ -122,10 +128,13 @@ class OverlayProcess:
         except (OSError, ValueError):
             pass
 
-    def show(self, effect: str, x: int, y: int) -> None:
+    def show(self, effect: str, x: int, y: int, box: tuple[int, int, int, int] | None = None) -> None:
+        """``box``: the screen at (x, y) in the same OS pixels, if the caller
+        knows it (the host's layout does); else this process looks it up."""
         if effect not in ("pop", "blink"):
             return
-        box = screen_box(x, y)
+        if box is None:
+            box = screen_box(x, y)
         extra = "" if box is None else " " + " ".join(str(int(v)) for v in box)
         self.command(f"{effect} {int(x)} {int(y)}{extra}")
 
