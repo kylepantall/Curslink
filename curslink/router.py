@@ -443,14 +443,13 @@ class Router:
         self._last_pos[old] = left_at
         self._screen_pos[(self.screen.device_id, self.screen.id)] = left_at
         effect = "none" if self.setup_quiet else self.settings.effect
-        # Where the pointer leaves from: the animation plays there too, so you
-        # see it cut across the edge rather than only where it lands.
+        # Where the pointer leaves from. Nothing plays there (the edge glow
+        # shows the crossing); the animation only marks where it lands.
         exit_x, exit_y = self.screen.to_os(self.x, self.y)
 
         if old != new:
             if old == self.local_id:
                 self._release_local_keys()
-                self.overlay.show(effect, exit_x, exit_y)
             elif self.transport.is_connected(old):
                 for key in sorted(self._remote_keys):
                     self.transport.send(old, "key", key=self.key_for(old, key), pressed=False)
@@ -463,7 +462,7 @@ class Router:
                         self.transport.send(old, "button", button=button, pressed=False)
                 if dragging_out:
                     self.drag_out(old)
-                self.transport.send(old, "leave", effect=effect, x=exit_x, y=exit_y)
+                self.transport.send(old, "leave", effect="none", x=exit_x, y=exit_y)
             self._remote_keys.clear()
             self._remote_buttons.clear()
 

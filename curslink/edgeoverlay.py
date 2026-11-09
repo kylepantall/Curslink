@@ -17,12 +17,14 @@ from __future__ import annotations
 import logging
 import math
 import sys
+import math
+import random
 import time
 from typing import Callable
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer
-from PySide6.QtGui import (QBrush, QColor, QFont, QFontMetricsF, QGuiApplication, QLinearGradient, QPainter,
-                           QPainterPath, QPalette, QPen)
+from PySide6.QtGui import (QBrush, QColor, QFont, QFontMetricsF, QGuiApplication, QImage, QLinearGradient,
+                           QPainter, QPainterPath, QPalette, QPen)
 from PySide6.QtWidgets import QWidget
 
 log = logging.getLogger(__name__)
@@ -32,8 +34,10 @@ CORE = 3            # the bright line right on the edge
 LABEL_GAP = 14      # label to the edge
 LABEL_LIFT = 22     # label's near end to the pointer
 SLIDE = 14          # the label slides out from the edge by this much as it fades in
-FADE_IN = 0.28      # per 16 ms tick, towards the target
-FLASH_S = 0.45
+# Fading in or out takes as long as a mirror's fade (curslink.mirror.helper),
+# so the glow and the mirror come and go together.
+FADE_S = 0.22
+FLASH_S = FADE_S    # crossing: the bar flares and is gone as the mirror fades
 
 KIND_TEXT = {"mac": "Mac", "windows": "Windows PC", "linux": "Linux PC", "phone": "Android phone"}
 
@@ -127,60 +131,102 @@ class Bar(_Overlay):
         self.colour = QColor("#007AFF")
 
     def paintEvent(self, _e) -> None:  # noqa: N802
-        w, h = self.width(), self.height()
-        vertical = self.side in ("left", "right")
-        length = h if vertical else w
         strength = min(1.0, self.level * (0.9 + 0.5 * self.boost))
         if strength <= 0.003:
             return
         p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.drawImage(0, 0, self.render(strength, self.devicePixelRatioF()))
+        p.end()
+
+    def render(self, strength: float, dpr: float = 1.0) -> QImage:
+        """The bar at ``strength``, at the screen's real resolution. Drawn at
+        16 bits a channel and dithered down, so its long faint fades don't
+        break into bands; the glow across it is one smooth falloff."""
+        w, h = self.width(), self.height()
+        vertical = self.side in ("left", "right")
+        length = h if vertical else w
+        img = QImage(max(1, round(w * dpr)), max(1, round(h * dpr)), QImage.Format.Format_RGBA64_Premultiplied)
+        img.setDevicePixelRatio(dpr)
+        img.fill(0)
+        p = QPainter(img)
+        # Across the bar: from the edge into the screen.
+        start, stop = {"right": ((w, 0), (0, 0)), "left": ((0, 0), (w, 0)),
+                       "bottom": ((0, h), (0, 0)), "top": ((0, 0), (0, h))}[self.side]
+        thick = w if vertical else h
+        g = QLinearGradient(*start, *stop)
         c = QColor(self.colour)
-        haze_alpha = (0.58 if self.dark else 0.5) + 0.3 * self.boost
-        # The haze: from the edge into the screen.
-        if self.side == "right":
-            g = QLinearGradient(w, 0, 0, 0)
-        elif self.side == "left":
-            g = QLinearGradient(0, 0, w, 0)
-        elif self.side == "bottom":
-            g = QLinearGradient(0, h, 0, 0)
-        else:
-            g = QLinearGradient(0, 0, 0, h)
-        for pos, a in ((0.0, haze_alpha), (0.25, haze_alpha * 0.45), (0.85, 0.0)):
-            c.setAlphaF(min(1.0, a))
+        for pos, a in glow_stops(thick, self.dark, self.boost):
+            c.setAlphaF(a)
             g.setColorAt(pos, c)
-        p.fillRect(self.rect(), QBrush(g))
-        # The core: a soft glow, then the bright line right on the edge.
-        for width, alpha in ((16, 0.28), (8, 0.55), (CORE, 1.0)):
-            c.setAlphaF(alpha)
-            if self.side == "right":
-                r = QRectF(w - width, 0, width, h)
-            elif self.side == "left":
-                r = QRectF(0, 0, width, h)
-            elif self.side == "bottom":
-                r = QRectF(0, h - width, w, width)
-            else:
-                r = QRectF(0, 0, w, width)
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(c)
-            p.drawRoundedRect(r, width / 2, width / 2)
-        # A whiter heart right beside the pointer.
+        p.fillRect(QRectF(0, 0, w, h), QBrush(g))
+        # A whiter heart right beside the pointer, on the edge.
+        heart = QImage(img.size(), QImage.Format.Format_RGBA64_Premultiplied)
+        heart.setDevicePixelRatio(dpr)
+        heart.fill(0)
+        hp = QPainter(heart)
         hot = QColor(255, 255, 255)
         hg = QLinearGradient(0, 0, 0, h) if vertical else QLinearGradient(0, 0, w, 0)
         for pos, a in ((max(0.0, (self.at - 90) / length), 0.0), (min(max(self.at / length, 0), 1), 0.75),
                        (min(1.0, (self.at + 90) / length), 0.0)):
             hot.setAlphaF(a)
             hg.setColorAt(pos, hot)
-        line = {"right": QRectF(w - 2, 0, 2, h), "left": QRectF(0, 0, 2, h),
-                "bottom": QRectF(0, h - 2, w, 2), "top": QRectF(0, 0, w, 2)}[self.side]
-        p.fillRect(line, QBrush(hg))
-        # Fade along the length: dark at both ends, bright by the pointer.
+        hp.fillRect(QRectF(0, 0, w, h), QBrush(hg))
+        hp.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
+        across = QLinearGradient(*start, *stop)
+        for pos, a in ((0.0, 1.0), (min(1.0, 1.5 / max(thick, 1)), 0.8), (min(1.0, 4.0 / max(thick, 1)), 0.0)):
+            across.setColorAt(pos, QColor(0, 0, 0, round(255 * a)))
+        hp.fillRect(QRectF(0, 0, w, h), QBrush(across))
+        hp.end()
+        p.drawImage(0, 0, heart)
+        # Along the bar: dark at both ends, bright by the pointer.
         p.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
         mask = QLinearGradient(0, 0, 0, h) if vertical else QLinearGradient(0, 0, w, 0)
         for pos, a in length_stops(length, self.at):
-            mask.setColorAt(pos, QColor(0, 0, 0, round(255 * a * strength)))
-        p.fillRect(self.rect(), QBrush(mask))
+            m = QColor(0, 0, 0)
+            m.setAlphaF(a * strength)
+            mask.setColorAt(pos, m)
+        p.fillRect(QRectF(0, 0, w, h), QBrush(mask))
+        # Dither: up to one 8-bit step of noise before it's cut down to 8 bits.
+        p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Plus)
+        p.resetTransform()
+        p.fillRect(QRectF(0, 0, img.width(), img.height()), QBrush(_noise(self.colour)))
         p.end()
+        return img.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
+
+
+def glow_stops(thick: float, dark: bool, boost: float = 0.0, n: int = 28) -> list[tuple[float, float]]:
+    """Alpha across the bar, from the edge (0) into the screen (1): a bright
+    line on the edge melting into a soft haze, one smooth curve."""
+    haze = (0.46 if dark else 0.4) + 0.3 * boost
+    out = []
+    for i in range(n + 1):
+        pos = (i / n) ** 1.6  # more stops near the edge, where it changes fastest
+        d = pos * thick
+        a = 0.9 * math.exp(-d / 2.2) + 0.42 * math.exp(-d / 8) + haze * math.exp(-d / 20)
+        a *= max(0.0, 1 - pos) ** 1.5  # nothing left at the far side
+        out.append((pos, min(1.0, a)))
+    return out
+
+
+_NOISE: dict[str, QImage] = {}
+
+
+def _noise(colour: QColor) -> QImage:
+    """A tile of tiny premultiplied ``colour`` specks, up to one 8-bit step."""
+    key = colour.name()
+    tile = _NOISE.get(key)
+    if tile is None:
+        rnd = random.Random(7)
+        tile = QImage(64, 64, QImage.Format.Format_RGBA64_Premultiplied)
+        r, g, b = colour.redF(), colour.greenF(), colour.blueF()
+        for y in range(64):
+            for x in range(64):
+                a = rnd.random() / 255
+                c = QColor()
+                c.setRgbF(r, g, b, a)  # (premultiplied as it goes in)
+                tile.setPixelColor(x, y, c)
+        _NOISE[key] = tile
+    return tile
 
 
 def _icon_path(kind: str, size: float) -> QPainterPath:
@@ -415,6 +461,7 @@ class EdgeOverlay:
         self.target = 0.0
         self.level = 0.0
         self.flash_at: float | None = None
+        self._ticked = 0.0
         self.timer = QTimer()
         self.timer.setInterval(16)
         self.timer.timeout.connect(self._tick)
@@ -434,6 +481,7 @@ class EdgeOverlay:
         else:
             return
         if not self.timer.isActive():
+            self._ticked = time.monotonic()
             self.timer.start()
         self._tick()
 
@@ -521,9 +569,13 @@ class EdgeOverlay:
                 boost = 1 - t
                 self.level = 1 - t * t
         else:
-            self.level += (self.target - self.level) * FADE_IN
-            if abs(self.target - self.level) < 0.01:
-                self.level = self.target
+            # Linear, at a whole fade per FADE_S.
+            step = max(0.0, min(0.1, now - self._ticked)) / FADE_S
+            if self.level < self.target:
+                self.level = min(self.target, self.level + step)
+            else:
+                self.level = max(self.target, self.level - step)
+        self._ticked = now
         if self.bar is not None:
             self.bar.level, self.bar.boost = self.level, boost
             if self.level > 0.003:
