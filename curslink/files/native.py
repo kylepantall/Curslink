@@ -37,6 +37,7 @@ from typing import Callable
 
 from curslink.files.popups import ReceivePopups
 from curslink.files.transfer import FileReceiver, move_into, safe_parts, TransferError
+from curslink.files.dragdebug import trace
 
 log = logging.getLogger(__name__)
 
@@ -151,6 +152,7 @@ class NativeDrop:
         if native:
             paths = [str(staging / t) for t in tops]
             log.info("drop: starting a real drag of %s", ", ".join(tops[:3]))
+            trace("drop-begin", id=tid, files=len(tops))
             # The card follows the pointer at once; the real drag's image
             # takes over from it when that starts.
             self.helper("card " + json.dumps(card, separators=(",", ":")))
@@ -178,6 +180,7 @@ class NativeDrop:
         if word == "nativedrag-ready":
             if drop is not None and drop.phase == "starting" and self.press is not None:
                 log.info("drop: pressing the button to start the real drag")
+                trace("press", id=tid)
                 self._bg(self.press)
             return True
         if word == "nativedrag-started":
@@ -187,10 +190,12 @@ class NativeDrop:
                 if not rest.endswith(" card"):  # (a Mac's drag keeps the card as its image)
                     self.helper("card hide")
                 log.info("drop: real drag started in %d ms", (time.monotonic() - drop.started_at) * 1000)
+                trace("drag-started", id=tid, how="card" if rest.endswith(" card") else "drag")
             return True
         if word == "nativedrag-ended":
             action = rest.split(" ", 1)[1] if " " in rest else "?"
             log.info("drop: the real drag ended (%s)", action)
+            trace("drag-ended", id=tid, action=action)
             if drop is not None and drop.phase == "dragging":
                 drop.phase = "finished"
                 self.drops.pop(tid, None)
@@ -228,6 +233,7 @@ class NativeDrop:
     def _drop_here(self) -> None:
         """Let go, once the window under the pointer is in front: apps often
         refuse a drop in a window that isn't."""
+        trace("release")
         if self.follow is not None and self.follow.bring_now():
             try:
                 asyncio.get_running_loop().call_later(FOCUS_SETTLE_S, self.release)
@@ -258,10 +264,12 @@ class NativeDrop:
         if drop is None:
             return
         drop.released = True
+        trace("let-go", id=drop.id, phase=drop.phase, all_here=drop.done, ours_to_send=inject)
         if drop.phase == "starting":
             # The real drag never got going: let go of the button we may have
             # pressed, and fall back to saving the files.
             log.info("drop: let go before the real drag started")
+            trace("let-go-early", id=drop.id)
             self.helper("nativedrag cancel")
             if inject and drop.native:
                 self.release()
@@ -270,6 +278,7 @@ class NativeDrop:
             self._finish(drop, inject)
         else:
             log.info("drop: waiting for the files before dropping")
+            trace("let-go-waiting", id=drop.id)
             drop.waited, drop.inject = True, inject
             self.popups.reveal(drop.id)
 
@@ -299,6 +308,7 @@ class NativeDrop:
         saved = move_into(drop.staging, drop.tops, self.folder)
         shutil.rmtree(drop.staging, ignore_errors=True)
         log.info("drop: saved %s in %s", ", ".join(p.name for p in saved), self.folder)
+        trace("saved-downloads", id=drop.id)
         self.helper("toast " + json.dumps({"id": drop.id, "state": "done", "count": len(saved),
                                            "total": drop.card.get("size", 0), "card": drop.card,
                                            "folder": str(self.folder)}, separators=(",", ":")))
@@ -319,6 +329,7 @@ class NativeDrop:
         drop = self.drops.pop(tid, None)
         if drop is not None:
             log.info("drop: cancelled")
+            trace("drop-cancelled", id=tid)
             self._end(drop)
 
     def _end(self, drop: Drop) -> None:

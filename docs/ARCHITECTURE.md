@@ -177,7 +177,12 @@ only the process its input goes to, which is the helper as the drag's
 source; macOS 14 often turns down activation from the background), so it
 checks the window really came to the front, asks the helper to try too and
 tries again every 0.3 s. At the drop, a window still not in front is brought
-forward first and the button-up waits 0.15 s for it. Let go on the desktop or in a
+forward first and the button-up waits 0.15 s for it. Every step of such a drag (it
+reaches an edge, the real drag starts, the window under the pointer
+changes, each try at bringing one forward, the let-go, the drop, the end)
+leaves a `drag-debug` line in the log (`curslink/files/dragdebug.py`): the
+cursor, the app and window in front, the window under the cursor, and the
+windows on screen front to back. Let go on the desktop or in a
 folder and the file manager copies them there; on an app, it gets the temp
 paths. If you let go before every byte has arrived, the button-up waits
 (the agent simply doesn't send it yet; a Mac host's event tap holds the

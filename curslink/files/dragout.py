@@ -34,6 +34,7 @@ from typing import Awaitable, Callable
 
 from curslink.files.meta import card, describe
 from curslink.files.transfer import Outgoing, new_id, send_files
+from curslink.files.dragdebug import trace
 
 log = logging.getLogger(__name__)
 
@@ -115,9 +116,11 @@ class AgentDragOut:
         paths = [p for p in data.get("paths", []) if isinstance(p, str)] if isinstance(data, dict) else []
         if self._heard is not None and not self._heard.done():
             log.info("drag out: the drop target saw a %s drag", "file" if paths else "non-file")
+            trace("out-target", files=bool(paths))
             self._heard.set_result(paths)
         elif self._watching and paths != self._seen:
             log.info("drag out: a %s drag reached the edge", "file" if paths else "non-file")
+            trace("out-edge", files=bool(paths))
             self._seen = paths
 
     # ------------------------------------------------------------- buttons
@@ -190,12 +193,14 @@ class AgentDragOut:
             items = await asyncio.to_thread(describe, paths) if paths else []
             if not items:
                 log.info("drag out: not a file drag")
+                trace("out-not-file")
                 self.send("drag_out", none=True)
             else:
                 self.pending = Outgoing(new_id(), "host", items)
                 log.info("drag out: %s (known %s), told the host in %d ms",
                          ", ".join(i.name for i in items[:3]), "at the edge" if seen else "by asking",
                          (loop.time() - started) * 1000)
+                trace("out-told-host")
                 self.send("drag_out", id=self.pending.id, card=card(items))
         finally:
             # End the drag here either way: Escape, then let go over the shield.
@@ -221,6 +226,7 @@ class AgentDragOut:
             return
         if data.get("cancel"):
             log.info("drag out: the host didn't take it")
+            trace("out-declined")
             self.pending = None
             if self._sending is not None:
                 self._sending.cancel()
@@ -242,6 +248,7 @@ class AgentDragOut:
             return
         if data.get("ok") is True:
             log.info("drag out: the host saved %s", ", ".join(map(str, data.get("saved") or [])))
+            trace("out-host-saved")
             self.pending = None
         else:
             out.refused = str(data.get("error") or "refused")

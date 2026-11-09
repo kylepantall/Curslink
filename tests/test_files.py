@@ -1123,3 +1123,86 @@ async def test_carried_drag_frames_survive_the_wire(new_drag, tmp_path):
     await settle()
     for device, t, data in transport.sent:
         decode(encode(t, **data))  # raises if the agent would refuse it
+
+
+def test_drag_debug_lines_say_where_the_cursor_is_and_whats_in_front(monkeypatch, caplog):
+    import logging
+
+    import curslink.files.dragdebug as dd
+
+    monkeypatch.setattr(dd, "_last", {})
+    monkeypatch.setattr(dd, "snapshot", lambda: {
+        "cursor": (120.4, 80.6),
+        "front": {"app": "explorer.exe", "pid": 10, "title": "Downloads", "cls": "CabinetWClass",
+                  "rect": (0, 0, 800, 600)},
+        "under": {"app": "chrome.exe", "pid": 11, "title": "Upload", "rect": (100, 50, 900, 700)},
+        "windows": [{"app": "explorer.exe", "pid": 10, "title": "Downloads"}, {"app": "chrome.exe", "pid": 11}],
+    })
+    with caplog.at_level(logging.INFO, logger="curslink.dragdebug"):
+        dd.trace("let-go", id="t1")
+        dd.trace("let-go", id="t1")                 # straight after: once is enough
+    lines = [r.getMessage() for r in caplog.records if r.name == "curslink.dragdebug"]
+    assert len(lines) == 1
+    line = lines[0]
+    assert line.startswith("drag-debug let-go id=t1 | cursor=(120,81)")
+    assert "front=explorer.exe#10 'Downloads' <CabinetWClass> 0,0 800x600" in line
+    assert "under=chrome.exe#11 'Upload'" in line
+    assert "windows=[explorer.exe#10 'Downloads'; chrome.exe#11]" in line
+
+
+def test_drag_debug_never_breaks_a_drag(monkeypatch, caplog):
+    import logging
+
+    import curslink.files.dragdebug as dd
+
+    def broken():
+        raise OSError("no screen")
+
+    monkeypatch.setattr(dd, "_last", {})
+    monkeypatch.setattr(dd, "snapshot", broken)
+    with caplog.at_level(logging.INFO, logger="curslink.dragdebug"):
+        dd.trace("focus")
+    assert "error=OSError: no screen" in caplog.text
+
+
+def test_focus_tries_leave_a_debug_line(monkeypatch, caplog):
+    import logging
+
+    import curslink.files.dragdebug as dd
+    from curslink.files.focus import FocusFollower
+
+    monkeypatch.setattr(dd, "_last", {})
+    monkeypatch.setattr(dd, "snapshot", lambda: {"cursor": (1, 2)})
+
+    class Impl:
+        @staticmethod
+        def probe(skip):
+            return 5, "Mail", 1, 2
+
+        @staticmethod
+        def bring(key, x, y):
+            pass
+
+        @staticmethod
+        def is_front(key):
+            return False
+
+    f = FocusFollower(impl=Impl)
+    with caplog.at_level(logging.INFO, logger="curslink.dragdebug"):
+        f.tick(0.0)
+        f.tick(0.3)
+    assert "drag-debug hover target='Mail' key=5 in_front=False" in caplog.text
+    assert "drag-debug focus target='Mail' key=5 tried=1 front_after=False" in caplog.text
+
+
+def test_drag_debug_snapshot_runs_on_this_computer():
+    # Real calls on the Windows and macOS runners; nothing to find on Linux.
+    import sys
+
+    import curslink.files.dragdebug as dd
+
+    snap = dd.snapshot()
+    assert isinstance(snap, dict) and "error" not in snap
+    dd.format_snapshot(snap)
+    if sys.platform in ("win32", "darwin"):
+        assert isinstance(snap.get("windows"), list)
