@@ -87,9 +87,14 @@ class FocusFollower:
         log.info("drop: bringing %s forward under the pointer%s", name,
                  f" (try {self._tries})" if self._tries > 1 else "")
         impl.bring(key, x, y)
-        if self.ask_helper is not None and not self._is_front(impl, key):
+        front = self._is_front(impl, key)
+        if self.ask_helper is not None and not front:
             token = getattr(impl, "token", lambda k: k)(key)
             self.ask_helper(token)
+        from curslink.files.dragdebug import trace
+
+        trace("focus", target=repr(name), key=key, tried=self._tries, front_after=front,
+              helper_asked=self.ask_helper is not None and not front)
 
     def _probe(self, impl):
         return impl.probe({os.getpid(), *self.skip_pids()})
@@ -107,6 +112,9 @@ class FocusFollower:
             if key != self._candidate:
                 self._candidate, self._since, self._tries = key, now, 0
                 self._front = self._is_front(impl, key)
+                from curslink.files.dragdebug import trace
+
+                trace("hover", target=repr(name), key=key, in_front=self._front)
                 return
             self._front = self._is_front(impl, key)
             if self._front or now - self._since < self.REST_S:
