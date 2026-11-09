@@ -16,7 +16,7 @@ from curslink import events
 from curslink.config import AgentConfig, HostConfig, PairingConfig
 from curslink.gaze.confirm import FacingDetector, GazeArbiter
 from curslink.gaze.zones import Calibration, GazeClassifier, Target
-from curslink.inputs.keys import KeyMaps
+from curslink.inputs.keys import KeyMaps, os_kind
 from curslink.net.client import AgentClient, AgentSession, NotReady
 from curslink.net.client import Target as ConnectTarget
 from curslink.net.relay import HostRelayLink, RelayTarget, paired_room_id
@@ -299,7 +299,7 @@ async def run_host(cfg: HostConfig) -> None:
         overlay=overlay,
         settings=cfg.router,
     )
-    router.key_for = key_mapper(server, cfg.keymaps)
+    router.key_for = key_mapper(server, cfg.keymaps, pc_names=capture.pc_names)
     edges = edge_indicator(cfg, router, server, overlay)
     from curslink.keepawake import ScreenKeeper
 
@@ -469,13 +469,23 @@ def edge_indicator(cfg: HostConfig, router: Router, server: HostServer, overlay)
     return edges
 
 
-def key_mapper(server: HostServer, maps: KeyMaps, local_platform: str = sys.platform):
+def key_mapper(server: HostServer, maps: KeyMaps, local_platform: str = sys.platform,
+               pc_names: dict[str, str] | None = None):
     """Keys for each device through the mapping for its pair of systems
-    (Cmd <-> Ctrl between a Mac and a PC unless changed; see KeyMaps)."""
+    (Cmd <-> Ctrl between a Mac and a PC unless changed; see KeyMaps).
+
+    ``pc_names`` (from a Mac's capture) says what keys typed on this Mac
+    mean to a computer that isn't one: Option+D is Alt+D there, not "∂",
+    and the Spotlight key is F4, so Option+F4 is Alt+F4. ``""`` for a key
+    such a computer has nothing for."""
     def key_for(device_id: str, key: str) -> str:
         conn = server.connections.get(device_id)
         if conn is None:
             return key
+        if pc_names and key in pc_names and os_kind(conn.platform) not in ("mac", ""):
+            key = pc_names[key]
+            if not key:
+                return ""
         return maps.key(local_platform, conn.platform, key, device_id)
     return key_for
 

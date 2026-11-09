@@ -21,7 +21,7 @@ import time
 from typing import Callable
 
 from curslink.inputs.base import CaptureHandler
-from curslink.inputs.keys import normalize_char
+from curslink.inputs.keys import MODIFIER_FAMILIES, family, mac_pc_name, normalize_char
 
 log = logging.getLogger(__name__)
 
@@ -135,6 +135,19 @@ class PynputCapture:
         self.loop_alive: Callable[[], bool] = lambda: True
         self.took_back = False
         self._escapes: list[float] = []
+        # macOS: what keys typed here mean to a PC, where that differs (Option+D
+        # types "∂" but is Alt+D to a PC; the Spotlight key is F4): the host's
+        # key mapping reads it for keys going to Windows, Linux or Android.
+        self.pc_names: dict[str, str] = {}
+        self._held: set[str] = set()       # modifier families held down
+        self._mac_down: dict[int, str] = {}  # keycode -> name it was pressed as
+        # macOS: its own shortcuts (Cmd+Tab, Spaces, screenshots...) go to the
+        # other computer too while input is there (see macshortcuts).
+        self._shortcuts = None
+        if self._mac:
+            from curslink.inputs.macshortcuts import SystemShortcuts
+
+            self._shortcuts = SystemShortcuts()
 
     def start(self, handler: CaptureHandler) -> None:
         from pynput import mouse
@@ -143,6 +156,8 @@ class PynputCapture:
         self._controller = mouse.Controller()
         if self._mac:
             _mac_no_event_suppression()
+        if self._shortcuts is not None:
+            self._shortcuts.restore_left_over()
         self._restart()
 
     def stop(self) -> None:
@@ -156,8 +171,11 @@ class PynputCapture:
             _mac_cursor_visible(True)
 
     def close(self) -> None:
-        """Stop for good: the cursor shows again."""
+        """Stop for good: the cursor shows again, and macOS's shortcuts work."""
         self.stop()
+        if self._shortcuts is not None:
+            self._shortcuts.set_off(False)
+            self._shortcuts.wait(1.0)
         if self._hider is not None:
             self._hider.show()
 
@@ -178,6 +196,8 @@ class PynputCapture:
             if grabbed:
                 _mac_warp(*self.park_at)
             _mac_cursor_visible(not grabbed)
+            if self._shortcuts is not None:
+                self._shortcuts.set_off(grabbed)
             return
         if grabbed and self._controller is not None:
             self._controller.position = self.park_at
@@ -417,8 +437,50 @@ class PynputCapture:
         if injected or self._handler is None:
             return
         name = key_to_name(key)
+        if name and self._mac:
+            name = self._mac_key(key, name, pressed)
         if name:
             self._handler.on_key(name, pressed)
+
+    def _mac_key(self, key, name: str, pressed: bool) -> str:
+        """The name for a key typed on this Mac, noting what it means to a PC
+        (see pc_names). A key lets go under the name it went down as, even
+        if the modifiers changed in between (Option+D down, Option up, D up)."""
+        fam = family(name)
+        if fam in MODIFIER_FAMILIES:
+            (self._held.add if pressed else self._held.discard)(fam)
+            return name
+        vk = getattr(key, "vk", None)
+        if vk is None or getattr(key, "_is_media", None):
+            return name
+        if not pressed:
+            return self._mac_down.pop(vk, name)
+        pc = mac_pc_name(name, vk, self._mac_base(vk), self._held)
+        if pc is not None:
+            self.pc_names[name] = pc
+        self._mac_down[vk] = name
+        return name
+
+    def _mac_base(self, vk: int) -> str:
+        """What the key types with no modifiers but Shift, on this Mac's
+        keyboard layout."""
+        shift = "shift" in self._held
+        ctx = getattr(self._key_listener, "_context", None)
+        if ctx and ctx[1] is not None:
+            try:
+                from pynput._util.darwin import keycode_to_string
+
+                text = keycode_to_string(ctx, vk, 0x02 if shift else 0)  # shiftKey >> 8
+                if text and text.isprintable():
+                    return text
+            except Exception:  # pragma: no cover - macOS only
+                log.debug("couldn't read the keyboard layout", exc_info=True)
+        try:
+            from pynput._util.darwin_vks import SYMBOLS
+        except Exception:
+            return ""
+        text = SYMBOLS.get(vk, "")
+        return text.upper() if shift else text
 
 
 # ------------------------------------------------------------------ macOS bits
