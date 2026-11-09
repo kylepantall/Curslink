@@ -38,6 +38,7 @@ class InputService : AccessibilityService() {
     private lateinit var wm: WindowManager
     private var view: PointerView? = null
     private var mirrorView: MirrorView? = null
+    private var mirrorParams: WindowManager.LayoutParams? = null
     // Mirror mode: a window that's told of every touch (and takes none), to
     // put the mirrors away while the phone is used by hand.
     private var touchWatch: android.view.View? = null
@@ -46,6 +47,7 @@ class InputService : AccessibilityService() {
     private var tuneOut: (String, Map<String, Any?>) -> Unit = { _, _ -> }
     private var tuner: io.github.orimovo.curslink.core.MirrorTuner? = null
     private var tuningId: String? = null
+    private var wasTuning = emptySet<String>()
     private var params: WindowManager.LayoutParams? = null
     private val shapeThread = HandlerThread("curslink-shape").apply { start() }
     private val shapeHandler = Handler(shapeThread.looper)
@@ -104,7 +106,8 @@ class InputService : AccessibilityService() {
         if (mirrorView?.isAttachedToWindow != true) {
             mirrorView?.let { old -> runCatching { wm.removeViewImmediate(old) } }
             val m = MirrorView(this)
-            runCatching { wm.addView(m, overlayParams()) }.onSuccess { mirrorView = m }
+            val lp = overlayParams()
+            runCatching { wm.addView(m, lp) }.onSuccess { mirrorView = m; mirrorParams = lp }
                 .onFailure { AppLog.w(TAG, "couldn't add the mirror overlay", it) }
         }
         val v = PointerView(this) { x, y -> toPx(x, y).let { it.x to it.y } }
@@ -152,13 +155,30 @@ class InputService : AccessibilityService() {
         }
         mirrorView?.set(wanted)
         tuneOut = tune
+        mirrorView?.onTune = tune
+        mirrorTouchable(wanted.values.any { it.tune })
         tuning = wanted.filterValues { it.tune }.mapValues { (_, w) ->
             listOf(w.rect.left.toDouble(), w.rect.top.toDouble(), w.rect.width().toDouble(), w.rect.height().toDouble())
         }
         if (tuning.isEmpty()) { tuner = null; tuningId = null }
         else if (tuner == null) tuner = io.github.orimovo.curslink.core.MirrorTuner(grab = 18.0 * resources.displayMetrics.density)
         watchTouches(shows.isNotEmpty())
-        if (tuning.isNotEmpty()) AppLog.i(TAG, "lining up a mirror: drag, stretch or scroll it")
+        if (tuning.keys != wasTuning) {
+            wasTuning = tuning.keys
+            AppLog.i(TAG, if (tuning.isEmpty()) "done lining up" else "lining up a mirror: drag it (pointer or finger), pinch or scroll to zoom")
+        }
+    }
+
+    /** While a mirror is lined up its window takes touches (drag and pinch it); otherwise none. */
+    private fun mirrorTouchable(on: Boolean) {
+        val v = mirrorView ?: return
+        val lp = mirrorParams ?: return
+        val flag = WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        val want = if (on) lp.flags and flag.inv() else lp.flags or flag
+        if (want != lp.flags) {
+            lp.flags = want
+            runCatching { wm.updateViewLayout(v, lp) }.onFailure { AppLog.w(TAG, "couldn't change the mirror's touch", it) }
+        }
     }
 
     /** Told of every touch while mirrors show, to put them away while the phone is used by hand. */
@@ -173,7 +193,7 @@ class InputService : AccessibilityService() {
             @android.annotation.SuppressLint("ClickableViewAccessibility")
             override fun onTouchEvent(e: android.view.MotionEvent): Boolean {
                 // Our own taps (the computer's mouse here) are touches too: only a hand's count.
-                if (e.actionMasked == android.view.MotionEvent.ACTION_OUTSIDE && !active && !gestures.down) {
+                if (e.actionMasked == android.view.MotionEvent.ACTION_OUTSIDE && !active && !gestures.down && tuning.isEmpty()) {
                     mirrorView?.touchedByHand()
                 }
                 return false

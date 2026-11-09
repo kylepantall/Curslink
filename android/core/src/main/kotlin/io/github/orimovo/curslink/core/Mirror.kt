@@ -92,8 +92,15 @@ class MirrorSession(private val handler: MirrorHandler) {
     }
 
     /** Lining up mirror [id]: a drag, stretch or zoom of it (see [MirrorTuner]) for the host. */
+    // Called from the phone's main thread, where Android won't let a socket
+    // be written (NetworkOnMainThreadException): sent from a thread of its own.
     fun tune(id: String, data: Map<String, Any?>) {
-        runCatching { send("mirror_tune", jsonOf("id" to id, *data.toList().toTypedArray())) }
+        val frame = jsonOf("id" to id, *data.toList().toTypedArray())
+        tuneOut.execute { runCatching { send("mirror_tune", frame) } }
+    }
+
+    private val tuneOut = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "curslink-mirror-tune").apply { isDaemon = true }
     }
 
     /** Is capture [id] free to send a frame now? (Saves encoding one that would wait.) */
@@ -188,6 +195,45 @@ class MirrorTuner(private val grab: Double) {
     }
 
     fun release() { drag = null }
+
+    // Fingers on the phone's own screen: their middle, how far apart they are, how many.
+    private var fingers = 0
+    private var fx = 0.0
+    private var fy = 0.0
+    private var span = 0.0
+
+    /**
+     * The fingers touching the mirror [r] are at ([xs], [ys]): one moves it,
+     * two also zoom it about their middle as they spread or pinch. A change
+     * in how many fingers starts again from where they are.
+     */
+    fun touch(r: List<Double>, xs: DoubleArray, ys: DoubleArray): List<Map<String, Any?>> {
+        val n = minOf(xs.size, ys.size)
+        if (n == 0) { fingers = 0; return emptyList() }
+        val cx = xs.take(n).average()
+        val cy = ys.take(n).average()
+        val sp = if (n < 2) 0.0 else (0 until n).map { kotlin.math.hypot(xs[it] - cx, ys[it] - cy) }.average()
+        if (n != fingers) {
+            fingers = n; fx = cx; fy = cy; span = sp
+            return emptyList()
+        }
+        val out = mutableListOf<Map<String, Any?>>()
+        val w = maxOf(1.0, r[2])
+        val h = maxOf(1.0, r[3])
+        if (n >= 2 && span > 0 && sp > 0 && kotlin.math.abs(sp - span) >= 1) {
+            out += mapOf("grow" to round(sp / span, 5), "ax" to round((cx - r[0]) / w, 4), "ay" to round((cy - r[1]) / h, 4))
+            span = sp
+        }
+        val dx = cx - fx
+        val dy = cy - fy
+        if (kotlin.math.abs(dx) >= 1 || kotlin.math.abs(dy) >= 1) {
+            out += mapOf("mx" to round(dx / w, 5), "my" to round(dy / h, 5))
+            fx = cx; fy = cy
+        }
+        return out
+    }
+
+    fun touchEnd() { fingers = 0 }
 
     /** The wheel turned [steps] notches (up is positive) with the pointer at (px, py). */
     fun wheel(r: List<Double>, px: Double, py: Double, steps: Double): Map<String, Any?>? {

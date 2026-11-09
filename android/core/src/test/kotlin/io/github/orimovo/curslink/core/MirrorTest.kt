@@ -83,7 +83,10 @@ class MirrorTest {
         assertTrue(show.tune)
         assertEquals(listOf(10.0, 20.0, 300.0, 100.0), show.guides)
         assertEquals(listOf(0.0, 0.0, 320.0, 120.0), show.src)
+        val latch = java.util.concurrent.CountDownLatch(1)
+        m.send = { t, data -> sent += t to data; latch.countDown() }
         m.tune(show.id, mapOf("mx" to 0.1, "my" to -0.05))
+        assertTrue(latch.await(5, java.util.concurrent.TimeUnit.SECONDS))
         assertEquals("mirror_tune", sent.single().first)
         assertEquals("mac:s2>phone:p", sent.single().second["id"]?.strOrNull())
         assertEquals(0.1, sent.single().second["mx"].numOrNull())
@@ -114,5 +117,19 @@ class MirrorTest {
         t.release()
         assertEquals(mapOf("grow" to 1.05, "ax" to 0.25, "ay" to 0.5), t.wheel(r, 200.0, 200.0, 1.0))
         assertNull(t.wheel(r, 0.0, 0.0, 1.0))
+    }
+
+    @Test
+    fun fingersOnThePhoneMoveAndPinchTheMirror() {
+        val r = listOf(0.0, 0.0, 400.0, 200.0)
+        val t = MirrorTuner(grab = 20.0)
+        assertEquals(emptyList(), t.touch(r, doubleArrayOf(100.0), doubleArrayOf(100.0)))  // where it starts
+        assertEquals(listOf(mapOf<String, Any?>("mx" to 0.1, "my" to 0.1)), t.touch(r, doubleArrayOf(140.0), doubleArrayOf(120.0)))
+        // A second finger: starts again, then spreading them zooms about their middle.
+        assertEquals(emptyList(), t.touch(r, doubleArrayOf(100.0, 300.0), doubleArrayOf(100.0, 100.0)))
+        assertEquals(listOf(mapOf<String, Any?>("grow" to 2.0, "ax" to 0.5, "ay" to 0.5)),
+            t.touch(r, doubleArrayOf(0.0, 400.0), doubleArrayOf(100.0, 100.0)))
+        t.touchEnd()
+        assertEquals(emptyList(), t.touch(r, doubleArrayOf(10.0), doubleArrayOf(10.0)))
     }
 }
