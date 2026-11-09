@@ -357,6 +357,8 @@ def test_the_animation_plays_only_where_the_pointer_lands(parts):
     leave = transport.of_type("leave")[-1][2]
     assert leave["x"] <= 2 and leave["effect"] == "none"
     assert overlay.shown[-1][1] > 3700          # and home shows where it came in
+    # ...placed on the screen the layout has there (not one looked up again).
+    assert overlay.boxes[-1] == (router.screen.os_x, router.screen.os_y, router.screen.width, router.screen.height)
 
 
 def test_where_the_pointer_was_survives_a_restart(parts, layout, tmp_path):

@@ -57,8 +57,9 @@ class FakeOverlay:
     def __init__(self):
         self.shown = []
 
-    def show(self, effect, x, y):
+    def show(self, effect, x, y, box=None):
         self.shown.append((effect, x, y))
+        self.boxes = getattr(self, "boxes", []) + [box]
 
 
 @pytest.fixture

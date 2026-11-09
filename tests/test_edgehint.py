@@ -380,3 +380,15 @@ def test_landing_animation_is_placed_by_fractions_of_the_screen():
     finally:
         w.timer.stop()
         w.close()
+
+
+def test_screen_box_only_on_windows(monkeypatch):
+    from curslink import overlay
+
+    monkeypatch.setattr(overlay.sys, "platform", "darwin")
+    # macOS: screeninfo's y is from the bottom (AppKit); never use it.
+    monkeypatch.setattr("curslink.net.client.detect_screens",
+                        lambda: [{"x": -3440, "y": 17, "width": 3440, "height": 1440}])
+    assert overlay.screen_box(-3076, 788) is None
+    monkeypatch.setattr(overlay.sys, "platform", "win32")
+    assert overlay.screen_box(-3076, 788) == (-3440, 17, 3440, 1440)

@@ -50,11 +50,11 @@ class Transport(Protocol):
 
 
 class Overlay(Protocol):
-    def show(self, effect: str, x: int, y: int) -> None: ...
+    def show(self, effect: str, x: int, y: int, box: tuple[int, int, int, int] | None = None) -> None: ...
 
 
 class NullOverlay:
-    def show(self, effect: str, x: int, y: int) -> None:
+    def show(self, effect: str, x: int, y: int, box: tuple[int, int, int, int] | None = None) -> None:
         pass
 
 
@@ -483,7 +483,9 @@ class Router:
                 self._edge_armed = reason == "edge"
             self.local_sink.move_to(ox, oy)
             if old != new:
-                self.overlay.show(effect, ox, oy)
+                # The screen as the layout has it: the helper places the
+                # animation as a fraction of it (see curslink.overlay.screen_box).
+                self.overlay.show(effect, ox, oy, (screen.os_x, screen.os_y, screen.width, screen.height))
         else:
             if old == self.local_id:
                 self.capture.set_grab(True)
