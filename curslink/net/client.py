@@ -145,6 +145,13 @@ class AgentSession:
             self.release_all()
             if "x" in msg.data and "y" in msg.data:  # where the pointer left from (0.4.17+ hosts)
                 self.show_effect(msg.get("effect", "none"), int(msg.data["x"]), int(msg.data["y"]))
+            park = msg.data.get("park")
+            if isinstance(park, list) and len(park) == 2 and not (
+                    self.drag_out is not None and getattr(self.drag_out, "busy", False)):
+                try:
+                    self.sink.move_to(int(park[0]), int(park[1]))
+                except Exception:
+                    log.debug("couldn't move the cursor aside", exc_info=True)
             if self.cursor is not None:
                 self.cursor.hide()  # the pointer is on another device now
         elif t == "look":

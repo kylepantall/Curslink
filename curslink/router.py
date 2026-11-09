@@ -462,7 +462,14 @@ class Router:
                         self.transport.send(old, "button", button=button, pressed=False)
                 if dragging_out:
                     self.drag_out(old)
-                self.transport.send(old, "leave", effect="none", x=exit_x, y=exit_y)
+                    self.transport.send(old, "leave", effect="none", x=exit_x, y=exit_y)
+                else:
+                    # Its own cursor stays behind, hidden but still hovering:
+                    # left by an edge it sits on title bar buttons and taskbar
+                    # icons whose tooltips keep popping up. Put it where little
+                    # hovers (the middle of that screen's right edge).
+                    park = self.screen.to_os(self.screen.right - 1, self.screen.y + self.screen.height / 2)
+                    self.transport.send(old, "leave", effect="none", x=exit_x, y=exit_y, park=list(park))
             self._remote_keys.clear()
             self._remote_buttons.clear()
 

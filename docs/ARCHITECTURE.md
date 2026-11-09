@@ -274,6 +274,11 @@ Only one device has the pointer, so every other one hides its own cursor
 an agent on `leave`, showing it again on `enter`, when the host goes away,
 and as soon as its own mouse moves it (checked every 0.1 s while hidden);
 a host while input is grabbed for another device (macOS always did).
+A hidden cursor still hovers, so `leave` carries `park` (the middle of the
+right edge of the screen the pointer left, in that device's OS pixels) and
+the agent moves its cursor there first: left by an edge, it otherwise sat
+on title bar buttons or taskbar icons whose tooltips kept popping up over
+the mirror. Not while a file drag leaving the device is still ending.
 macOS uses `CGDisplayHideCursor` with "SetsCursorInBackground"; Windows
 swaps every standard system cursor for a blank one (`SetSystemCursor`) and
 reloads the user's scheme to show it (`SPI_SETCURSORS`), which outlives the
