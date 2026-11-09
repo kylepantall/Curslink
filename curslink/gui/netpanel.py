@@ -84,7 +84,8 @@ class NetworkCard(Card):
         self.optimise.clicked.connect(on_optimise)
         self.add_row(text_block(
             "Improve the connection automatically",
-            "Curslink watches each link and tunes it: marks its packets low-latency (Wi-Fi's fast lane), sends "
+            "Curslink watches each link and tunes it: marks its packets low-latency (Wi-Fi's fast lane), keeps "
+            "Wi-Fi awake while the pointer is on that computer (and off background scans on Windows), sends "
             "pointer moves twice when packets go missing, sends fewer, steadier updates on a slow network, "
             "and leaves the relay for a direct link once the other computer shows up on the LAN."),
             self.optimise)

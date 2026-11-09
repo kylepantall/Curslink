@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import hashlib
 import hmac
 import ipaddress
@@ -80,6 +81,14 @@ KEY_BYTES = 32
 ID_BYTES = 8
 
 PROBE_EVERY_S = 0.5   # agent -> host
+# While input is here (and a little after), probe this often instead. Wi-Fi
+# adapters doze between packets to save power and wake for the next beacon,
+# so on a quiet link the first moves after a pause wait 30-100 ms (or far
+# longer) at the access point. A steady trickle from this end keeps the radio
+# awake (the link felt faster while Settings > Network's check ran, most
+# likely because its mDNS traffic kept the radio up). 25 small datagrams a second each way.
+PROBE_WARM_S = 0.04
+WARM_AFTER_S = 5.0    # keep warm this long after input leaves (it often comes straight back)
 ALIVE_S = 1.6         # a path that's been silent this long is gone (three probes missed)
 
 
@@ -302,7 +311,8 @@ class AgentUdp(asyncio.DatagramProtocol):
     """The agent's end: probes the host and takes the moves it sends."""
 
     def __init__(self, offer: dict, on_move: Callable[[float, float, float], None],
-                 clock: Callable[[], float] = time.monotonic, mark: bool = False):
+                 clock: Callable[[], float] = time.monotonic, mark: bool = False,
+                 warm: bool = False, active: Callable[[], bool] | None = None):
         conn_id, key = unb64(offer.get("id")), unb64(offer.get("key"))
         port = offer.get("port")
         if (conn_id is None or len(conn_id) != ID_BYTES or key is None or len(key) != KEY_BYTES
@@ -321,6 +331,12 @@ class AgentUdp(asyncio.DatagramProtocol):
         self.loss = SeqLoss(clock=clock)       # host -> agent loss, from gaps in ACK and MOVE numbers
         self.copies = 0                        # MOVE2s that arrived before (or instead of) their MOVE
         self.mark = mark
+        # Keep the radio awake (see PROBE_WARM_S) while active() says input
+        # is here, and until warm_until; only when warm is on ([network] optimise).
+        self.warm_enabled = warm
+        self.active = active
+        self.warm_until = 0.0
+        self._kick = asyncio.Event()
         self.moves = 0
         self.up = False
         self._task: asyncio.Task | None = None
@@ -338,10 +354,26 @@ class AgentUdp(asyncio.DatagramProtocol):
     def heard_lately(self) -> bool:
         return self.clock() - self.acked_at < ALIVE_S
 
+    def warming(self) -> bool:
+        if not self.warm_enabled:
+            return False
+        return self.clock() < self.warm_until or (self.active is not None and bool(self.active()))
+
+    def warm(self, for_s: float = WARM_AFTER_S) -> None:
+        """Input is here: probe fast for at least ``for_s``."""
+        if not self.warm_enabled:
+            return
+        was = self.warming()
+        self.warm_until = max(self.warm_until, self.clock() + for_s)
+        if not was:
+            self._kick.set()  # don't wait out a slow probe interval
+
     async def _probe(self) -> None:
         while True:
             self.probe()
-            await asyncio.sleep(PROBE_EVERY_S)
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(self._kick.wait(), PROBE_WARM_S if self.warming() else PROBE_EVERY_S)
+            self._kick.clear()
 
     def probe(self) -> None:
         if self.transport is None or self.transport.is_closing():
@@ -353,7 +385,7 @@ class AgentUdp(asyncio.DatagramProtocol):
                 log.info("lost the UDP path to the host; pointer moves come over TCP")
         self.seq_out += 1
         self.sent_at[self.seq_out] = self.clock()
-        for old in [s for s in self.sent_at if s < self.seq_out - 8]:
+        for old in [s for s in self.sent_at if s < self.seq_out - 64]:  # 2.5 s of warm probes
             del self.sent_at[old]
         try:
             self.transport.sendto(seal(self.keys, self.conn_id, PROBE, self.seq_out, 1 if up else 0))
@@ -383,6 +415,7 @@ class AgentUdp(asyncio.DatagramProtocol):
                 log.info("UDP path to the host is up; pointer moves can come over it")
                 self.probe()  # tell the host straight away
         elif kind in (MOVE, MOVE2):
+            self.warm()
             self.moves += 1
             self.copies += kind == MOVE2
             self.on_move(*values)
