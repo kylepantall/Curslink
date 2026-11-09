@@ -38,7 +38,14 @@ class MainActivity : AppCompatActivity() {
     private lateinit var root: LinearLayout
     private var pairDialog: AlertDialog? = null
     private var busy = false
-    private val refresh = { render() }
+    // The link's state changes (a reconnect try every few seconds while the
+    // computer can't be reached): only the status line follows it while a
+    // text box is being typed in, or rebuilding the page would take the box
+    // away from under the keyboard, which then flickers shut and open.
+    private val refresh = { refreshed() }
+    private var status: TextView? = null
+    private var shown: List<Any?>? = null
+    private var shownRelay: Pair<String, String>? = null
 
     private val scan = registerForActivityResult(ScanContract()) { result ->
         result.contents?.let { pairWithCode(it) }
@@ -107,12 +114,28 @@ class MainActivity : AppCompatActivity() {
         return enabled.split(':').any { it.equals(me, ignoreCase = true) }
     }
 
-    private fun render() {
-        root.removeAllViews()
-        root.addView(text("Curslink", 28f, bold = true, top = 0))
+    /** What the page shows: when none of it changed, there's nothing to rebuild. */
+    private fun looks(): List<Any?> = listOf(
+        prefs.pairing, prefs.paused, prefs.pauseDuringCalls, prefs.keepScreenOn, LinkService.state,
+        LinkService.instance?.pairRequest, busy, accessibilityOn(),
+    )
+
+    private fun refreshed() {
+        if (isFinishing) return
+        if (currentFocus is EditText) {
+            status?.text = statusText()
+            val request = LinkService.instance?.pairRequest
+            if (request != null && pairDialog == null) askForCode(request) else if (request == null) pairDialog?.dismiss()
+            return
+        }
+        if (looks() == shown) return
+        render()
+    }
+
+    private fun statusText(): String {
         val pairing = prefs.pairing
         val (state, detail) = LinkService.state
-        val status = when {
+        return when {
             pairing == null -> "Not paired with a computer yet."
             prefs.paused -> "Paused. ${pairing.hostName}'s mouse and keyboard won't come over to the phone until you resume."
             state == LinkState.PAUSED -> "Paused for your call. Curslink comes back on by itself when the call ends."
@@ -121,7 +144,20 @@ class MainActivity : AppCompatActivity() {
                 " Move the pointer past the phone's edge on the computer to use it here."
             else -> "Looking for ${pairing.hostName}…" + if (detail.isNotEmpty() && detail != "not paired") "\n$detail" else ""
         }
-        root.addView(text(status, 16f))
+    }
+
+    private fun render() {
+        shown = looks()
+        // Keep what's typed but not saved yet in the relay boxes (unless a
+        // QR code or Save changed the relay since).
+        val typed = if (prefs.relay == shownRelay) {
+            (0 until root.childCount).mapNotNull { root.getChildAt(it) as? EditText }.map { it.text.toString() }
+        } else emptyList()
+        shownRelay = prefs.relay
+        root.removeAllViews()
+        root.addView(text("Curslink", 28f, bold = true, top = 0))
+        val pairing = prefs.pairing
+        status = text(statusText(), 16f).also { root.addView(it) }
         if (pairing != null) {
             root.addView(button(if (prefs.paused) "Resume" else "Pause") {
                 LinkService.setPaused(this, !prefs.paused)
@@ -190,9 +226,9 @@ class MainActivity : AppCompatActivity() {
         root.addView(text("Away from home", 20f, bold = true, top = 24))
         root.addView(text("With a Curslink relay, the phone can reach the computer from any network. A QR code from a computer that uses one fills this in.", 13f))
         val (relay, relayKey) = prefs.relay
-        val address = EditText(this).apply { hint = "relay.example.com:24852"; setText(relay); setSingleLine() }
+        val address = EditText(this).apply { hint = "relay.example.com:24852"; setText(typed.getOrNull(0) ?: relay); setSingleLine() }
         val key = EditText(this).apply {
-            hint = "Relay key"; setText(relayKey); setSingleLine()
+            hint = "Relay key"; setText(typed.getOrNull(1) ?: relayKey); setSingleLine()
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
         }
         root.addView(address)
