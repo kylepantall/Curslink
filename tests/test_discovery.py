@@ -172,3 +172,56 @@ async def test_advertises_again_when_the_addresses_change(monkeypatch):
     assert ad._addresses == ["10.200.1.162", "192.168.68.61"]
     await ad.close()
     assert calls[-1] == "unregister"
+
+
+async def test_zeroconf_work_does_not_hold_up_the_callers_loop(monkeypatch):
+    """0.4.55: zeroconf's close blocked the input loop ~2 s on a Mac, so
+    every network check and re-advert sent the mouse home."""
+    import threading
+    import time
+
+    from curslink.pairing import discovery
+
+    threads = []
+
+    async def slow_browse(timeout, exclude, want):
+        threads.append(threading.current_thread().name)
+        time.sleep(0.4)  # what zeroconf's socket teardown did
+        return []
+
+    monkeypatch.setattr(discovery, "_browse", slow_browse)
+    beats = []
+
+    async def beat():
+        while True:
+            beats.append(time.monotonic())
+            await asyncio.sleep(0.02)
+
+    ticker = asyncio.create_task(beat())
+    try:
+        assert await discovery.browse(1.0) == []
+    finally:
+        ticker.cancel()
+    assert threads == ["curslink-zeroconf"]
+    gaps = [b - a for a, b in zip(beats, beats[1:])]
+    assert gaps and max(gaps) < 0.2
+
+
+async def test_cancelling_a_browse_cancels_it_on_the_zeroconf_loop(monkeypatch):
+    from curslink.pairing import discovery
+
+    stopped = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    async def forever(timeout, exclude, want):
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            loop.call_soon_threadsafe(stopped.set)
+            raise
+
+    monkeypatch.setattr(discovery, "_browse", forever)
+    task = asyncio.create_task(discovery.browse(30))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    await asyncio.wait_for(stopped.wait(), 2)
