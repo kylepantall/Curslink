@@ -316,7 +316,7 @@ class AgentLink(
             if (opened.direct) {
                 AgentUdp.parseOffer(welcome.obj("udp"))?.let { offer ->
                     runCatching {
-                        val u = AgentUdp(offer) { x, y, ts -> session.udpMove(x, y, ts) }
+                        val u = AgentUdp(offer, active = { session.active }) { x, y, ts -> session.udpMove(x, y, ts) }
                         u.start(s.inetAddress.hostAddress)
                         udp = u
                     }.onFailure { log("pointer moves will come over TCP: ${it.message}") }

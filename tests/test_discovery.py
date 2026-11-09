@@ -140,3 +140,35 @@ def test_reachable_skips_addresses_that_dont_answer():
                     await reachable(("192.0.2.1",), port, timeout=0.3))
 
     assert asyncio.run(go()) == ("127.0.0.1", None)
+
+
+async def test_advertises_again_when_the_addresses_change(monkeypatch):
+    from curslink.pairing import discovery
+
+    ad = Advertiser(DeviceInfo("pytest-move", "Mover", "host"), 24993)
+    calls = []
+
+    async def register():
+        calls.append("register")
+        ad._addresses = sorted(set(discovery.local_addresses()))
+
+    async def unregister():
+        calls.append("unregister")
+
+    monkeypatch.setattr(ad, "_register", register)
+    monkeypatch.setattr(ad, "_unregister", unregister)
+    monkeypatch.setattr(ad, "WATCH_S", 0.01)
+    addresses = ["192.168.68.72", "10.200.2.162"]
+    monkeypatch.setattr(discovery, "local_addresses", lambda: list(addresses))
+    await ad.start()
+    await asyncio.sleep(0.05)
+    assert calls == ["register"]  # nothing changed
+    addresses[:] = ["192.168.68.61", "10.200.1.162"]  # the router handed out new ones
+    for _ in range(100):
+        if len(calls) >= 3:
+            break
+        await asyncio.sleep(0.01)
+    assert calls == ["register", "unregister", "register"]
+    assert ad._addresses == ["10.200.1.162", "192.168.68.61"]
+    await ad.close()
+    assert calls[-1] == "unregister"

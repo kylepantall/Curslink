@@ -69,6 +69,16 @@ class CoreTest {
     }
 
     @Test
+    fun udpProbesFastOnlyWhileInputIsHere() {
+        val offer = UdpOffer(1234, ByteArray(8) { it.toByte() }, ByteArray(32) { 7 })
+        var here = false
+        val udp = AgentUdp(offer, active = { here }) { _, _, _ -> }
+        assertFalse(udp.warming())
+        here = true
+        assertTrue(udp.warming())
+    }
+
+    @Test
     fun invitesParse() {
         val inv = Invite.parse("curslink://pair?v=1&id=desk&n=Kyle%27s%20Mac&a=192.168.1.5,10.0.0.2&p=50123&c=24850&t=AAECAwQFBgcICQoLDA0ODw&r=relay.example.com:24852&k=abc")
         assertEquals("Kyle's Mac", inv.hostName)
