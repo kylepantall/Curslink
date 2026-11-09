@@ -144,10 +144,6 @@ def _stretch(layout: Layout, here: Screen, side: str, at: float, target: Screen,
     return lo - here.x, hi - here.x, target_side, lo - target.x, hi - target.x
 
 
-def _overlapping(a: Screen, b: Screen) -> bool:
-    return min(a.right, b.right) > max(a.x, b.x) and min(a.bottom, b.bottom) > max(a.y, b.y)
-
-
 def _whole(screen: Screen) -> tuple[int, int, int, int]:
     return (screen.x, screen.y, screen.width, screen.height)
 
@@ -235,13 +231,20 @@ def find_hint(layout: Layout, device_id: str, x: float, y: float,
             continue
         at = _along(here, side, ex, ey)
         target = crossing.screen
-        if layout.mirror and _overlapping(here, target):
-            # Mirror mode: the screen in front shows the one behind, so the
-            # pointer visibly carries on across; no edge to mark there.
-            continue
-        a, b, target_side, ta, tb = _stretch(layout, here, side, at, target)
+        # Overlapping in mirror mode, the target where it really stands
+        # (curslink.layout.Fit), in here's pixels; k of them per target pixel.
+        # The bar and label are kept out of the mirror (curslink.capturehide),
+        # so they show once, at the edge the pointer really crosses.
+        placed = layout.placed(target, here)
+        k = layout.scale_between(here, target)
+        a, b, target_side, ta, tb = _stretch(layout, here, side, at, placed)
+        ta, tb = ta / k, tb / k
         if target_side == OPPOSITE[side]:
-            trect, target_side = _entry_rect(target, side, _boundary(here, side))
+            trect, target_side = _entry_rect(placed, side, _boundary(here, side))
+            if placed is not target:
+                rx, ry, rw, rh = trect
+                trect = (round(target.x + (rx - placed.x) / k), round(target.y + (ry - placed.y) / k),
+                         max(1, round(rw / k)), max(1, round(rh / k)))
         else:  # an edge link joining other sides: its own side of the screen
             trect = _whole(target)
         tat = _along(target, target_side, crossing.x, crossing.y)

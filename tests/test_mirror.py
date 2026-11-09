@@ -779,13 +779,22 @@ def test_crossing_between_fitted_screens_lands_where_the_screens_really_meet():
     assert lay.find_crossing("pc", 900, 599, 0, 2).y == 603
 
 
-def test_no_edge_glow_or_label_between_mirrored_screens():
+def test_edge_glow_and_label_between_mirrored_screens_follow_the_fit():
     from curslink.edgehint import find_hint
+    from curslink.layout import Fit
 
-    # The laptop shows what it covers of the PC: the pointer visibly carries
-    # on across, so there's no edge to mark between them.
-    assert find_hint(desk(), "pc", 900, 590, lambda device: True) is None
-    assert find_hint(desk(mirror=False), "pc", 790, 500, lambda device: True) is not None  # as before
+    # Mirroring, the edge still shows where the pointer really crosses (the
+    # bar and label are kept out of the mirror itself).
+    lay = desk()
+    lay.fits = (Fit(("pc", "main"), ("lap", "main"), 850, 500, 0.5),)
+    hint = find_hint(lay, "pc", 900, 590, lambda device: True)
+    assert hint.side == "bottom" and hint.target.device_id == "lap"
+    # The bar on the PC spans where the laptop really is along its bottom edge...
+    assert (hint.a, hint.b) == pytest.approx((850, 1000))
+    # ...and the one on the laptop sits on the mirror's bottom edge, 200 px down.
+    assert hint.target_side == "top" and hint.trect[1] == 600
+    assert (hint.ta, hint.tb) == pytest.approx((0, 300))
+    assert find_hint(desk(mirror=False), "pc", 790, 500, lambda device: True) is not None
 
 
 def test_adjusting_a_mirror_on_itself_moves_and_zooms_the_fit():
