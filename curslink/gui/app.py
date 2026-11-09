@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import logging
+import os
 import sys
 import tempfile
 import time
@@ -275,14 +276,27 @@ class Curslink(QObject):
                 on_error(update.UpdateError(
                     'this copy runs from source; update it with pip install -U "curslink[gaze,gui]"'))
             return
-        relaunch = ["gui"] if Path(sys.executable).stem.lower() != "curslinkw" else []
+        # Only the Windows setup restarts Curslink itself (from a script that
+        # waits for this copy to exit). Everywhere else this copy must not
+        # exec the new version in place: that keeps the same process id, so
+        # the new copy finds the single-instance lock "held by a running
+        # copy" (itself) and quits at once, which left nothing running after
+        # every macOS / Linux update. Install, then restart() instead.
+        relaunch = None
+        if kind == "windows-setup":
+            relaunch = ["gui"] if Path(sys.executable).stem.lower() != "curslinkw" else []
 
         def run():
             self.service.stop()
             return update.update(release, kind, relaunch=relaunch)
 
-        def done(_message):
-            self.quit()
+        def done(message):
+            log.info("%s", message)
+            if sys.platform == "win32":
+                # A Windows portable copy unpacks beside this one; nothing to restart into.
+                self.quit()
+            else:
+                self.restart(just_updated=True)
 
         in_background(run, done, on_error)
 
@@ -352,11 +366,16 @@ class Curslink(QObject):
             self.tray.say("Curslink is running in the background",
                           f"It links by itself. Open it from the {self.tray.place()} icon.")
 
-    def restart(self) -> None:
-        """Quit and open Curslink again (macOS applies some permissions then)."""
+    def restart(self, just_updated: bool = False) -> None:
+        """Quit and open Curslink again (macOS applies some permissions then).
+
+        The new copy starts once this one has exited: started while this
+        copy still held the single-instance lock, it would just show this
+        (closing) window and quit, leaving nothing running.
+        """
         import subprocess
 
-        from curslink.update import app_bundle
+        from curslink.update import SKIP_ENV, app_bundle
 
         bundle = app_bundle()
         if bundle is not None:
@@ -366,15 +385,12 @@ class Curslink(QObject):
             argv = [sys.executable, "gui"]
         else:
             argv = [sys.executable, "-m", "curslink", "gui"]
+        env = dict(os.environ)
+        if just_updated:
+            env[SKIP_ENV] = "just-updated"
         log.info("restarting Curslink")
-        if sys.platform == "win32":
-            cmd = ["cmd", "/c", "timeout /t 2 >nul & " + subprocess.list2cmdline(argv)]
-            subprocess.Popen(cmd, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
-        else:
-            # Start once this copy has gone, or it would just show this window.
-            subprocess.Popen(["/bin/sh", "-c", 'sleep 2; exec "$@"', "curslink", *argv],
-                             start_new_session=True, stdin=subprocess.DEVNULL,
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.Popen(restart_command(argv, os.getpid()), env=env, stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **_detached())
         self.quit()
 
     def quit(self) -> None:
@@ -396,6 +412,42 @@ class WindowLog(QObject):
         if event.type() == QEvent.Type.Show and isinstance(obj, QWidget) and obj.isWindow():
             log.info("window shown: %s %r at %s", type(obj).__name__, obj.windowTitle(), obj.geometry())
         return False
+
+
+def restart_command(argv: list[str], pid: int, wait_s: int = 60) -> list[str]:
+    """A command that waits (up to ``wait_s``) for process ``pid`` to exit, then runs ``argv``."""
+    if sys.platform == "win32":
+        import subprocess
+
+        # A batch file, as the Windows update uses: cmd's quoting rules make
+        # a one-line wait loop fragile.
+        script = Path(tempfile.mkdtemp(prefix="curslink-restart-")) / "restart.cmd"
+        script.write_text("\r\n".join([
+            "@echo off",
+            "set /a n=0",
+            ":wait",
+            f"if %n% geq {wait_s} goto start",
+            f'tasklist /FI "PID eq {pid}" 2>nul | find "{pid}" >nul || goto start',
+            "set /a n+=1",
+            "ping -n 2 127.0.0.1 >nul",
+            "goto wait",
+            ":start",
+            'start "" ' + subprocess.list2cmdline(argv),
+            '(goto) 2>nul & del "%~f0"',
+        ]) + "\r\n")
+        return ["cmd", "/c", str(script)]
+    script = (f'i=0; while kill -0 {pid} 2>/dev/null && [ $i -lt {wait_s * 5} ]; '
+              'do sleep 0.2; i=$((i+1)); done; exec "$@"')
+    return ["/bin/sh", "-c", script, "curslink", *argv]
+
+
+def _detached() -> dict:
+    import subprocess
+
+    if sys.platform == "win32":
+        return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200)}
+    return {"start_new_session": True}
 
 
 def _take_instance_lock(name: str) -> QLockFile | None:

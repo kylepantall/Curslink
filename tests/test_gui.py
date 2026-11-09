@@ -1037,3 +1037,23 @@ def test_settings_network_card_shows_each_link_and_the_check(desktop, qapp):
     desktop.service.event.emit({"event": "netcheck", "summary": ["mDNS works.", "Found by mDNS: laptop."]})
     qapp.processEvents()
     assert "Found by mDNS: laptop." in card.check_text.detail_label.text()
+
+
+def test_installing_an_update_restarts_instead_of_exec_in_place(desktop, qapp, monkeypatch):
+    """Exec'ing the new version in place kept the single-instance lock, so
+    Curslink quit straight after updating on macOS/Linux."""
+    import sys
+
+    from curslink import update
+    from curslink.gui import app as app_mod
+
+    a = desktop
+    a.release = update.Release("9.9.9", "v9.9.9", "", {})
+    seen = {}
+    monkeypatch.setattr(update, "install_kind", lambda: "macos-pkg")
+    monkeypatch.setattr(update, "update", lambda release, kind, relaunch=None: seen.setdefault("relaunch", relaunch) or "ok")
+    monkeypatch.setattr(app_mod, "in_background", lambda run, done, failed=None: done(run()))
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(type(a), "restart", lambda self, just_updated=False: seen.setdefault("restart", just_updated))
+    a.install_update()
+    assert seen == {"relaunch": None, "restart": True}
