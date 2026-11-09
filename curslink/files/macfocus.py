@@ -70,9 +70,34 @@ def raise_window(pid: int, x: float, y: float) -> None:
             if ok_p and ok_s and p.x <= x < p.x + s.width and p.y <= y < p.y + s.height:
                 AX.AXUIElementPerformAction(w, "AXRaise")
                 break
+        # Frontmost through Accessibility too: since macOS 14 an app in the
+        # background asking to activate another is often turned down.
+        AX.AXUIElementSetAttributeValue(ax_app, "AXFrontmost", True)
     except Exception:  # Accessibility missing, or the app has no AX windows
         log.debug("couldn't raise the window under the pointer", exc_info=True)
     app.activateWithOptions_(NSApplicationActivateIgnoringOtherApps)
+
+
+def front_pid() -> int | None:
+    """The frontmost app's pid, asked of Accessibility (NSWorkspace's answer
+    only updates in a process running an AppKit loop, which this isn't)."""
+    try:
+        try:
+            import HIServices as AX
+        except ImportError:
+            import ApplicationServices as AX
+
+        err, app = AX.AXUIElementCopyAttributeValue(AX.AXUIElementCreateSystemWide(), "AXFocusedApplication", None)
+        if not err and app is not None:
+            err, pid = AX.AXUIElementGetPid(app, None)
+            if not err:
+                return int(pid)
+    except Exception:
+        log.debug("couldn't ask which app is in front", exc_info=True)
+    from AppKit import NSWorkspace
+
+    front = NSWorkspace.sharedWorkspace().frontmostApplication()
+    return int(front.processIdentifier()) if front is not None else None
 
 
 def probe(skip: set[int]):
@@ -89,3 +114,20 @@ def probe(skip: set[int]):
 
 def bring(key, x: float, y: float) -> None:
     raise_window(key[0], x, y)
+
+
+def is_front(key) -> bool:
+    return front_pid() == key[0]
+
+
+def token(key) -> int:
+    return key[0]
+
+
+def bring_here(pid: int) -> None:
+    """The helper's go (see curslink.files.focus.from_helper)."""
+    from AppKit import NSApplicationActivateIgnoringOtherApps, NSRunningApplication
+
+    app = NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
+    if app is not None:
+        app.activateWithOptions_(NSApplicationActivateIgnoringOtherApps)

@@ -45,9 +45,38 @@ def probe(skip: set[int]):
     return int(root), title.value or cls.value, pt.x, pt.y
 
 
-def bring(hwnd: int, x: int, y: int) -> None:
+def _class(u, hwnd) -> str:
+    cls = ctypes.create_unicode_buffer(256)
+    u.GetClassNameW(wt.HWND(hwnd), cls, 256)
+    return cls.value
+
+
+def is_front(hwnd: int) -> bool:
+    """Is this top-level window (or, for the desktop, any of its windows) the
+    foreground one?"""
     u = _user32()
-    # This process just sent the input Windows is acting on (the injected
-    # drag), which is what lets it move another window to the front.
-    u.SetForegroundWindow(wt.HWND(hwnd))
-    u.BringWindowToTop(wt.HWND(hwnd))
+    u.GetForegroundWindow.restype = wt.HWND
+    fg = u.GetForegroundWindow()
+    if not fg:
+        return False
+    u.GetAncestor.restype = wt.HWND
+    root = u.GetAncestor(fg, GA_ROOT) or fg
+    if int(root) == int(hwnd):
+        return True
+    return _class(u, root) in DESKTOP_CLASSES and _class(u, hwnd) in DESKTOP_CLASSES
+
+
+def bring(hwnd: int, x: int, y: int) -> None:
+    """This process's go: Windows lets it when it sent the input it's acting
+    on. When it doesn't, the helper (the drag's source) tries too (see
+    curslink.files.focus.from_helper)."""
+    bring_here(hwnd)
+
+
+def bring_here(hwnd: int) -> None:
+    u = _user32()
+    h = wt.HWND(hwnd)
+    if u.IsIconic(h):
+        return  # a minimised window can't take a drop anyway
+    u.SetForegroundWindow(h)
+    u.BringWindowToTop(h)

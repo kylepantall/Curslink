@@ -170,9 +170,14 @@ paths with the file card as its image (on a Mac straight away through
 AppKit, as the button is held already; elsewhere once the device presses
 the button on it). Such a drag has no mouse-down of the Mac's own, so apps
 under it see no mouse-dragged events and many only take the drop once in
-front: while it's held, the window the pointer rests over for a quarter of a
+front: while it's held, the window the pointer rests over for a fifth of a
 second is brought forward (`curslink/files/focus.py`; a Windows agent does
-the same for drags from the host). Let go on the desktop or in a
+the same for drags from the host). Each OS can refuse that (Windows lets
+only the process its input goes to, which is the helper as the drag's
+source; macOS 14 often turns down activation from the background), so it
+checks the window really came to the front, asks the helper to try too and
+tries again every 0.3 s. At the drop, a window still not in front is brought
+forward first and the button-up waits 0.15 s for it. Let go on the desktop or in a
 folder and the file manager copies them there; on an app, it gets the temp
 paths. If you let go before every byte has arrived, the button-up waits
 (the agent simply doesn't send it yet; a Mac host's event tap holds the
