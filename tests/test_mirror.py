@@ -779,12 +779,17 @@ def test_crossing_between_fitted_screens_lands_where_the_screens_really_meet():
     assert lay.find_crossing("pc", 900, 599, 0, 2).y == 603
 
 
-def test_no_edge_glow_or_label_between_mirrored_screens():
+def test_edges_between_mirrored_screens_still_glow():
     from curslink.edgehint import find_hint
 
-    # The laptop shows what it covers of the PC: the pointer visibly carries
-    # on across, so there's no edge to mark between them.
-    assert find_hint(desk(), "pc", 900, 590, lambda device: True) is None
+    # The PC's bottom edge is behind the laptop: it glows in the laptop's
+    # mirror, where the pointer shows.
+    hint = find_hint(desk(), "pc", 900, 590, lambda device: True)
+    assert hint is not None and hint.on_target and hint.target.device_id == "lap"
+    assert hint.trect == (800, 400, 500, 200) and hint.target_side == "bottom"
+    # Leaving the laptop by its top edge, onto the PC.
+    up = find_hint(desk(), "lap", 900, 405, lambda device: True)
+    assert up is not None and up.target.device_id == "pc" and up.trect == (0, 0, 1000, 400)
     assert find_hint(desk(mirror=False), "pc", 790, 500, lambda device: True) is not None  # as before
 
 

@@ -359,12 +359,12 @@ def _run_qt_helper() -> None:
         return native_to_logical(screens, x, y, sys.platform == "win32")
 
     files = FilesOverlay(to_logical)
-    from curslink.mirror.helper import MirrorHelper
+    from curslink.mirror.helper import MirrorHelper, spec_to_logical
 
     mirror = MirrorHelper()
     from curslink.edgeoverlay import EdgeOverlay
 
-    edges = EdgeOverlay(to_logical)
+    edges = EdgeOverlay(to_logical, spec_to_logical)
 
     def poll() -> None:
         while True:

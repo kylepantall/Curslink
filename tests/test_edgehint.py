@@ -5,7 +5,7 @@ import pytest
 from conftest import FakeCapture, FakeOverlay, FakeSink, FakeTransport
 from curslink import protocol
 from curslink.edgehint import RANGE_PX, EdgeIndicator, command_line, device_kind, find_hint
-from curslink.layout import Device, EdgeEnd, EdgeLink, Layout, Screen
+from curslink.layout import Device, EdgeEnd, EdgeLink, Fit, Layout, Screen
 from curslink.net.client import AgentSession
 from curslink.router import Router
 
@@ -265,6 +265,95 @@ def test_leaving_a_screen_in_front_glows_inside_the_screen_behind():
 def test_mirror_mode_has_no_boundary_inside_the_screen_behind():
     lay = overlap_layout(pointer_through=True)
     assert find_hint(lay, "pc", 1780, 1200, everyone) is None
+
+
+# Mirror mode: a laptop standing in front of the bottom of a monitor, reaching
+# below it, and lined up so it really stands at (600, 1300) on the monitor at
+# half the monitor's pixels to one of its own.
+DESK = Device("mac", "Kyle's Mac", (Screen("main", "mac", 0, 0, 2560, 1440),))
+VIVO = Device("lap", "WKS82261", (Screen("main", "lap", 600, 1200, 1920, 1080, z=1),))
+VIVO_FIT = Fit(("mac", "main"), ("lap", "main"), 600, 1300, 0.5)
+
+
+def mirror_layout(pointer_through=True):
+    return Layout.from_devices([DESK, VIVO], allow_overlap=True, pointer_through=pointer_through, mirror=True,
+                               fits=[VIVO_FIT])
+
+
+def test_mirror_mode_marks_leaving_the_screen_in_front():
+    lay = mirror_layout()
+    hint = find_hint(lay, "lap", 1000, 1210, everyone)
+    assert hint is not None and not hint.on_target
+    assert (hint.here.device_id, hint.side, hint.target.device_id) == ("lap", "top", "mac")
+    assert hint.rect == (600, 1200, 1920, 1080) and (hint.a, hint.b, hint.at) == (0, 1920, 400)
+    # On the monitor, the bar is where the laptop's top edge really stands on
+    # it (y 1300, from the fit), along the 960 pixels it really covers.
+    assert hint.target_side == "bottom" and hint.trect == (0, 0, 2560, 1300)
+    assert (hint.ta, hint.tb) == (600, 1560)
+    assert hint.tat == pytest.approx(800, abs=1)
+
+
+def test_mirror_mode_marks_leaving_the_screen_behind_in_the_mirror():
+    lay = mirror_layout()
+    # On the monitor, in the part the laptop covers (it shows in the laptop's
+    # mirror), heading off the monitor's bottom edge onto the laptop.
+    hint = find_hint(lay, "mac", 1000, 1435, everyone)
+    assert hint is not None and hint.on_target
+    assert (hint.side, hint.target.device_id, hint.target_side) == ("bottom", "lap", "bottom")
+    # Where the monitor's bottom edge shows in the mirror: y 1480 on the laptop.
+    assert hint.trect == (600, 1200, 1920, 280)
+    assert (hint.ta, hint.tb, hint.tat) == (0, 1920, 800)
+    sent = Sent()
+    edges = EdgeIndicator(lay, everyone, sent, name=lambda d: {"lap": "WKS82261"}.get(d, d), kind=lambda d: "windows")
+    edges.update("mac", 1000, 1435)
+    assert [dev for dev, _ in sent.items] == ["lap"]  # the monitor's own edge is hidden behind the laptop
+    cmd = sent.last("lap")
+    assert cmd["role"] == "from" and cmd["side"] == "bottom" and cmd["rect"] == [0, 0, 1920, 280]
+    assert (cmd["a"], cmd["b"], cmd["at"], cmd["name"]) == (0, 1920, 800, "WKS82261")
+    # Across, the laptop's own top edge (leading back) stays dark at first.
+    edges.crossed("lap")
+    assert edges._quiet == ("lap", "main", "top")
+
+
+def test_mirror_mode_without_the_pointer_through_marks_the_boundary_only():
+    lay = mirror_layout(pointer_through=False)
+    hint = find_hint(lay, "mac", 1000, 1190, everyone)
+    assert hint is not None and not hint.on_target
+    assert (hint.side, hint.rect) == ("bottom", (0, 0, 2560, 1200))  # where the laptop starts covering it
+
+
+def test_edge_commands_say_which_screen_they_are_on():
+    lay = mirror_layout()
+    sent = Sent()
+    edges = EdgeIndicator(lay, everyone, sent, name=lambda d: d, kind=lambda d: "mac")
+    edges.update("lap", 1000, 1210)
+    assert sent.last("lap")["screen"] == "main" and sent.last("lap")["screen_os"] == [0, 0, 1920, 1080]
+    assert sent.last("mac")["screen_os"] == [0, 0, 2560, 1440]
+
+
+def test_label_lines_up_with_the_pointer_on_a_scaled_screen():
+    QtWidgets = pytest.importorskip("PySide6.QtWidgets")
+    from curslink.edgeoverlay import EdgeOverlay
+
+    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    # The layout has the laptop at 2880 x 1800 (physical) but this process sees
+    # it at 1920 x 1200 (150% scaling), with its corner where the OS has it.
+    def place(spec):
+        ox, oy, ow, oh = spec["screen_os"]
+        x, y, w, h = spec["os"]
+        k = 1920 / ow
+        return 100 + (x - ox) * k, (y - oy) * k, w * k, h * k, 0
+
+    ov = EdgeOverlay(lambda x, y: (x, y), place)
+    ov.handle({"role": "from", "rect": [100, 0, 2880, 1800], "screen": "main", "screen_os": [100, 0, 2880, 1800],
+               "side": "top", "a": 0, "b": 2880, "at": 2400, "near": 1, "name": "WKS82261", "kind": "mac"})
+    for _ in range(40):
+        ov._tick()
+    g = ov.bar.geometry()
+    assert (g.left(), g.width()) == (100, 1920)
+    pointer = 100 + 2400 * 2 / 3
+    lg = ov.label.geometry()
+    assert lg.left() - 40 < pointer < lg.right() + 40  # beside the pointer, not two thirds of the way along
 
 
 def test_chevron_points_towards_the_edge():
