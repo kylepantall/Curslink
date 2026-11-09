@@ -264,14 +264,23 @@ front of it shows the part it covers, live (`curslink.mirror`).
   capture) and the mirror draws the same ones mapped through `src`; it's
   lined up when they carry on unbroken past the bezel. After the click
   line-up in mirror mode the Layout page goes straight on to this.
-- The pointer in a mirror has its real look: the capture reads the
-  system cursor (`curslink.mirror.cursorshape`: `NSCursor
-  currentSystemCursor` on macOS, `GetCursorInfo` on Windows) while the
-  pointer is over or near the captured area, and when it changes, sends it
-  with the next frame as `cursor` (PNG, size and hot spot in logical
-  pixels, and the captured width that scales it). The mirror draws it at
-  the hot spot instead of its own arrow (kept for Linux, phones and
-  anything it can't read).
+- The mirror casts the real cursor rather than drawing a copy: a capture
+  with `cursor` (the host sets it while the pointer is on the screen
+  behind, not while adjusting) draws the system cursor
+  (`curslink.mirror.cursorshape`: `NSCursor currentSystemCursor` on macOS,
+  `GetCursorInfo` on Windows) into the picture at its hot spot, so the
+  mirror shows exactly what's there and nothing on top. Agents list
+  `mirror_cursor`; only an older agent behind still gets `mirror_pointer`
+  (and the older `cursor` look beside frames).
+- Full resolution: a capture with `tiles` (the device in front lists
+  `mirror_tiles`; this computer always does) sends the covered area at the
+  screen behind's own pixels, never scaled down, as 256 px JPEG tiles at
+  quality 90 (`"tile": [x, y, w, h]`), only those that changed, and all of
+  them every 6 s. `MirrorSource` keeps up to 16 tiles in flight and a
+  newer copy of a waiting tile replaces it in place. The mirror puts them
+  together and scales the whole once onto the screen in front. Older
+  devices in front still get whole frames squeezed into one protocol frame.
+  Mirrors run at 30 fps by default (`[layout] mirror_fps`).
 - An agent's own cursor stays wherever input last left it, which can be
   right on a mirror that comes up there (a second pointer next to the one
   the mirror draws). `CursorPark` moves it to the middle of that screen's

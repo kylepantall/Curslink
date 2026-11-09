@@ -194,11 +194,11 @@ def test_host_captures_its_own_corner_for_the_laptop_and_passes_frames_and_answe
     assert len(transport.of("mirror_frame", "lap")) == IN_FLIGHT
     host.on_message("lap", "mirror_ack", {"id": sid})
     assert len(transport.of("mirror_frame", "lap")) == IN_FLIGHT + 1
-    # The pointer under the laptop is drawn in its mirror.
+    # This computer casts its real cursor in the picture: none is drawn on top.
+    assert state["captures"][0]["cursor"] is True
     router.on_pointer(900, 450)
-    assert transport.of("mirror_pointer", "lap")[-1] == {"id": sid, "x": 0.5, "y": 0.25}
     router.on_pointer(500, 300)
-    assert transport.of("mirror_pointer", "lap")[-1] == {"id": sid, "hide": True}
+    assert transport.of("mirror_pointer", "lap") == []
 
 
 def test_using_the_laptop_takes_the_mirror_down_and_coming_back_puts_it_up():
@@ -1121,24 +1121,27 @@ def test_the_mirror_draws_the_real_look_at_its_hot_spot(qapp):
     assert not helper.shapes
 
 
-def test_a_capture_sends_the_pointers_look_when_it_changes_near_there(qapp, monkeypatch):
-    from PySide6.QtGui import QCursor
-
-    import curslink.mirror.cursorshape as cursorshape
-    from curslink.mirror.helper import Capture
-
-    look = {"which": "arrow"}
-
-    def current(dpr=1.0):
-        return cursorshape.shape(look["which"].encode(), 16, 24, 1, 1)
-
-    monkeypatch.setattr(cursorshape, "current", current)
-    out = []
-    cap = Capture({"id": "c", "screen": "main", "os": [10, 10, 120, 80], "fps": 1}, out.append)
-    cap.timer.stop()
+def _jpg(qapp, w, h, color="teal"):
+    from PySide6.QtCore import QBuffer, QIODevice
     from PySide6.QtGui import QColor, QImage
 
-    still = QImage(120, 80, QImage.Format.Format_RGB32)
+    img = QImage(w, h, QImage.Format.Format_RGB32)
+    img.fill(QColor(color))
+    buf = QBuffer()
+    buf.open(QIODevice.OpenModeFlag.WriteOnly)
+    img.save(buf, "JPG")
+    return bytes(buf.data())
+
+
+def _still_capture(qapp, monkeypatch, spec, size=(120, 80)):
+    from PySide6.QtGui import QColor, QImage
+
+    from curslink.mirror.helper import Capture
+
+    out = []
+    cap = Capture(spec, out.append)
+    cap.timer.stop()
+    still = QImage(*size, QImage.Format.Format_RGB32)
     still.fill(QColor("teal"))
     real = cap.image
 
@@ -1147,18 +1150,104 @@ def test_a_capture_sends_the_pointers_look_when_it_changes_near_there(qapp, monk
         return still
 
     monkeypatch.setattr(cap, "image", image)
+    return cap, out
+
+
+def _frame_image(frame):
+    from PySide6.QtGui import QImage
+
+    img = QImage()
+    assert img.loadFromData(base64.b64decode(frame["jpg"]), "JPG")
+    return img
+
+
+def test_a_capture_casts_the_real_cursor_into_the_picture(qapp, monkeypatch):
+    from PySide6.QtGui import QCursor
+
+    import curslink.mirror.cursorshape as cursorshape
+
+    look = {"color": "red"}
+    monkeypatch.setattr(cursorshape, "current",
+                        lambda dpr=1.0: cursorshape.shape(_png(qapp, 8, 8, look["color"]), 8, 8, 0, 0))
+    cap, out = _still_capture(qapp, monkeypatch, {"id": "c", "screen": "main", "os": [10, 10, 120, 80], "fps": 1,
+                                                 "cursor": True})
     QCursor.setPos(50, 50)
     if (QCursor.pos().x(), QCursor.pos().y()) != (50, 50):
         pytest.skip("can't place the cursor here")
     out.clear()
-    cap.last_hash, cap.cursor_key = b"", None
+    cap.last_hash = b""
     cap.grab()
     frame = json.loads(out[-1].partition(" ")[2])
-    assert frame["cursor"]["cw"] == 120 and "key" not in frame["cursor"]
+    assert "cursor" not in frame  # it's in the picture, not sent beside it
+    img = _frame_image(frame)
+    k = img.width() / 120
+    px = img.pixelColor(round(43 * k), round(43 * k))  # inside the look, past its hot spot at (40, 40)
+    assert px.red() > 180 and px.green() < 90
     n = len(out)
     cap.grab()
-    assert len(out) == n  # same picture, same look: nothing new
-    look["which"] = "ibeam"
+    assert len(out) == n  # same picture, same cursor: nothing new
+    look["color"] = "blue"
     cap.grab()
-    assert len(out) == n + 1 and "cursor" in json.loads(out[-1].partition(" ")[2])
+    assert len(out) == n + 1
+    # Adjusting (the pointer's on the screen in front): no cursor cast.
+    cap.spec = dict(cap.spec, tune=True)
+    cap.last_hash = b""
+    cap.grab()
+    px = _frame_image(json.loads(out[-1].partition(" ")[2])).pixelColor(round(43 * k), round(43 * k))
+    assert px.blue() < 150
     cap.stop()
+
+
+def test_tiles_go_at_full_resolution_and_only_when_they_change(qapp, monkeypatch):
+    from PySide6.QtGui import QColor, QPainter
+
+    from curslink.mirror import helper as mh
+
+    cap, out = _still_capture(qapp, monkeypatch, {"id": "c", "screen": "main", "os": [10, 10, 120, 80], "fps": 1,
+                                                 "tiles": True}, size=(600, 300))
+    out.clear()
+    cap.grab()
+    tiles = [json.loads(line.partition(" ")[2]) for line in out]
+    assert {(f["w"], f["h"]) for f in tiles} == {(600, 300)}
+    assert sorted(tuple(f["tile"]) for f in tiles) == [(x, y, min(mh.TILE, 600 - x), min(mh.TILE, 300 - y))
+                                                      for x in range(0, 600, mh.TILE) for y in range(0, 300, mh.TILE)]
+    assert _frame_image(tiles[0]).width() == mh.TILE  # never scaled down
+    out.clear()
+    cap.grab()
+    assert out == []
+    p = QPainter(cap.image())
+    p.fillRect(300, 20, 4, 4, QColor("white"))
+    p.end()
+    cap.grab()
+    assert [json.loads(line.partition(" ")[2])["tile"][:2] for line in out] == [[mh.TILE, 0]]
+    cap.stop()
+
+
+def test_a_mirror_puts_its_tiles_together_and_shows_once_whole(qapp):
+    from curslink.mirror.helper import MirrorHelper
+
+    helper = MirrorHelper(lambda line: None)
+    helper.handle("mirror " + json.dumps({"captures": [], "shows": [{"id": "s", "screen": "main",
+                                                                        "os": [200, 150, 160, 100]}]}))
+    window = helper.windows["s"]
+    jpg = base64.b64encode(_jpg(qapp, 300, 200)).decode()
+    helper.handle("mirror_image " + json.dumps({"id": "s", "jpg": jpg, "w": 600, "h": 200, "tile": [0, 0, 300, 200]}))
+    assert not window.isVisible()
+    helper.handle("mirror_image " + json.dumps({"id": "s", "jpg": jpg, "w": 600, "h": 200, "tile": [300, 0, 300, 200]}))
+    assert window.isVisible() and window.canvas.width() == 600 and window.pixmap is None
+    window.close()
+
+
+def test_tiles_wait_for_room_without_dropping_each_other():
+    from curslink.mirror import TILES_IN_FLIGHT
+
+    sent = []
+    src = MirrorSource(lambda t, **d: sent.append(d))
+    src.reset(["a"])
+    for n in range(TILES_IN_FLIGHT + 3):
+        src.offer({"id": "a", "tile": [n, 0, 1, 1], "n": n})
+    src.offer({"id": "a", "tile": [TILES_IN_FLIGHT, 0, 1, 1], "n": 99})  # a newer copy of a waiting tile
+    assert len(sent) == TILES_IN_FLIGHT
+    for _ in range(3):
+        src.ack("a")
+    assert [f["n"] for f in sent[TILES_IN_FLIGHT:]] == [99, TILES_IN_FLIGHT + 1, TILES_IN_FLIGHT + 2]

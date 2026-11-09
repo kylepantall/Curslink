@@ -15,7 +15,7 @@ from curslink.net import quality
 from curslink.net.framing import STREAM_LIMIT, read_message
 from curslink.net.relay import RelayError, RelayTarget, agent_connect
 from curslink.net.udp import AgentUdp
-from curslink.protocol import (AGENT_FEATURES, CLIPBOARD_FEATURE, EDGE_FEATURE, FILES_FEATURE, FILES_OUT_FEATURE, DROP_FEATURE, FILE_ACK_FEATURE, MIRROR_FEATURE, NETSTATS_FEATURE, POPUPS_FEATURE, PREPARE_FEATURE, PROTOCOL_VERSION, UDP_FEATURE, Message, ProtocolError,
+from curslink.protocol import (AGENT_FEATURES, CLIPBOARD_FEATURE, EDGE_FEATURE, FILES_FEATURE, FILES_OUT_FEATURE, DROP_FEATURE, FILE_ACK_FEATURE, MIRROR_CURSOR_FEATURE, MIRROR_FEATURE, MIRROR_TILES_FEATURE, NETSTATS_FEATURE, POPUPS_FEATURE, PREPARE_FEATURE, PROTOCOL_VERSION, UDP_FEATURE, Message, ProtocolError,
                                encode)
 from curslink.security import channel_binding, hello_auth
 from curslink.tally import Tally
@@ -440,7 +440,7 @@ class AgentClient:
             if self.udp_enabled and self._direct:
                 features.append(UDP_FEATURE)
             if self.session.mirror is not None:
-                features.append(MIRROR_FEATURE)
+                features += [MIRROR_FEATURE, MIRROR_CURSOR_FEATURE, MIRROR_TILES_FEATURE]
             features.append(NETSTATS_FEATURE)
             if self.session.clipboard is not None:
                 features.append(CLIPBOARD_FEATURE)

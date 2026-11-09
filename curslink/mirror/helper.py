@@ -2,18 +2,24 @@
 
 Commands (one line each, from :class:`curslink.mirror.MirrorPeer`)::
 
-    mirror {"captures": [{"id", "screen", "os": [x, y, w, h], "fps"}],
+    mirror {"captures": [{"id", "screen", "os": [x, y, w, h], "fps", "cursor"?, "tiles"?}],
             "shows": [{"id", "screen", "os": [x, y, w, h], "label", "edges"}]}
-    mirror_image {"id", "jpg", "w", "h"}
+    mirror_image {"id", "jpg", "w", "h", "tile"?}
     mirror_pointer {"id", "x", "y"} | {"id", "hide": true}
     mirror_shape {"id", "png", "w", "h", "hx", "hy", "cw"}
 
-``mirror_shape`` is the pointer's real look on the computer behind (see
-:mod:`curslink.mirror.cursorshape`): its picture, size and hot spot in that
-computer's logical pixels, and ``cw``, the captured area's width in the same
-units, which scales it onto the mirror. A frame carries it as ``cursor``
-whenever the pointer is over (or near) the captured area and its look has
-changed since the last frame.
+A capture with ``cursor`` draws this computer's real cursor (its picture
+and hot spot, :mod:`curslink.mirror.cursorshape`) into each frame where it
+is, so the mirror casts it: the same look, in the same place, and no copy
+drawn on top. ``mirror_pointer`` and ``mirror_shape`` (a drawn pointer and
+its look) are only for an older agent behind, which can't.
+
+A capture with ``tiles`` sends the area at this screen's own pixels (never
+scaled down), cut into :data:`TILE` px tiles, each a sharp JPEG with
+``"tile": [x, y, w, h]`` and only when it changed; the mirror puts them
+together and scales the whole once, onto the screen in front. Without it
+(an older device in front) a frame is the whole area, made small enough for
+one protocol frame.
 
 ``os`` rectangles are in this computer's OS pixels (physical on Windows,
 points on macOS), like every other position the helper gets. Each capture
@@ -54,11 +60,14 @@ FADE_S = 0.22
 FLASH_S = 0.6
 TAG_S = 3.5
 REFRESH_S = 2.0
+# Tiles: their side in the screen's own pixels, the JPEG quality they start
+# at, and a resend of all of them this often (in case one went missing).
+TILE = 256
+TILE_QUALITY = 90
+TILE_REFRESH_S = 6.0
 # The pointer's look is sent while it's this close to the captured area
 # (logical pixels), so it's right as soon as it gets there.
 CURSOR_NEAR = 48
-# A look bigger than this (base64) isn't sent: the mirror keeps its arrow.
-CURSOR_MAX_B64 = 12_000
 
 
 def _screens():
@@ -262,17 +271,22 @@ class Capture:
         self.guides: GuideOverlay | None = None
         self.area: tuple[float, float, float, float, int] | None = None  # where it captures, logical
         self.cursor_key: str | None = None  # the pointer's look the last frame carried
+        self.tiles: dict[tuple[int, int], bytes] = {}  # each tile's hash, as last sent
+        self.tiles_size = (0, 0)
+        self.tiles_sent = 0.0  # last full send of every tile
+        self.cursor_cache: tuple[str, QImage] | None = None
         self.timer = QTimer()
         self.timer.timeout.connect(self.grab)
         self.set(spec)
 
     def set(self, spec: dict) -> None:
-        if spec.get("os") != self.spec.get("os"):
+        if spec.get("os") != self.spec.get("os") or spec.get("tiles") != self.spec.get("tiles"):
             self.last_hash = b""
             self.cursor_key = None
+            self.tiles = {}
         self.spec = spec
         self.show_guides(bool(spec.get("tune")))
-        fps = max(1, min(30, int(spec.get("fps", 15) or 15)))
+        fps = max(1, min(30, int(spec.get("fps", 30) or 30)))
         self.timer.start(round(1000 / fps))
         QTimer.singleShot(0, self.grab)
 
@@ -318,44 +332,80 @@ class Capture:
         if self.failed or not self.last_sent:
             log.info("mirror: capturing %s at %dx%d", self.spec.get("os"), img.width(), img.height())
         self.failed = False
+        cast = None
+        if self.spec.get("cursor") and not self.spec.get("tune"):
+            img, cast = self.draw_cursor(img)
+        now = time.monotonic()
+        if self.spec.get("tiles"):
+            self.send_tiles(img, now)
+            return
         small = img.scaled(64, 36, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.FastTransformation)
         small = small.convertToFormat(QImage.Format.Format_RGB32)
-        digest = hashlib.blake2b(bytes(small.constBits())[: small.sizeInBytes()], digest_size=12).digest()
-        now = time.monotonic()
-        cursor = self.cursor()
-        if cursor is not None and (cursor["key"] == self.cursor_key or len(cursor["png"]) > CURSOR_MAX_B64):
-            cursor = None  # the mirror has this one (or it's too big to send)
-        if digest == self.last_hash and cursor is None and now - self.last_sent < REFRESH_S:
+        digest = hashlib.blake2b(bytes(small.constBits())[: small.sizeInBytes()] + repr(cast).encode(),
+                                 digest_size=12).digest()
+        if digest == self.last_hash and now - self.last_sent < REFRESH_S:
             return
-        limit = MAX_B64 - (len(cursor["png"]) + 200 if cursor is not None else 0)
-        raw, self.quality, self.scale = fit_jpeg(img, self.quality, self.scale, limit)
+        raw, self.quality, self.scale = fit_jpeg(img, self.quality, self.scale)
         if self.quality < 72 and len(raw) * 4 / 3 < MAX_B64 * 0.6:
             self.quality = min(72, self.quality + 4)  # room again: creep back up
         self.last_hash, self.last_sent = digest, now
         frame = {"id": self.id, "jpg": base64.b64encode(raw).decode("ascii"), "w": img.width(), "h": img.height()}
-        if cursor is not None:
-            self.cursor_key = cursor["key"]
-            frame["cursor"] = {k: v for k, v in cursor.items() if k != "key"}
         self.out("mirror_frame " + json.dumps(frame, separators=(",", ":")))
 
-    def cursor(self) -> dict | None:
-        """The pointer's look, with ``cw``, when it's over or near the
-        captured area (elsewhere its look doesn't matter here)."""
+    def send_tiles(self, img: QImage, now: float) -> None:
+        """The tiles of ``img`` that changed (all of them now and then)."""
+        w, h = img.width(), img.height()
+        if (w, h) != self.tiles_size or now - self.tiles_sent >= TILE_REFRESH_S:
+            self.tiles, self.tiles_size, self.tiles_sent = {}, (w, h), now
+        if img.format() != QImage.Format.Format_RGB32:
+            img = img.convertToFormat(QImage.Format.Format_RGB32)
+        for y in range(0, h, TILE):
+            for x in range(0, w, TILE):
+                part = img.copy(x, y, min(TILE, w - x), min(TILE, h - y))
+                digest = hashlib.blake2b(bytes(part.constBits())[: part.sizeInBytes()], digest_size=12).digest()
+                if self.tiles.get((x, y)) == digest:
+                    continue
+                self.tiles[(x, y)] = digest
+                raw, _q, _s = fit_jpeg(part, TILE_QUALITY, 1.0)
+                frame = {"id": self.id, "jpg": base64.b64encode(raw).decode("ascii"), "w": w, "h": h,
+                         "tile": [x, y, part.width(), part.height()]}
+                self.out("mirror_frame " + json.dumps(frame, separators=(",", ":")))
+        self.last_sent = now
+
+    def draw_cursor(self, img: QImage) -> tuple[QImage, tuple | None]:
+        """``img`` with this computer's cursor drawn in where it is (if it's
+        over the area and showing), and what was drawn (look and place)."""
         if self.area is None:
-            return None
+            return img, None
         lx, ly, lw, lh, index = self.area
         pos = QCursor.pos()
         if not (lx - CURSOR_NEAR <= pos.x() <= lx + lw + CURSOR_NEAR
                 and ly - CURSOR_NEAR <= pos.y() <= ly + lh + CURSOR_NEAR):
-            return None
+            return img, None
         from curslink.mirror import cursorshape
 
         screens = QGuiApplication.screens()
         dpr = screens[index].devicePixelRatio() if 0 <= index < len(screens) else 1.0
         found = cursorshape.current(dpr)
         if found is None:
-            return None
-        return dict(found, cw=round(lw, 2))
+            return img, None  # hidden, or its look can't be read
+        if self.cursor_cache is None or self.cursor_cache[0] != found["key"]:
+            look = QImage()
+            if not look.loadFromData(base64.b64decode(found["png"]), "PNG"):
+                return img, None
+            self.cursor_cache = (found["key"], look)
+        look = self.cursor_cache[1]
+        k = img.width() / max(1e-6, lw)  # the screen's pixels per logical pixel
+        at = QRectF((pos.x() - lx - found["hx"]) * k, (pos.y() - ly - found["hy"]) * k, found["w"] * k, found["h"] * k)
+        if img.format() not in (QImage.Format.Format_RGB32, QImage.Format.Format_ARGB32_Premultiplied):
+            img = img.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
+        else:
+            img = img.copy()
+        p = QPainter(img)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        p.drawImage(at, look, QRectF(look.rect()))
+        p.end()
+        return img, (found["key"], round(at.x()), round(at.y()))
 
     def show_guides(self, on: bool) -> None:
         """While its mirror is being adjusted, the guides across this screen."""
@@ -498,6 +548,9 @@ class MirrorWindow(QWidget):
 
         exclude_from_capture(self)  # a mirror never ends up in another one
         self.pixmap: QPixmap | None = None
+        # Put together from tiles: the picture, and which tiles have come.
+        self.canvas: QImage | None = None
+        self.got: dict[tuple[int, int], int] = {}
         self.pointer: tuple[float, float] | None = None
         # The pointer's real look on the computer behind: (picture, its size
         # and hot spot in that computer's logical pixels, captured width).
@@ -530,10 +583,15 @@ class MirrorWindow(QWidget):
             raw = base64.b64decode(data.get("jpg", ""), validate=True)
         except (ValueError, TypeError):
             return
-        pix = QPixmap()
-        if not pix.loadFromData(raw, "JPG"):
-            return
-        self.pixmap = pix
+        tile = data.get("tile")
+        if tile is not None:
+            if not self.add_tile(raw, data, tile):
+                return
+        else:
+            pix = QPixmap()
+            if not pix.loadFromData(raw, "JPG"):
+                return
+            self.pixmap, self.canvas, self.got = pix, None, {}
         if not self.isVisible() or self.closing_at:
             self.closing_at = 0.0
             if not self.isVisible():
@@ -543,6 +601,32 @@ class MirrorWindow(QWidget):
                 self.raise_()
             self.timer.start(16)
         self.update()
+
+    def add_tile(self, raw: bytes, data: dict, tile) -> bool:
+        """One tile into the picture: True once the picture is whole."""
+        try:
+            w, h = int(data["w"]), int(data["h"])
+            x, y, tw, th = (int(v) for v in tile)
+        except (KeyError, TypeError, ValueError):
+            return False
+        if not (0 < w <= 16384 and 0 < h <= 16384 and 0 <= x < w and 0 <= y < h and tw > 0 and th > 0):
+            return False
+        part = QImage()
+        if not part.loadFromData(raw, "JPG"):
+            return False
+        if self.canvas is None or (self.canvas.width(), self.canvas.height()) != (w, h):
+            self.canvas = QImage(w, h, QImage.Format.Format_RGB32)
+            self.canvas.fill(QColor(0, 0, 0))
+            self.got = {}
+        p = QPainter(self.canvas)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        p.drawImage(QRectF(x, y, tw, th), part, QRectF(part.rect()))
+        p.end()
+        self.got[(x, y)] = tw * th
+        if sum(self.got.values()) < w * h:
+            return self.isVisible() and not self.closing_at  # not whole yet: show it once it is
+        self.pixmap = None
+        return True
 
     def set_pointer(self, p: tuple[float, float] | None) -> None:
         if p != self.pointer:
@@ -655,13 +739,18 @@ class MirrorWindow(QWidget):
                    ay=round(pos.y() / max(1, self.height()), 4))
 
     def paintEvent(self, _e) -> None:  # noqa: N802
-        if self.pixmap is None:
+        whole = self.canvas is not None and sum(self.got.values()) >= self.canvas.width() * self.canvas.height()
+        if self.pixmap is None and not whole:
             return
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         r = QRectF(self.rect())
-        p.drawPixmap(r, self.pixmap, QRectF(self.pixmap.rect()))
+        if whole:
+            # The screen behind's own pixels, scaled once onto this screen's.
+            p.drawImage(r, self.canvas, QRectF(self.canvas.rect()))
+        else:
+            p.drawPixmap(r, self.pixmap, QRectF(self.pixmap.rect()))
         age = time.monotonic() - self.shown_at
         edges = set(self.spec.get("edges") or [])
         lines = {
@@ -842,8 +931,8 @@ class MirrorHelper:
                     continue
                 if sid in self.shapes:
                     window.set_shape(self.shapes[sid])
-                if old is not None and old.pixmap is not None:
-                    window.pixmap = old.pixmap
+                if old is not None and (old.pixmap is not None or old.canvas is not None):
+                    window.pixmap, window.canvas, window.got = old.pixmap, old.canvas, dict(old.got)
                     window.shown_at = time.monotonic() - TAG_S - 1  # no "live" tag again
                     window.show()
                 self.windows[sid] = window

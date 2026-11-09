@@ -50,10 +50,11 @@ Host -> agent
                                        device should capture and show now (all of
                                        it, each time); only to an agent whose
                                        hello.features has "mirror"
-    mirror_frame {id, jpg, w, h, cursor?}
+    mirror_frame {id, jpg, w, h, cursor?, tile?}
                                        a captured frame for a mirror it shows;
-                                       cursor: the pointer's look behind when it
-                                       changed (see curslink.mirror.cursorshape)
+                                       tile ([x, y, w, h]): only that part of the
+                                       w x h picture (with "mirror_tiles");
+                                       cursor: an older agent's pointer look
     mirror_pointer {id, x, y} | {id, hide}
                                        where the pointer is in a mirror it shows
                                        (0..1 across and down), or none
@@ -212,8 +213,13 @@ FILE_ACK_FEATURE = "file_ack"
 # part of another's (see curslink.mirror).
 MIRROR_FEATURE = "mirror"
 # Listed with "mirror" by an agent whose captures already show its pointer
-# (a phone, which draws its own): the host sends no mirror_pointer for them.
+# (a phone, which draws its own, or a computer that draws its real cursor in
+# when a capture asks with "cursor"): the host sends no mirror_pointer for them.
 MIRROR_CURSOR_FEATURE = "mirror_cursor"
+# Listed with "mirror" by an agent that shows a mirror from tiles (frames
+# with "tile": [x, y, w, h] of the whole w x h picture), so captures for it
+# go at full resolution, only the tiles that changed.
+MIRROR_TILES_FEATURE = "mirror_tiles"
 # An agent that reports how the link looks from its end (netstats) and
 # takes a move sent twice on a lossy link (MOVE2 datagrams, see
 # curslink.net.udp); a host that lists it takes netstats frames.

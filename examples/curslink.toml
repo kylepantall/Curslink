@@ -120,7 +120,7 @@ confirm_with_agents = true   # agents running their own camera ([agent.gaze])
 # Curslink. An agent can opt out with [agent] mirror = false.
 # mirror = false
 # mirror_pointer = true
-# mirror_fps = 15
+# mirror_fps = 30
 #
 # Screens are laid out in their own pixels, which differ in size between
 # monitors, so the layout only roughly says what a screen in front covers.
