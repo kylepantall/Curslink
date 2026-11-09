@@ -336,6 +336,7 @@ async def run_host(cfg: HostConfig) -> None:
     capture.start(bridge)
     reporter = loop.create_task(report_capture(bridge, capture, server, router))
     network = loop.create_task(report_network_host(server, cfg.optimise)) if events.channel.enabled else None
+    wifi = low_latency_wifi(cfg.optimise)
     router.blocked = input_blocked_reason()
 
     # Gaze can come from this computer's camera, the agents' own cameras,
@@ -411,6 +412,7 @@ async def run_host(cfg: HostConfig) -> None:
         reporter.cancel()
         if network is not None:
             network.cancel()
+        wifi.stop()
         camera.stop()
         capture.close()
         if isolink is not None:
@@ -745,6 +747,17 @@ async def report_capture(bridge: LoopBridge, capture, server: HostServer, router
 
 
 NETWORK_EVERY_S = 2.0
+
+
+def low_latency_wifi(optimise: bool):
+    """Windows: keep the Wi-Fi adapter awake and off background scans while
+    we run ([network] optimise; see curslink.net.wlan)."""
+    from curslink.net.wlan import LowLatencyWifi
+
+    wifi = LowLatencyWifi()
+    if optimise:
+        wifi.start()
+    return wifi
 
 
 async def report_network_host(server: HostServer, optimise: bool, every_s: float = NETWORK_EVERY_S) -> None:
@@ -1215,6 +1228,7 @@ async def run_agent(cfg: AgentConfig) -> None:
     events.emit("running", role="agent", device_id=cfg.device_id, name=cfg.name)
     runner = asyncio.create_task(client.run_forever())
     stopper = asyncio.create_task(stop.wait())
+    wifi = low_latency_wifi(cfg.optimise)
     helpers = []
     if cfg.optimise and cfg.relay:
         helpers.append(asyncio.create_task(upgrade_path(cfg, store, client, session)))
@@ -1227,6 +1241,7 @@ async def run_agent(cfg: AgentConfig) -> None:
     finally:
         for task in (runner, stopper, *helpers):
             task.cancel()
+        wifi.stop()
         if camera:
             camera.stop()
         if smoother:

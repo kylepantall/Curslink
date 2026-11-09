@@ -205,3 +205,45 @@ def test_agent_probes_the_offered_address_not_the_one_it_dialled():
             transport.close()
 
     asyncio.run(go())
+
+
+async def test_probes_keep_the_radio_awake_only_while_input_is_here():
+    server = HostServer({"laptop"}, server_context(SECRET), host="127.0.0.1", port=0, udp=True)
+    await server.start()
+    session = AgentSession(FakeSink(), lambda e, x, y: None)
+    client = AgentClient("laptop", "Laptop", "127.0.0.1", server.port, client_context(SECRET), session,
+                         optimise=True)
+    task = asyncio.create_task(client.run_once())
+    await wait_for(lambda: server.is_connected("laptop"))
+    path = server.connections["laptop"].udp
+    await wait_for(lambda: path.usable(server.udp.clock()))
+    assert not client.udp.warming()
+
+    def probes_in(seconds):
+        before = path.seq_in
+        return asyncio.sleep(seconds), before
+
+    sleep, before = probes_in(0.6)
+    await sleep
+    assert path.seq_in - before <= 3  # idle: every half second
+
+    server.send("laptop", "enter", x=0, y=0, effect="none")
+    await wait_for(lambda: client.session.active)
+    assert client.udp.warming()
+    sleep, before = probes_in(0.6)
+    await sleep
+    assert path.seq_in - before >= 8  # input here: every 40 ms
+
+    server.send("laptop", "leave")
+    await wait_for(lambda: not client.session.active)
+    assert client.udp.warming()  # for a while after it leaves too
+    client.udp.warm_until = 0.0
+    assert not client.udp.warming()
+    await stop(server, task)
+
+
+def test_no_fast_probes_with_the_optimiser_off():
+    offer = {"port": 24850, "id": udp.b64(os.urandom(8)), "key": udp.b64(os.urandom(32))}
+    agent = udp.AgentUdp(offer, lambda x, y, ts: None, active=lambda: True)
+    agent.warm()
+    assert not agent.warming()

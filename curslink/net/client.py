@@ -31,6 +31,9 @@ LAN_ONLY_TIMEOUT_S = 6.0
 # Resend our camera's facing state this often, so the host can tell a
 # fresh report from a stale one.
 FACING_REFRESH_S = 1.0
+# Input from the host that means it's here, so the radio should stay awake
+# (see curslink.net.udp.PROBE_WARM_S).
+WARM_ON = frozenset({"enter", "leave", "move", "button", "scroll", "key", "drag"})
 # Tell the host how the link looks from here this often (netstats).
 NETSTATS_EVERY_S = 5.0
 
@@ -490,6 +493,8 @@ class AgentClient:
                     msg = await read_message(reader)
                     if msg is None:
                         break
+                    if msg.t in WARM_ON and self.udp is not None:
+                        self.udp.warm()  # input is here: keep this end's Wi-Fi awake
                     reply = self.session.handle(msg)
                     if reply:
                         writer.write(reply)
@@ -523,7 +528,8 @@ class AgentClient:
         if not peer:
             return
         try:
-            self.udp = AgentUdp(offer, self.session.udp_move, mark=self.optimise)
+            self.udp = AgentUdp(offer, self.session.udp_move, mark=self.optimise, warm=self.optimise,
+                                active=lambda: self.session.active)
             await self.udp.start(peer[0])
         except (ValueError, OSError) as exc:
             log.info("pointer moves will come over TCP: can't use UDP (%s)", exc)
