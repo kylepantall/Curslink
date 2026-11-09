@@ -258,13 +258,29 @@ front of it shows the part it covers, live (`curslink.mirror`).
   the mirror draws). `CursorPark` moves it to the middle of that screen's
   right edge (not a corner: Windows' bottom corners peek or open widgets on
   hover) once each time input is away, not while adjusting, and not while a
-  file drag leaving it is still ending.
+  file drag leaving it is still ending. With `hide_cursor` (below) the
+  cursor is hidden instead and isn't moved.
 - Curslink's own overlay windows (the edge indicator, mirrors) are kept out
   of captures (`curslink.capturehide`; on macOS the capture also leaves out
   the helper's own windows), so they don't show up twice.
 - Phones take part like any agent that lists the `mirror` feature: the app
   draws mirrors in its pointer overlay, and captures with Android's screen
   capture (MediaProjection), which asks the first time it's needed.
+
+### Hiding idle cursors
+
+Only one device has the pointer, so every other one hides its own cursor
+(`curslink/cursorhide.py`, `[host]`/`[agent] hide_cursor`, on by default):
+an agent on `leave`, showing it again on `enter`, when the host goes away,
+and as soon as its own mouse moves it (checked every 0.1 s while hidden);
+a host while input is grabbed for another device (macOS always did).
+macOS uses `CGDisplayHideCursor` with "SetsCursorInBackground"; Windows
+swaps every standard system cursor for a blank one (`SetSystemCursor`) and
+reloads the user's scheme to show it (`SPI_SETCURSORS`), which outlives the
+process, so the service puts the cursors back when it starts and exits and
+the app does whenever the service it runs exits; X11 uses
+`XFixesHideCursor`. Apps that draw their own cursor (some games) can still
+show it on Windows.
 
 ### Clipboard sync
 

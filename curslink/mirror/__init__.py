@@ -420,6 +420,9 @@ class CursorPark:
             self._timer = self.call_later(self.delay, self._fire)
 
     def _done(self) -> bool:
+        cursor = getattr(self.session, "cursor", None)
+        if cursor is not None and cursor.hidden:
+            return True  # hidden while input is away: nothing to see under the mirror
         return self.session.active or self._parked_at == self.session.entered
 
     def _fire(self) -> None:
