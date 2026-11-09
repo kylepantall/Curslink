@@ -301,12 +301,20 @@ async def run_host(cfg: HostConfig) -> None:
     )
     router.key_for = key_mapper(server, cfg.keymaps)
     edges = edge_indicator(cfg, router, server, overlay)
+    from curslink.keepawake import ScreenKeeper
+
+    keeper = ScreenKeeper(cfg.keep_screen_on)
+    linked: set[str] = set()
 
     def agent_connected(conn) -> None:
+        linked.add(conn.device_id)
+        keeper.linked(True)
         events.emit("agent", device_id=conn.device_id, name=conn.name, platform=conn.platform,
                     connected=True, screens=conn.screens)
 
     def agent_disconnected(device_id: str) -> None:
+        linked.discard(device_id)
+        keeper.linked(bool(linked))
         edges.forget(device_id)
         router.on_disconnect(device_id)
         events.emit("agent", device_id=device_id, connected=False, paused=device_id in server.paused)
@@ -380,7 +388,9 @@ async def run_host(cfg: HostConfig) -> None:
         events.emit("calibrating", on=True)
 
     def command(line: str) -> None:
-        if line == "calibrate on":
+        if keeper.command(line):
+            pass
+        elif line == "calibrate on":
             loop.create_task(calibrate_on())
         elif line.startswith("look "):
             look_command(server, line[5:])
@@ -413,6 +423,7 @@ async def run_host(cfg: HostConfig) -> None:
         if network is not None:
             network.cancel()
         wifi.stop()
+        keeper.close()
         camera.stop()
         capture.close()
         if isolink is not None:
@@ -1185,7 +1196,12 @@ async def run_agent(cfg: AgentConfig) -> None:
 
         session.on_edge = lambda data: overlay.command(command_line(data))
 
+    from curslink.keepawake import ScreenKeeper
+
+    keeper = ScreenKeeper(cfg.keep_screen_on)
+
     def on_state(state: str, detail: str) -> None:
+        keeper.linked(state == "connected")
         if state == "connected" and client.host and not detail.startswith("relay"):
             peer = paired_host(cfg, store)
             if peer is not None and peer.address != client.host:
@@ -1214,7 +1230,9 @@ async def run_agent(cfg: AgentConfig) -> None:
     stop = asyncio.Event()
     if events.channel.enabled:
         def command(line: str) -> None:
-            if line == "netcheck":
+            if keeper.command(line):
+                pass
+            elif line == "netcheck":
                 from curslink.net.check import emit_check
 
                 try:
@@ -1243,6 +1261,7 @@ async def run_agent(cfg: AgentConfig) -> None:
         for task in (runner, stopper, *helpers):
             task.cancel()
         wifi.stop()
+        keeper.close()
         if camera:
             camera.stop()
         if smoother:

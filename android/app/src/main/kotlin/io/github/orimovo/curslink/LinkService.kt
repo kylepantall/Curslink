@@ -131,6 +131,7 @@ class LinkService : Service() {
             discover = ::candidates,
             onState = { s, detail ->
                 state = s to (if (s == LinkState.PAUSED) pauseWhy() else detail)
+                InputService.instance?.holdScreen(prefs.keepScreenOn && s == LinkState.CONNECTED)
                 if (s == LinkState.CONNECTED) link?.via?.substringBefore(":")?.takeIf { !it.startsWith("relay") }?.let(prefs::rememberAddress)
                 updateNotification()
                 PauseTile.refresh(this)

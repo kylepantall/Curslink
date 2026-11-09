@@ -130,6 +130,25 @@ class Curslink(QObject):
         if restart and self.service.is_alive():
             self.service.restart()
 
+    def keep_screen_on(self) -> bool:
+        """"Keep my screen on" ([host] / [agent] keep_screen_on, see curslink.keepawake)."""
+        try:
+            cfg = self.config()
+            return bool(cfg.get("agent" if cfg.role == "agent" else "host", "keep_screen_on", False))
+        except Exception:
+            return False
+
+    def set_keep_screen_on(self, on: bool) -> None:
+        """Save it and tell the running service, which takes it without a restart."""
+        cfg = self.config()
+        table = "agent" if cfg.role == "agent" else "host"
+        if bool(cfg.get(table, "keep_screen_on", False)) == on:
+            return
+        cfg.set(table, "keep_screen_on", on)
+        cfg.save()
+        self.service.send(f"keep_screen_on {'on' if on else 'off'}")
+        self.config_saved(restart=False)
+
     def ask_switch_role(self) -> None:
         """Confirm, then switch host <-> agent."""
         role = self.role

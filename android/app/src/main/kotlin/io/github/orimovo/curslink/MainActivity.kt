@@ -22,6 +22,7 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.widget.SwitchCompat
 import androidx.core.content.ContextCompat
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
@@ -171,6 +172,20 @@ class MainActivity : AppCompatActivity() {
             root.addView(button(if (busy) "Pairing…" else "Scan QR code") { if (!busy) startScan() })
             root.addView(text("Or pick \"${prefs.name}\" under Nearby on the computer's Devices page, and type the code it shows here.", 13f))
         }
+
+        root.addView(text("Screen", 20f, bold = true, top = 24))
+        root.addView(SwitchCompat(this).apply {
+            text = "Keep the screen on"
+            textSize = 16f
+            isChecked = prefs.keepScreenOn
+            setOnCheckedChangeListener { _, on ->
+                prefs.keepScreenOn = on
+                InputService.instance?.holdScreen(on && LinkService.state.first == LinkState.CONNECTED)
+            }
+        })
+        root.addView(text("While the phone is linked to ${pairing?.hostName ?: "your computer"}, its screen stays on " +
+            "instead of dimming and locking, so it's ready when the pointer comes over. It sleeps as usual once the " +
+            "link drops. Without this it stays on for 2 minutes after you use the mouse here.", 13f))
 
         root.addView(text("Away from home", 20f, bold = true, top = 24))
         root.addView(text("With a Curslink relay, the phone can reach the computer from any network. A QR code from a computer that uses one fills this in.", 13f))

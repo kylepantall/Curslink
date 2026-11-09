@@ -17,6 +17,7 @@ import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
+import io.github.orimovo.curslink.core.LinkState
 import kotlin.math.abs
 
 /**
@@ -53,6 +54,8 @@ class InputService : AccessibilityService() {
     private val shapeHandler = Handler(shapeThread.looper)
     private var shapeQueued = false
     private var active = false
+    // "Keep the screen on" while linked (see holdScreen).
+    private var holding = false
     private var lastInput = 0L
     private val mods = mutableSetOf<Keys.Mod>()
     private var pointer = PointF()
@@ -74,6 +77,7 @@ class InputService : AccessibilityService() {
         wm = getSystemService(WINDOW_SERVICE) as WindowManager
         AppLog.i(TAG, "mouse and keyboard service on")
         addOverlay()
+        holdScreen(Prefs(this).keepScreenOn && LinkService.state.first == LinkState.CONNECTED)
         // The link may already be up (the service runs on its own).
         if (Prefs(this).pairing != null) runCatching { LinkService.start(this) }
     }
@@ -126,6 +130,7 @@ class InputService : AccessibilityService() {
             view = v
             params = lp
             AppLog.i(TAG, "pointer overlay added")
+            if (holding) keepScreenOn(true)
         }.onFailure { AppLog.w(TAG, "couldn't add the pointer overlay", it) }
     }
 
@@ -251,10 +256,23 @@ class InputService : AccessibilityService() {
             runCatching { wm.updateViewLayout(v, lp) }
         }
         main.removeCallbacks(idle)
-        if (on) main.postDelayed(idle, KEEP_ON_MS)
+        if (on && !holding) main.postDelayed(idle, KEEP_ON_MS)
     }
 
-    private val idle = Runnable { keepScreenOn(false) }
+    private val idle = Runnable { if (!holding) keepScreenOn(false) }
+
+    /** "Keep the screen on" in the app: while linked the screen stays on (it
+     *  doesn't turn it on if it's already off), mouse here or not. */
+    fun holdScreen(on: Boolean) = main.post {
+        if (holding == on) return@post
+        holding = on
+        AppLog.i(TAG, if (on) "keeping the screen on while linked" else "the screen can sleep again")
+        when {
+            on -> keepScreenOn(true)
+            SystemClock.uptimeMillis() - lastInput < KEEP_ON_MS -> keepScreenOn(true)  // the usual 2 minutes after use
+            else -> keepScreenOn(false)
+        }
+    }
 
     private fun wakeIfDark() {
         val pm = getSystemService(POWER_SERVICE) as PowerManager
