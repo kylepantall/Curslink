@@ -405,7 +405,9 @@ def make_drag_source(tid: str, paths: list[str], info: dict):
             drag.setPixmap(card_pixmap(info))
             drag.setHotSpot(QPoint(-14, -14))
             _say(f"nativedrag-started {tid}")
-            action = drag.exec(Qt.DropAction.CopyAction | Qt.DropAction.MoveAction, Qt.DropAction.CopyAction)
+            # Copy only: a file manager would otherwise move the placeholder
+            # out of the temp folder while its bytes are still arriving.
+            action = drag.exec(Qt.DropAction.CopyAction, Qt.DropAction.CopyAction)
             name = {Qt.DropAction.CopyAction: "copy", Qt.DropAction.MoveAction: "move",
                     Qt.DropAction.LinkAction: "link"}.get(action, "none")
             _say(f"nativedrag-ended {tid} {name}")

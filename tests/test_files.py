@@ -976,3 +976,28 @@ def test_focus_follower_waits_for_the_pointer_to_rest():
     under["hit"] = None                            # the taskbar, or ours
     f.tick(1.5)
     assert raised == [42, 43]
+
+
+def test_every_drag_frame_the_host_sends_is_valid():
+    # 0.4.34: an agent rejected drag {drop, id} as malformed and dropped the link.
+    from curslink.protocol import ProtocolError
+
+    for data in ({"card": CARD, "id": "t1"}, {"drop": True, "id": "t1"}, {"hide": True, "id": "t1"},
+                 {"hide": True}, {"card": CARD}):
+        assert decode(encode("drag", **data)).t == "drag"
+    with pytest.raises(ProtocolError):
+        decode(encode("drag", drop=True))
+    with pytest.raises(ProtocolError):
+        decode(encode("drag", id="t1"))
+
+
+async def test_carried_drag_frames_survive_the_wire(new_drag, tmp_path):
+    handoff, router, transport, helper, injected = new_drag
+    f = tmp_path / "big.bin"
+    f.write_bytes(b"x" * 1000)
+    handoff.items = meta.describe([str(f)])
+    handoff.carry("laptop")
+    handoff.drop()
+    await settle()
+    for device, t, data in transport.sent:
+        decode(encode(t, **data))  # raises if the agent would refuse it
