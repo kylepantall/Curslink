@@ -407,8 +407,14 @@ def chevron_points(side: str, x: float, y: float, s: float = 4.5) -> tuple[tuple
 class EdgeOverlay:
     """Takes ``edge`` commands (dicts) and keeps the bar and label in step."""
 
-    def __init__(self, to_logical: Callable[[float, float], tuple[float, float]]):
+    def __init__(self, to_logical: Callable[[float, float], tuple[float, float]],
+                 place: Callable[[dict], tuple | None] | None = None):
         self.to_logical = to_logical
+        # A command's ``rect`` on its ``screen`` (``screen_os``, the whole
+        # screen as the host's layout has it) -> Qt's logical (x, y, w, h, ...):
+        # curslink.mirror.helper.spec_to_logical. Without it, or for a command
+        # from an older host, the rect's corners go through ``to_logical``.
+        self.place = place
         self.bar: Bar | None = None
         self.label: Label | None = None
         self.data: dict | None = None
@@ -438,9 +444,22 @@ class EdgeOverlay:
         self._tick()
 
     # -- geometry
-    def _screen_box(self, rect) -> tuple[float, float, float, float, float]:
-        """The screen ``rect`` (OS pixels) in Qt's logical pixels, and the scale."""
+    def _screen_box(self, d: dict) -> tuple[float, float, float, float, float]:
+        """The command's ``rect`` (OS pixels) in Qt's logical pixels, and the
+        scale along its side."""
+        rect = d["rect"]
         x, y, w, h = (float(v) for v in rect)
+        whole = d.get("screen_os")
+        if self.place is not None and isinstance(whole, list) and len(whole) == 4 and w > 0 and h > 0:
+            # By fractions of the screen: Windows' scaling can make the layout's
+            # size of a screen differ from this process's, which put the label
+            # well away from the pointer.
+            found = self.place({"screen": str(d.get("screen", "")), "screen_os": whole, "os": list(rect)})
+            if found is not None:
+                lx, ly, lw, lh = (float(v) for v in found[:4])
+                scale = lh / h if d.get("side") in ("left", "right") else lw / w
+                if scale > 0:
+                    return lx, ly, lw, lh, scale
         lx, ly = self.to_logical(x, y)
         rx, ry = self.to_logical(x + w - 1, y + h - 1)
         scale = (rx - lx + 1) / w if w > 1 else 1.0
@@ -454,7 +473,7 @@ class EdgeOverlay:
             return
         if self.bar is None:
             self.bar = Bar()
-        lx, ly, lw, lh, s = self._screen_box(d["rect"])
+        lx, ly, lw, lh, s = self._screen_box(d)
         side = d["side"]
         a, b = sorted((float(d["a"]) * s, float(d["b"]) * s))
         at = float(d["at"]) * s

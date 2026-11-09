@@ -7,6 +7,10 @@ the device's icon and name. The same bar rises on the facing edge of the
 screen the pointer is heading for, so you can see where it's about to land.
 Crossing flashes both bars and lets them fade.
 
+In mirror mode (:mod:`curslink.mirror`) the bars go where overlapping
+screens really meet (their fit), and an edge hidden behind the screen in
+front glows in that screen's mirror, where the pointer shows.
+
 This module is the platform free part: :func:`find_hint` works out which
 edge is near and where it leads, and :class:`EdgeIndicator` turns the
 router's pointer positions into ``edge`` commands for each device's overlay
@@ -21,6 +25,9 @@ An ``edge`` command (a JSON object) is one of:
                                        (bar and label); "to": the screen it's
                                        heading for (bar only)
      "rect": [x, y, width, height],    that screen, in its device's OS pixels
+     "screen": "main",                 the screen it's on, and that whole
+     "screen_os": [x, y, w, h],        screen as the layout has it: the overlay
+                                       places "rect" as fractions of it
      "side": "left" | "right" | "top" | "bottom",
      "a": 0, "b": 1080,                the stretch of that side that leads
                                        across, pixels from the screen's top
@@ -81,6 +88,11 @@ class EdgeHint:
     # ``a``, ``b`` and ``at`` count from the screen's own top (or left).
     rect: tuple[int, int, int, int] = (0, 0, 0, 0)
     trect: tuple[int, int, int, int] = (0, 0, 0, 0)
+    # Mirror mode, with the edge behind the screen in front (``target``): the
+    # pointer shows in that screen's mirror, so the bar and label go there,
+    # where the edge is in the mirror (``trect``'s ``target_side``, with
+    # ``ta``, ``tb`` and ``tat``), and nothing shows on ``here``.
+    on_target: bool = False
 
     @property
     def near(self) -> float:
@@ -217,6 +229,66 @@ def _covered_hints(layout: Layout, here: Screen, x: float, y: float,
     return out
 
 
+def _span(lo: float, hi: float, start: int, end: int) -> tuple[float, float]:
+    """The part of [lo, hi) within [start, end), from ``start``: the whole
+    of it when they don't meet."""
+    a, b = max(lo, start), min(hi, end)
+    if b <= a:
+        return 0.0, float(end - start)
+    return a - start, b - start
+
+
+def _mirror_hint(layout: Layout, here: Screen, side: str, at: float, ex: float, ey: float, distance: float,
+                 target: Screen, crossing) -> EdgeHint | None:
+    """Mirror mode, an edge of ``here`` leading to a screen it overlaps.
+
+    Where the two really meet comes from their fit (calibrated, or from their
+    real sizes), not the layout's rough overlap. Leaving the screen in front
+    for the one behind, the bar on the screen behind is where the front one's
+    edge really stands on it. Leaving the screen behind where its edge is
+    hidden by the one in front, the pointer shows in that one's mirror, so the
+    bar and label go there, where the edge shows in the mirror."""
+    vertical = side in ("left", "right")
+    if layout.in_front(target, here):
+        if not layout.pointer_through:
+            return None  # the covered part is blocked out: _covered_hints marks where it starts
+        t = target
+        x0, y0 = layout.map_point(here, t, here.x, here.y)
+        x1, y1 = layout.map_point(here, t, here.right, here.bottom)
+        px, py = layout.map_point(here, t, ex, ey)
+        if side == "right":
+            line = min(max(round(x1), t.x + 1), t.right)
+            trect = (t.x, t.y, line - t.x, t.height)
+        elif side == "left":
+            line = min(max(round(x0), t.x), t.right - 1)
+            trect = (line, t.y, t.right - line, t.height)
+        elif side == "bottom":
+            line = min(max(round(y1), t.y + 1), t.bottom)
+            trect = (t.x, t.y, t.width, line - t.y)
+        else:
+            line = min(max(round(y0), t.y), t.bottom - 1)
+            trect = (t.x, line, t.width, t.bottom - line)
+        if vertical:
+            ta, tb = _span(y0, y1, t.y, t.bottom)
+            tat = py - t.y
+        else:
+            ta, tb = _span(x0, x1, t.x, t.right)
+            tat = px - t.x
+        a, b, _, _, _ = _stretch(layout, here, side, at, target)
+        return EdgeHint(here, side, a, b, at, distance, t, side, ta, tb, tat, _whole(here), trect, on_target=True)
+    real_target = layout.placed(target, here)   # the screen behind, in here's pixels
+    real_here = layout.placed(here, target)     # here, in the screen behind's pixels
+    if vertical:
+        a, b = _span(real_target.y, real_target.bottom, here.y, here.bottom)
+        ta, tb = _span(real_here.y, real_here.bottom, target.y, target.bottom)
+    else:
+        a, b = _span(real_target.x, real_target.right, here.x, here.right)
+        ta, tb = _span(real_here.x, real_here.right, target.x, target.right)
+    trect, target_side = _entry_rect(target, side, _boundary(real_here, side))
+    tat = _along(target, target_side, crossing.x, crossing.y)
+    return EdgeHint(here, side, a, b, at, distance, target, target_side, ta, tb, tat, _whole(here), trect)
+
+
 def find_hint(layout: Layout, device_id: str, x: float, y: float,
               available: Callable[[str], bool], gap_tolerance: int = 0) -> EdgeHint | None:
     """The nearest edge within :data:`RANGE_PX` of (x, y) that leads to
@@ -236,8 +308,9 @@ def find_hint(layout: Layout, device_id: str, x: float, y: float,
         at = _along(here, side, ex, ey)
         target = crossing.screen
         if layout.mirror and _overlapping(here, target):
-            # Mirror mode: the screen in front shows the one behind, so the
-            # pointer visibly carries on across; no edge to mark there.
+            hint = _mirror_hint(layout, here, side, at, ex, ey, max(0.0, distance), target, crossing)
+            if hint is not None:
+                best = hint
             continue
         a, b, target_side, ta, tb = _stretch(layout, here, side, at, target)
         if target_side == OPPOSITE[side]:
@@ -272,6 +345,14 @@ def _os_rect(screen: Screen, rect: tuple[int, int, int, int]) -> list[int]:
         x, y, w, h = _whole(screen)
     ox, oy = screen.to_os(x, y)
     return [ox, oy, w, h]
+
+
+def _where(screen: Screen, rect: tuple[int, int, int, int]) -> dict:
+    """An edge command's ``rect``, with the whole screen it's on: the overlay
+    places ``rect`` as fractions of that screen, so a layout size that isn't
+    the screen's real one (Windows scaling) still lines up with the pointer."""
+    return {"rect": _os_rect(screen, rect), "screen": screen.id,
+            "screen_os": [screen.os_x, screen.os_y, screen.width, screen.height]}
 
 
 class EdgeIndicator:
@@ -316,15 +397,19 @@ class EdgeIndicator:
         if hint is not None:
             target = hint.target.device_id
             near = round(hint.near, 3)
-            wanted[device_id] = {
-                "role": "from", "rect": _os_rect(hint.here, hint.rect), "side": hint.side,
-                "a": round(hint.a), "b": round(hint.b), "at": round(hint.at), "near": near,
-                "name": self.name(target), "kind": self.kind(target),
-            }
-            wanted[target] = {
-                "role": "to", "rect": _os_rect(hint.target, hint.trect), "side": hint.target_side,
+            to = {
+                "role": "to", **_where(hint.target, hint.trect), "side": hint.target_side,
                 "a": round(hint.ta), "b": round(hint.tb), "at": round(hint.tat), "near": near,
             }
+            if hint.on_target:  # the edge shows in the mirror on the screen in front
+                wanted[target] = {**to, "role": "from", "name": self.name(target), "kind": self.kind(target)}
+            else:
+                wanted[device_id] = {
+                    "role": "from", **_where(hint.here, hint.rect), "side": hint.side,
+                    "a": round(hint.a), "b": round(hint.b), "at": round(hint.at), "near": near,
+                    "name": self.name(target), "kind": self.kind(target),
+                }
+                wanted[target] = to
         for device in list(self._shown):
             if device not in wanted:
                 self._put(device, {"hide": True})
@@ -337,7 +422,9 @@ class EdgeIndicator:
         fade, and keep the edge it came in by dark until it moves away."""
         last, self._last = self._last, None
         if last is not None and last.target.device_id == to_device:
-            self._quiet = (to_device, last.target.id, last.target_side)
+            # Out of a mirror, the pointer comes in by the front screen's own side.
+            side = OPPOSITE[last.side] if last.on_target else last.target_side
+            self._quiet = (to_device, last.target.id, side)
         for device in list(self._shown):
             self._put(device, {"flash": True})
 
