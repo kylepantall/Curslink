@@ -272,6 +272,8 @@ def _mac_window_number(widget: QWidget) -> int | None:  # pragma: no cover - mac
 
 def mac_unseen_windows() -> set[int] | None:
     """The window numbers of :data:`_unseen`, or None if any can't be had."""
+    if QGuiApplication.platformName() != "cocoa":
+        return None  # another Qt platform (offscreen, in tests): its window ids aren't NSViews
     out = set()
     for widget in list(_unseen):
         try:
