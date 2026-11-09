@@ -123,7 +123,8 @@ async def run_check(device_id: str, peers: set[str], timeout: float = MDNS_TIMEO
     from curslink.pairing.discovery import browse
 
     started = time.monotonic()
-    result: dict = {"interfaces": interfaces(), "mdns": {}}
+    # interfaces() can run networksetup on a Mac: not on this loop.
+    result: dict = {"interfaces": await asyncio.to_thread(interfaces), "mdns": {}}
     try:
         found = await browse(timeout)
     except Exception as exc:  # zeroconf can't start (no network, socket in use)
