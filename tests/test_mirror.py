@@ -1510,3 +1510,12 @@ def test_placing_it_again_while_adjusting_moves_the_guides_there():
               "hold": True, "tune": True})
     show, = transport.of("mirror", "lap")[-1]["shows"]
     assert show["guides"] != old and show["guides"] == show["src"]
+
+
+def test_fine_tuning_starts_from_the_layout_when_the_saved_line_up_is_far_off():
+    pytest.importorskip("PySide6.QtCore")
+    from curslink.gui.pages.layout import far_from_layout
+
+    ultrawide, phone = (0, 0, 3440, 1440), (1500, 1000, 384, 832)
+    assert far_from_layout((570.2, 1321.3, 0.3149), ultrawide, phone)     # Kyle's old one, on the left
+    assert not far_from_layout((1520, 1010, 0.8), ultrawide, phone)       # roughly where it's laid out
