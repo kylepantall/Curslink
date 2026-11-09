@@ -279,6 +279,12 @@ class ClipboardHelper:
         after it has restarted or gone."""
         if sys.platform != "win32" or self.clipboard is None:
             return
+        from PySide6.QtGui import QGuiApplication
+
+        # Only Qt's own Windows clipboard puts an OLE data object there (not
+        # e.g. the offscreen platform the tests use), and only if it's ours.
+        if QGuiApplication.platformName() != "windows" or not self.clipboard.ownsClipboard():
+            return
         try:
             import ctypes
 
