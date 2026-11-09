@@ -84,6 +84,52 @@ class PointerView(context: Context, toPx: (Double, Double) -> Pair<Float, Float>
         }
     }
 
+    // The card of a file dragged here from a computer (see Drops): it follows the pointer.
+    private var cardTitle: String? = null
+    private var cardLine = ""
+    private val cardBg = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(235, 32, 34, 40); style = Paint.Style.FILL }
+    private val cardEdge = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.argb(90, 255, 255, 255); style = Paint.Style.STROKE; strokeWidth = 1f * d
+    }
+    private val cardIcon = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(61, 99, 221); style = Paint.Style.FILL }
+    private val titlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE; textSize = 14f * d; typeface = android.graphics.Typeface.DEFAULT_BOLD
+    }
+    private val linePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(190, 194, 204); textSize = 12f * d }
+
+    /** Show (or with null, take down) the dragged file's card next to the pointer. */
+    fun showCard(title: String?, line: String = "") {
+        cardTitle = title
+        cardLine = line
+        invalidate()
+    }
+
+    private fun drawCard(c: Canvas, title: String) {
+        val maxText = 220f * d
+        fun fit(text: String, paint: Paint): String {
+            if (paint.measureText(text) <= maxText) return text
+            var t = text
+            while (t.length > 1 && paint.measureText("$t…") > maxText) t = t.dropLast(1)
+            return "$t…"
+        }
+        val t = fit(title, titlePaint)
+        val l = fit(cardLine, linePaint)
+        val pad = 10f * d
+        val icon = 28f * d
+        val w = pad * 3 + icon + maxOf(titlePaint.measureText(t), linePaint.measureText(l))
+        val h = pad * 2 + icon + 4f * d
+        // Below and to the right of the pointer, kept on the screen.
+        val x = (px + 14f * d).coerceAtMost(width - w - 4f * d).coerceAtLeast(4f * d)
+        val y = (py + 22f * d).let { if (it + h > height - 4f * d) py - h - 8f * d else it }.coerceAtLeast(4f * d)
+        val r = RectF(x, y, x + w, y + h)
+        c.drawRoundRect(r, 12f * d, 12f * d, cardBg)
+        c.drawRoundRect(r, 12f * d, 12f * d, cardEdge)
+        val ir = RectF(x + pad, y + (h - icon) / 2, x + pad + icon, y + (h + icon) / 2)
+        c.drawRoundRect(ir, 6f * d, 6f * d, cardIcon)
+        c.drawText(t, ir.right + pad, y + pad + titlePaint.textSize, titlePaint)
+        c.drawText(l, ir.right + pad, y + pad + titlePaint.textSize + 4f * d + linePaint.textSize, linePaint)
+    }
+
     /** How many times it has drawn (InputService checks it did after the mouse arrives). */
     var draws = 0
         private set
@@ -97,6 +143,7 @@ class PointerView(context: Context, toPx: (Double, Double) -> Pair<Float, Float>
             ringPaint.strokeWidth = 4f * d * (1f - ring) + 1f
             canvas.drawCircle(px, py, 8f * d + 40f * d * ring, ringPaint)
         }
+        cardTitle?.let { drawCard(canvas, it) }
         if (!shown) return
         fill.alpha = (blinkAlpha * 255).toInt()
         edge.alpha = fill.alpha

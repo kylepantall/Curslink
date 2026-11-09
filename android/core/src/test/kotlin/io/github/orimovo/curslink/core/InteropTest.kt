@@ -64,9 +64,16 @@ class InteropTest {
                 "enter 10.0 20.0 pop", "move 30.0 40.0", "button left true", "button left false",
                 "scroll 0.0 -1.5", "key a true", "key a false", "key shift true", "key shift false", "leave blink",
             )
-            fun run(pairing: HostPairing, wantUdp: Boolean) {
+            val downloads = java.nio.file.Files.createTempDirectory("phone-downloads").toFile()
+            val saved = LinkedBlockingQueue<List<String>>()
+            val drops = object : DropHandler {
+                override fun card(card: DragCard?) { events.put("card ${card?.name}") }
+                override fun saved(id: String, names: List<String>, where: String) { saved.put(names) }
+            }
+            fun run(pairing: HostPairing, wantUdp: Boolean, files: Boolean = false) {
                 events.clear()
-                val link = AgentLink(handler, { pairing }, { Hello("Test Pixel", "Android 15", screens) }, log = { println("link: $it") })
+                val link = AgentLink(handler, { pairing }, { Hello("Test Pixel", "Android 15", screens) }, log = { println("link: $it") },
+                    files = if (files) FileSession(drops, FileStore(downloads)) else null)
                 link.start()
                 try {
                     val connected = next("CONNECTED")
@@ -80,12 +87,27 @@ class InteropTest {
                         if (e != got.lastOrNull()) got += e
                     }
                     assertEquals(expected, got)
+                    if (files) {
+                        // Dragged on the host, let go of on the phone.
+                        val dropped = next("DROPPED")
+                        assertTrue("\"state\": \"sent\"" in dropped, dropped)
+                        assertEquals(listOf("from-host.txt"), saved.poll(10, TimeUnit.SECONDS))
+                        assertEquals("from the host ".repeat(3000), java.io.File(downloads, "from-host.txt").readText())
+                        // Dragged on a PC, held across to the phone, let go of there: PC -> host -> phone.
+                        val relayed = next("RELAYED")
+                        assertTrue("\"pc_heard\": true" in relayed && "\"pc_kept\": false" in relayed, relayed)
+                        assertTrue("\"state\": \"sent\"" in relayed, relayed)
+                        assertEquals(listOf("from-pc.bin"), saved.poll(10, TimeUnit.SECONDS))
+                        assertEquals("from the pc ".repeat(9000), java.io.File(downloads, "from-pc.bin").readText())
+                        val cards = events.toList().filter { it.startsWith("card ") }
+                        assertTrue("card from-host.txt" in cards && "card from-pc.bin" in cards, cards.toString())
+                    }
                 } finally {
                     link.stop()
                 }
             }
             val pairing = HostPairing(invite.hostId, invite.hostName, me.deviceId, result.key, listOf(address), invite.controlPort, invite.relay, invite.relayKey)
-            run(pairing, wantUdp = true)
+            run(pairing, wantUdp = true, files = true)
             run(pairing.copy(addresses = emptyList()), wantUdp = false)  // through the relay only
 
             // Paused (taking a call): the phone says goodbye, the host knows it

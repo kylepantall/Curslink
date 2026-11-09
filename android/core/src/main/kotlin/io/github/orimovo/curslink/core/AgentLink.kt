@@ -90,6 +90,8 @@ class AgentSession(
     private val handler: InputHandler,
     val mirror: MirrorSession? = null,
     val clipboard: ClipboardSession? = null,
+    /** Files dragged here from a computer (see Files.kt); null leaves this phone out of file drags. */
+    val files: FileSession? = null,
 ) {
     @Volatile var active = false
         private set
@@ -129,6 +131,7 @@ class AgentSession(
             }
             "leave" -> {
                 releaseAll()
+                files?.left()
                 handler.leave(f.str("effect") ?: "none", f.num("x"), f.num("y"))
             }
             "button" -> {
@@ -153,7 +156,8 @@ class AgentSession(
             "mirror", "mirror_frame", "mirror_pointer", "mirror_ack" -> return mirror?.handle(f)
             "edge" -> EdgeCommand.parse(f)?.let { handler.edge(it) }
             "clip", "clip_data" -> clipboard?.handle(f)
-            // Everything else (look, hint, drag, files, popups) is only sent to
+            "drag", "file_begin", "file_item", "file_data", "file_end", "file_cancel" -> return files?.handle(f)
+            // Everything else (look, hint, drag_out, popups) is only sent to
             // agents that list the feature in hello, and we list none of them.
         }
         return null
@@ -197,8 +201,10 @@ class AgentLink(
     mirror: MirrorHandler? = null,
     /** Text copied on a computer (see Clipboard.kt); null leaves this phone out of clipboard sync. */
     clipboard: ((String) -> Unit)? = null,
+    /** Files dragged here (see Files.kt); null leaves this phone out of file drags. */
+    files: FileSession? = null,
 ) {
-    val session = AgentSession(handler, mirror?.let { MirrorSession(it) }, clipboard?.let { ClipboardSession(it) })
+    val session = AgentSession(handler, mirror?.let { MirrorSession(it) }, clipboard?.let { ClipboardSession(it) }, files)
     @Volatile private var running = false
     @Volatile private var socket: Socket? = null
     @Volatile private var udp: AgentUdp? = null
@@ -345,7 +351,9 @@ class AgentLink(
             val features = listOf("edge") + (if (opened.direct) listOf("udp") else emptyList()) +
                 // mirror_cursor: our captures show the pointer already (it's drawn on the screen).
                 (if (session.mirror != null) listOf("mirror", "mirror_cursor") else emptyList()) +
-                (if (session.clipboard != null) listOf(CLIPBOARD_TEXT_FEATURE) else emptyList())
+                (if (session.clipboard != null) listOf(CLIPBOARD_TEXT_FEATURE) else emptyList()) +
+                // Bytes come only once a drag is let go of here (drop), acknowledged as they arrive.
+                (if (session.files != null) listOf(FILES_FEATURE, DROP_FEATURE, FILE_ACK_FEATURE) else emptyList())
             io.send("hello", jsonOf(
                 "v" to PROTOCOL_VERSION,
                 "device_id" to p.myId,
@@ -395,6 +403,7 @@ class AgentLink(
             session.dropped()
             session.mirror?.let { m -> m.send = { _, _ -> }; m.reset() }
             session.clipboard?.reset()
+            session.files?.reset()
         }
     }
 }

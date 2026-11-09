@@ -31,6 +31,15 @@ its drag (:mod:`curslink.files.dragout`) and answers with a card, which
 follows the host's pointer until the button comes up, when the host sends
 ``fetch`` and the agent sends the files here.
 
+A held drag can go on through any number of devices before it's let go
+of: from the Mac over a PC to a phone, say, or from the PC through the Mac
+to the phone. Each device it passes shows the card while the pointer is
+there and takes it down when it moves on; only the one it's let go of on
+gets the files. No file bytes move until then. A drag handed over by one
+agent and let go of on another goes agent -> host -> agent: the host
+fetches it from the first and passes each frame on to the second as it
+comes (:meth:`DragHandoff.on_files`), never keeping more than a frame.
+
 All of this runs on the host's event loop.
 """
 
@@ -40,6 +49,7 @@ import asyncio
 import json
 import logging
 import os
+from dataclasses import dataclass
 from typing import Callable
 
 from curslink.files.meta import Dragged, card, describe, human_size
@@ -57,11 +67,24 @@ log = logging.getLogger(__name__)
 DRAG_START_PX = 8        # a press that moves this far is a drag
 PROBE_WAIT_S = 0.6       # how long the shield waits to hear of a drag
 SHIELD_LINGER_S = 1.0    # after a drop, before taking the shield down
-# File bytes in flight to an agent (sent, not yet acknowledged) while a drag is
-# carried there, and after it's dropped. Small while carried: the pointer's
-# moves share the Wi-Fi with them, and the drop must not queue behind them.
-CARRY_WINDOW = 128 * 1024
+# File bytes in flight to an agent (sent, not yet acknowledged) once a drag
+# is dropped there. Nothing is sent while it's only carried: it may yet go
+# on to another device.
 DROPPED_WINDOW = 512 * 1024
+# Passing an agent's files on to another: if that one takes no more for this
+# long, give up (the first agent's frames wait meanwhile).
+RELAY_STALL_S = 5.0
+
+
+@dataclass
+class Relay:
+    """Files an agent handed over, let go of on another agent: each frame
+    from ``source`` goes on to ``target`` with ``send``."""
+    id: str
+    source: str
+    target: str
+    send: Callable
+    names: str = ""
 
 
 def edge_strips(layout: Layout, device_id: str, gap: int) -> list[dict]:
@@ -126,17 +149,20 @@ class DragHandoff:
         self.outgoing: dict[str, Outgoing] = {}
         self._gen = 0                         # bumps on every new press: stale work drops out
         router.listeners.append(self.on_switch)
-        # Files coming the other way, from an agent to here.
+        # Files dragged from an agent, carried here or on to another agent.
         self.awaiting_out: str | None = None  # asked this agent what it's dragging
         self.released_early = False           # ...and the button came up before it said
-        self.incoming: dict | None = None     # {"device", "id", "card"}: dragged here, not dropped yet
-        self.expecting: set[str] = set()      # fetched transfer ids
+        self.remote: dict | None = None       # {"device", "id", "card"}: handed over, not dropped yet
+        self.remote_at: str | None = None     # the device it's on now (this one: local_id)
+        self.expecting: set[str] = set()      # fetched transfer ids, coming here
+        self.relays: dict[str, Relay] = {}    # fetched transfer ids, going on to another agent
         popups = ReceivePopups(helper, emit)
         self.receiver = FileReceiver(None, popups)
         self.native = NativeDrop(helper, self.receiver, popups, press=native_press, release=release_held,
                                  cancel=lambda: inject("release"), follow=follow)
-        self.carry_out: Outgoing | None = None  # files on their way to the device carrying the drag
+        self.carry_id: str | None = None      # the transfer id the carrying device knows the drag by
         router.can_drag_out = lambda device_id: server.supports(device_id, FILES_OUT_FEATURE)
+        router.takes_drag = lambda device_id: server.supports(device_id, FILES_FEATURE)
         router.drag_out = self.ask_drag_out
 
     # --------------------------------------------------------- local input
@@ -144,15 +170,12 @@ class DragHandoff:
         """Called before the router. True: the event was a drop, don't forward it."""
         if button != "left":
             return False
-        if self.router.is_local and (self.incoming is not None or self.awaiting_out is not None):
+        if self.remote is not None or self.awaiting_out is not None:
             if pressed:
                 self.cancel_incoming()
                 return False
-            if self.incoming is not None:
-                inc, self.incoming = self.incoming, None
-                log.info("drag: dropped here")
-                trace("dropped-here")
-                self.native.let_go(inc["id"], inject=False)  # the real button-up is on its way (or held)
+            if self.remote is not None:
+                self.drop_remote()
             else:
                 self.released_early = True
             return True
@@ -227,8 +250,13 @@ class DragHandoff:
 
     # ----------------------------------------------------------- switching
     def on_switch(self, event: SwitchEvent) -> None:
-        if event.to_device != self.router.local_id and (self.incoming or self.awaiting_out):
-            self.cancel_incoming()  # carried on to another device: it isn't dropped here
+        if (self.remote is not None or self.awaiting_out is not None) and event.to_device != self.remote_at:
+            # An agent's drag carried on to another device: the card goes with it.
+            if self.remote is not None:
+                self._hide_remote()
+            self.remote_at = event.to_device
+            if self.remote is not None:
+                self._show_remote()
         if event.to_device == self.router.local_id:
             if self.carrying is not None:
                 log.info("drag came back to this computer")
@@ -300,38 +328,34 @@ class DragHandoff:
         if not self.server.supports(device_id, DROP_FEATURE):
             self.server.send(device_id, "drag", card=card(self.items))  # older agent: sent on the drop
             return
-        # Start sending now, so a big file is (nearly) there by the time it's dropped.
-        out = Outgoing(new_id(), device_id, self.items)
-        if self.server.supports(device_id, FILE_ACK_FEATURE):
-            out.window = CARRY_WINDOW
-        self.outgoing[out.id] = out
-        self.carry_out = out
-        self.server.send(device_id, "drag", card=card(self.items), id=out.id)
-        out.task = asyncio.get_running_loop().create_task(self._send(out))
+        # Only the card for now: the files go when it's let go of here, and
+        # not at all if it goes on to another device.
+        self.carry_id = new_id()
+        self.server.send(device_id, "drag", card=card(self.items), id=self.carry_id)
 
     def _cancel_carry(self) -> None:
-        out, self.carry_out = self.carry_out, None
-        if out is None:
+        tid, self.carry_id = self.carry_id, None
+        if tid is None or self.carrying is None:
             return
-        log.info("drag: not dropped on %s; stopping its transfer", out.device_id)
-        trace("not-dropped", on=out.device_id)
-        self.outgoing.pop(out.id, None)
-        if out.task is not None:
-            out.task.cancel()
-        self.server.send(out.device_id, "drag", hide=True, id=out.id)
+        log.info("drag: passed over %s without being dropped", self.carrying)
+        trace("not-dropped", on=self.carrying)
+        self.server.send(self.carrying, "drag", hide=True, id=tid)
 
     # ---------------------------------------------------------------- drop
     def drop(self) -> None:
         device_id, items = self.carrying, self.items
         self.carrying = None
         loop = asyncio.get_running_loop()
-        out, self.carry_out = self.carry_out, None
+        tid, self.carry_id = self.carry_id, None
         trace("dropped-on", on=device_id)
-        if out is not None and out.device_id == device_id:
-            log.info("drag: dropped on %s (%s of %s sent)", device_id, human_size(out.sent),
-                     human_size(out.total) if out.total else "?")
-            self.server.send(device_id, "drag", drop=True, id=out.id)
-            out.set_window(DROPPED_WINDOW)
+        if tid is not None:
+            log.info("drag: dropped on %s; sending", device_id)
+            self.server.send(device_id, "drag", drop=True, id=tid)
+            out = Outgoing(tid, device_id, items)
+            if self.server.supports(device_id, FILE_ACK_FEATURE):
+                out.window = DROPPED_WINDOW
+            self.outgoing[out.id] = out
+            out.task = loop.create_task(self._send(out))
         else:
             log.info("drag: dropped on %s; sending", device_id)
             self.server.send(device_id, "drag", hide=True)
@@ -367,6 +391,18 @@ class DragHandoff:
             self.emit("file", state="failed", id=out.id, to=out.device_id, error=out.refused or str(exc))
 
     def on_result(self, device_id: str, data: dict) -> None:
+        relay = self.relays.get(str(data.get("id")))
+        if relay is not None and relay.target == device_id:
+            # Saved (or not) on the agent it was let go of on: tell the one it came from.
+            self.relays.pop(relay.id, None)
+            self.server.send(relay.source, "file_result", **data)
+            if data.get("ok") is True:
+                log.info("passed %s on from %s to %s", relay.names or "the files", relay.source, device_id)
+                self.emit("file", state="sent", id=relay.id, to=device_id, saved=data.get("saved"),
+                          folder=data.get("folder"))
+            else:
+                self.emit("file", state="failed", id=relay.id, to=device_id, error=str(data.get("error") or ""))
+            return
         out = self.outgoing.get(str(data.get("id")))
         if out is None or out.device_id != device_id:
             return
@@ -384,13 +420,21 @@ class DragHandoff:
         if gen == self._gen and self.carrying is None:
             self.set_shield(False)
 
-    # ------------------------------------------------- agent -> this computer
+    # ------------------------------------------- from an agent, here or onwards
+    @property
+    def incoming(self) -> dict | None:
+        """An agent's drag on this computer now, not dropped yet."""
+        return self.remote if self.remote_at == self.router.local_id else None
+
     def ask_drag_out(self, device_id: str) -> None:
-        """Router: input is coming here from ``device_id`` with its left
-        button held. Ask it whether that's a file drag (and to end it there)."""
-        log.info("drag: input came back from %s with the button held; asking what it's dragging", device_id)
+        """Router: input is leaving ``device_id`` with its left button held,
+        for this computer or another agent that takes files. Ask it whether
+        that's a file drag (and to end it there)."""
+        log.info("drag: input left %s with the button held; asking what it's dragging", device_id)
         trace("came-back", from_=device_id)
-        self.awaiting_out, self.released_early, self.incoming = device_id, False, None
+        self.cancel_incoming()
+        # on_switch, straight after this, says where it went.
+        self.awaiting_out, self.released_early, self.remote_at = device_id, False, None
         self.server.send(device_id, "drag_out")
 
     def on_drag_out(self, device_id: str, data: dict) -> None:
@@ -402,36 +446,104 @@ class DragHandoff:
         if not isinstance(tid, str) or not isinstance(info, dict):
             log.info("drag: %s wasn't dragging a file", device_id)
             self.released_early = False
+            self.remote_at = None
             return
-        self.incoming = {"device": device_id, "id": tid, "card": info}
-        log.info("drag: %s is dragging %s here", device_id, info.get("name"))
-        # Fetch straight away, so a big file is (nearly) here by the drop.
-        self.expecting.add(tid)
-        self.server.send(device_id, "fetch", id=tid)
-        self.native.begin(tid, info)
+        self.remote = {"device": device_id, "id": tid, "card": info}
+        if self.remote_at is None:
+            self.remote_at = self.router.active_device
+        log.info("drag: %s is dragging %s, now on %s", device_id, info.get("name"), self.remote_at)
+        self._show_remote()
         if self.released_early:
             self.released_early = False
-            self.incoming = None
-            self.native.let_go(tid, inject=False)
+            self.drop_remote()
+
+    def _show_remote(self) -> None:
+        rem, at = self.remote, self.remote_at
+        if rem is None or at is None:
+            return
+        if at == self.router.local_id:
+            self.native.begin(rem["id"], rem["card"])
+        elif not self.server.supports(at, FILES_FEATURE):
+            log.info("drag: %s can't take dropped files; carrying %s on", at, rem["card"].get("name"))
+        elif self.server.supports(at, DROP_FEATURE):
+            self.server.send(at, "drag", card=rem["card"], id=rem["id"])
+        else:
+            self.server.send(at, "drag", card=rem["card"])
+
+    def _hide_remote(self) -> None:
+        rem, at = self.remote, self.remote_at
+        if rem is None or at is None:
+            return
+        trace("carried-past", on=at)
+        if at == self.router.local_id:
+            log.info("drag: carried on past this computer; not dropped here")
+            self.native.cancel(rem["id"])
+        elif self.server.supports(at, DROP_FEATURE):
+            self.server.send(at, "drag", hide=True, id=rem["id"])
+        elif self.server.supports(at, FILES_FEATURE):
+            self.server.send(at, "drag", hide=True)
+
+    def drop_remote(self) -> None:
+        """Let go of an agent's drag: its files go to wherever it is now."""
+        rem, at = self.remote, self.remote_at
+        self.remote, self.remote_at = None, None
+        if rem is None:
+            return
+        source, tid = rem["device"], rem["id"]
+        trace("dropped-on", on=at, from_=source)
+        if at == self.router.local_id:
+            log.info("drag: dropped here; fetching it from %s", source)
+            self.expecting.add(tid)
+            self.native.let_go(tid, inject=False)  # the real button-up is on its way (or held)
+            self.server.send(source, "fetch", id=tid)
+            return
+        if at is None or not self.server.supports(at, FILES_FEATURE) or not self.server.is_connected(source):
+            log.info("drag: let go on %s, which can't take it; %s keeps its files", at, source)
+            self.server.send(source, "fetch", id=tid, cancel=True)
+            return
+        log.info("drag: dropped on %s; passing it on from %s", at, source)
+        if self.server.supports(at, DROP_FEATURE):
+            self.server.send(at, "drag", drop=True, id=tid)
+        else:
+            self.server.send(at, "drag", hide=True)
+        relay = Relay(tid, source, at, self.server.bulk_sender(at), str(rem["card"].get("name") or ""))
+        self.relays[tid] = relay
+        self.emit("file", state="sending", id=tid, to=at, names=relay.names)
+        self.server.send(source, "fetch", id=tid)
 
     def cancel_incoming(self) -> None:
-        if self.incoming is not None:
-            tid = self.incoming["id"]
-            log.info("drag: carried on past this computer; not dropped here")
-            trace("carried-past")
-            self.server.send(self.incoming["device"], "fetch", id=tid, cancel=True)
-            self.expecting.discard(tid)
-            self.native.cancel(tid)
-        self.incoming, self.awaiting_out, self.released_early = None, None, False
+        """Forget an agent's drag that wasn't let go of (a new press, a new drag)."""
+        if self.remote is not None:
+            self._hide_remote()
+            self.server.send(self.remote["device"], "fetch", id=self.remote["id"], cancel=True)
+        self.remote, self.remote_at, self.awaiting_out, self.released_early = None, None, None, False
 
-    def on_files(self, device_id: str, msg) -> bytes | None:
-        """file_* frames from an agent: only for transfers this computer asked for."""
+    def on_disconnect(self, device_id: str) -> None:
+        """An agent went away: a drag from it, or files passing through to or from it, stop."""
+        if self.awaiting_out == device_id:
+            self.awaiting_out, self.released_early = None, False
+        if self.remote is not None and self.remote["device"] == device_id:
+            log.info("drag: %s went away; its drag is over", device_id)
+            if self.remote_at != device_id:
+                self._hide_remote()
+            self.remote, self.remote_at = None, None
+        for relay in [r for r in self.relays.values() if device_id in (r.source, r.target)]:
+            self._relay_failed(relay, f"{device_id} disconnected")
+
+    def on_files(self, device_id: str, msg):
+        """file_* frames from an agent: only for transfers this computer asked
+        for. Frames passing through to another agent come back as a
+        coroutine, which the connection awaits before reading the next one
+        (so the first agent never sends faster than the second takes)."""
         tid = msg.get("id")
         if msg.t == "file_ack":
             out = self.outgoing.get(tid)
             if out is not None and out.device_id == device_id:
                 out.ack(msg.get("n"))
             return None
+        relay = self.relays.get(tid)
+        if relay is not None and relay.source == device_id and msg.t != "file_result":
+            return self._pass_on(relay, msg)
         if tid not in self.expecting:
             return None
         if msg.t in ("file_end", "file_cancel"):
@@ -440,6 +552,30 @@ class DragHandoff:
         if reply is not None and b'"ok":false' in reply:
             self.expecting.discard(tid)
         return reply
+
+    async def _pass_on(self, relay: Relay, msg) -> None:
+        data = dict(msg.data)
+        if msg.t == "file_begin":
+            data.pop("ack", None)  # the source sends as fast as the target takes: no acks needed
+        try:
+            await asyncio.wait_for(relay.send(msg.t, **data), RELAY_STALL_S)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._relay_failed(relay, str(exc) or type(exc).__name__)
+            return
+        if msg.t == "file_cancel":
+            self.relays.pop(relay.id, None)
+            self.emit("file", state="failed", id=relay.id, to=relay.target, error=str(msg.get("reason") or ""))
+
+    def _relay_failed(self, relay: Relay, why: str) -> None:
+        if self.relays.pop(relay.id, None) is None:
+            return
+        log.warning("couldn't pass %s on from %s to %s: %s", relay.names or "the files", relay.source,
+                    relay.target, why)
+        self.server.send(relay.source, "fetch", id=relay.id, cancel=True)
+        self.server.send(relay.target, "file_cancel", id=relay.id, reason=why[:200])
+        self.emit("file", state="failed", id=relay.id, to=relay.target, error=why)
 
     # --------------------------------------------------------------- state
     def set_shield(self, on: bool) -> None:

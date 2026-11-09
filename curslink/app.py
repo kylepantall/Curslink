@@ -562,6 +562,13 @@ def start_file_drags(cfg: HostConfig, router: Router, server: HostServer, overla
     server.on_file_result = handoff.on_result
     server.on_drag_out = handoff.on_drag_out
     server.on_files = handoff.on_files
+    disconnected = server.on_disconnect
+
+    def on_disconnect(device_id: str) -> None:
+        handoff.on_disconnect(device_id)
+        disconnected(device_id)
+
+    server.on_disconnect = on_disconnect
     return handoff
 
 
