@@ -438,15 +438,27 @@ class EdgeOverlay:
         self._tick()
 
     # -- geometry
-    def _screen_box(self, rect) -> tuple[float, float, float, float, float]:
-        """The screen ``rect`` (OS pixels) in Qt's logical pixels, and the scale."""
-        x, y, w, h = (float(v) for v in rect)
+    def _screen_box(self, d: dict) -> tuple[float, float, float, float, float, float]:
+        """The command's ``rect`` (OS pixels) in Qt's logical pixels, and the
+        scale across and down. With ``screen_os`` (the whole screen as the
+        host's layout has it) it goes by fractions of that screen, like the
+        mirror does: with Windows scaling the layout's pixels needn't be the
+        screen's real ones."""
+        x, y, w, h = (float(v) for v in d["rect"])
+        if isinstance(d.get("screen_os"), list):
+            from curslink.mirror.helper import spec_to_logical
+
+            got = spec_to_logical({"os": [x, y, w, h], "screen_os": d["screen_os"],
+                                   "screen": str(d.get("screen", ""))})
+            if got is not None and w > 0 and h > 0:
+                lx, ly, lw, lh, _index = got
+                return lx, ly, lw, lh, lw / w, lh / h
         lx, ly = self.to_logical(x, y)
         rx, ry = self.to_logical(x + w - 1, y + h - 1)
         scale = (rx - lx + 1) / w if w > 1 else 1.0
         if scale <= 0:
             scale = 1.0
-        return lx, ly, w * scale, h * scale, scale
+        return lx, ly, w * scale, h * scale, scale, scale
 
     def _place(self) -> None:
         d = self.data
@@ -454,8 +466,9 @@ class EdgeOverlay:
             return
         if self.bar is None:
             self.bar = Bar()
-        lx, ly, lw, lh, s = self._screen_box(d["rect"])
+        lx, ly, lw, lh, sx, sy = self._screen_box(d)
         side = d["side"]
+        s = sy if side in ("left", "right") else sx  # along the edge
         a, b = sorted((float(d["a"]) * s, float(d["b"]) * s))
         at = float(d["at"]) * s
         span = max(1.0, b - a)
