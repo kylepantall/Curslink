@@ -279,6 +279,13 @@ class MainWindow(QMainWindow):
         self.side.setGeometry(SIDE_INSET, SIDE_INSET, self.side.width(), max(0, root.height() - 2 * SIDE_INSET))
         self.side.raise_()
 
+    def remove_event_filters(self) -> None:
+        """Stop watching the central widget (see Curslink.remove_event_filters)."""
+        if self.floating_side:
+            root = self.centralWidget()
+            if root is not None:
+                root.removeEventFilter(self)
+
     def eventFilter(self, obj, event) -> bool:  # noqa: N802
         if self.floating_side and obj is self.centralWidget() and event.type() == QEvent.Type.Resize:
             self.place_side()
@@ -378,7 +385,10 @@ class MainWindow(QMainWindow):
             native.set_dock_icon(False)
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
-        if self.app.quitting or self.app.tray is None or not self.app.tray.isVisible():
+        if self.app.quitting:
+            event.accept()  # already on the way out: don't quit a second time
+            return
+        if self.app.tray is None or not self.app.tray.isVisible():
             self.app.quit()
             event.accept()
             return
