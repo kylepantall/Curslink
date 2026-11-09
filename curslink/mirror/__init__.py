@@ -248,6 +248,9 @@ class MirrorSource:
         if sid not in self.flying:
             return  # a capture that has stopped
         if self.flying[sid] >= IN_FLIGHT:
+            older = self.waiting.get(sid)
+            if older is not None and "cursor" in older and "cursor" not in frame:
+                frame = dict(frame, cursor=older["cursor"])  # the pointer's new look still has to go
             self.waiting[sid] = frame
             return
         self.flying[sid] += 1
@@ -348,6 +351,10 @@ class MirrorPeer:
         elif t == "mirror_frame":
             sid = data.get("id")
             if sid in self.showing:
+                if isinstance(data.get("cursor"), dict):
+                    # The pointer's look behind (curslink.mirror.cursorshape): on
+                    # its own, so a newer frame can't drop it on the way.
+                    self.images(f"shape:{sid}", _command("mirror_shape", dict(data["cursor"], id=sid)))
                 self.images(sid, _command("mirror_image", {k: data[k] for k in ("id", "jpg", "w", "h") if k in data}))
             self.send("mirror_ack", id=sid)  # answered even if dropped, so the capture never stalls
         elif t == "mirror_pointer":
@@ -591,7 +598,7 @@ class MirrorHost:
             if device_id != self.local_id:
                 self.server.send(device_id, "mirror_ack", id=frame.get("id"))
             return
-        data = {k: frame[k] for k in ("id", "jpg", "w", "h") if k in frame}
+        data = {k: frame[k] for k in ("id", "jpg", "w", "h", "cursor") if k in frame}
         self._to(stream.target.device_id, "mirror_frame", **data)
 
     def on_ack(self, device_id: str, sid) -> None:

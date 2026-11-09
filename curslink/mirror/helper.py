@@ -6,6 +6,14 @@ Commands (one line each, from :class:`curslink.mirror.MirrorPeer`)::
             "shows": [{"id", "screen", "os": [x, y, w, h], "label", "edges"}]}
     mirror_image {"id", "jpg", "w", "h"}
     mirror_pointer {"id", "x", "y"} | {"id", "hide": true}
+    mirror_shape {"id", "png", "w", "h", "hx", "hy", "cw"}
+
+``mirror_shape`` is the pointer's real look on the computer behind (see
+:mod:`curslink.mirror.cursorshape`): its picture, size and hot spot in that
+computer's logical pixels, and ``cw``, the captured area's width in the same
+units, which scales it onto the mirror. A frame carries it as ``cursor``
+whenever the pointer is over (or near) the captured area and its look has
+changed since the last frame.
 
 ``os`` rectangles are in this computer's OS pixels (physical on Windows,
 points on macOS), like every other position the helper gets. Each capture
@@ -30,8 +38,8 @@ import sys
 import time
 
 from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QPoint, QPointF, QRect, QRectF, Qt, QTimer
-from PySide6.QtGui import (QColor, QFont, QFontMetricsF, QGuiApplication, QImage, QLinearGradient, QPainter,
-                           QPainterPath, QPen, QPixmap)
+from PySide6.QtGui import (QColor, QCursor, QFont, QFontMetricsF, QGuiApplication, QImage, QLinearGradient,
+                           QPainter, QPainterPath, QPen, QPixmap)
 from PySide6.QtWidgets import QWidget
 
 from curslink.overlay import ACCENT
@@ -46,6 +54,11 @@ FADE_S = 0.22
 FLASH_S = 0.6
 TAG_S = 3.5
 REFRESH_S = 2.0
+# The pointer's look is sent while it's this close to the captured area
+# (logical pixels), so it's right as soon as it gets there.
+CURSOR_NEAR = 48
+# A look bigger than this (base64) isn't sent: the mirror keeps its arrow.
+CURSOR_MAX_B64 = 12_000
 
 
 def _screens():
@@ -119,7 +132,7 @@ def spec_to_logical(spec: dict) -> tuple[float, float, float, float, int] | None
     return os_to_logical(_screens(), spec.get("os"), sys.platform == "win32")
 
 
-def fit_jpeg(image: QImage, quality: int, scale: float) -> tuple[bytes, int, float]:
+def fit_jpeg(image: QImage, quality: int, scale: float, limit: int = MAX_B64) -> tuple[bytes, int, float]:
     """``image`` as a JPEG whose base64 fits :data:`MAX_B64`: lowers the
     quality, then the size, until it does. Returns the JPEG and the quality
     and scale it took (to start from next time)."""
@@ -135,7 +148,7 @@ def fit_jpeg(image: QImage, quality: int, scale: float) -> tuple[bytes, int, flo
         img.save(buf, "JPG", quality)
         buf.close()
         raw = bytes(data.data())
-        if len(raw) * 4 / 3 + 4 <= MAX_B64:
+        if len(raw) * 4 / 3 + 4 <= limit:
             return raw, quality, scale
         if quality > 45:
             quality -= 10
@@ -247,6 +260,8 @@ class Capture:
         self.failed = False
         self.why = ""
         self.guides: GuideOverlay | None = None
+        self.area: tuple[float, float, float, float, int] | None = None  # where it captures, logical
+        self.cursor_key: str | None = None  # the pointer's look the last frame carried
         self.timer = QTimer()
         self.timer.timeout.connect(self.grab)
         self.set(spec)
@@ -254,6 +269,7 @@ class Capture:
     def set(self, spec: dict) -> None:
         if spec.get("os") != self.spec.get("os"):
             self.last_hash = b""
+            self.cursor_key = None
         self.spec = spec
         self.show_guides(bool(spec.get("tune")))
         fps = max(1, min(30, int(spec.get("fps", 15) or 15)))
@@ -266,6 +282,7 @@ class Capture:
             self.why = "no screen of this computer is there"
             return None
         lx, ly, lw, lh, index = found
+        self.area = found
         if sys.platform == "darwin" and not mac_screen_recording(ask=True):
             self.why = MAC_NO_RECORDING
             return None
@@ -305,14 +322,40 @@ class Capture:
         small = small.convertToFormat(QImage.Format.Format_RGB32)
         digest = hashlib.blake2b(bytes(small.constBits())[: small.sizeInBytes()], digest_size=12).digest()
         now = time.monotonic()
-        if digest == self.last_hash and now - self.last_sent < REFRESH_S:
+        cursor = self.cursor()
+        if cursor is not None and (cursor["key"] == self.cursor_key or len(cursor["png"]) > CURSOR_MAX_B64):
+            cursor = None  # the mirror has this one (or it's too big to send)
+        if digest == self.last_hash and cursor is None and now - self.last_sent < REFRESH_S:
             return
-        raw, self.quality, self.scale = fit_jpeg(img, self.quality, self.scale)
+        limit = MAX_B64 - (len(cursor["png"]) + 200 if cursor is not None else 0)
+        raw, self.quality, self.scale = fit_jpeg(img, self.quality, self.scale, limit)
         if self.quality < 72 and len(raw) * 4 / 3 < MAX_B64 * 0.6:
             self.quality = min(72, self.quality + 4)  # room again: creep back up
         self.last_hash, self.last_sent = digest, now
         frame = {"id": self.id, "jpg": base64.b64encode(raw).decode("ascii"), "w": img.width(), "h": img.height()}
+        if cursor is not None:
+            self.cursor_key = cursor["key"]
+            frame["cursor"] = {k: v for k, v in cursor.items() if k != "key"}
         self.out("mirror_frame " + json.dumps(frame, separators=(",", ":")))
+
+    def cursor(self) -> dict | None:
+        """The pointer's look, with ``cw``, when it's over or near the
+        captured area (elsewhere its look doesn't matter here)."""
+        if self.area is None:
+            return None
+        lx, ly, lw, lh, index = self.area
+        pos = QCursor.pos()
+        if not (lx - CURSOR_NEAR <= pos.x() <= lx + lw + CURSOR_NEAR
+                and ly - CURSOR_NEAR <= pos.y() <= ly + lh + CURSOR_NEAR):
+            return None
+        from curslink.mirror import cursorshape
+
+        screens = QGuiApplication.screens()
+        dpr = screens[index].devicePixelRatio() if 0 <= index < len(screens) else 1.0
+        found = cursorshape.current(dpr)
+        if found is None:
+            return None
+        return dict(found, cw=round(lw, 2))
 
     def show_guides(self, on: bool) -> None:
         """While its mirror is being adjusted, the guides across this screen."""
@@ -456,6 +499,9 @@ class MirrorWindow(QWidget):
         exclude_from_capture(self)  # a mirror never ends up in another one
         self.pixmap: QPixmap | None = None
         self.pointer: tuple[float, float] | None = None
+        # The pointer's real look on the computer behind: (picture, its size
+        # and hot spot in that computer's logical pixels, captured width).
+        self.shape: tuple[QPixmap, float, float, float, float, float] | None = None
         self.spec: dict = {}
         self.shown_at = 0.0
         self.closing_at = 0.0
@@ -502,6 +548,10 @@ class MirrorWindow(QWidget):
         if p != self.pointer:
             self.pointer = p
             self.update()
+
+    def set_shape(self, data: dict | None) -> None:
+        self.shape = parse_shape(data) if data else None
+        self.update()
 
     def close_soon(self) -> None:
         if not self.isVisible():
@@ -660,6 +710,11 @@ class MirrorWindow(QWidget):
         return QRectF(r.x() + (gx - x) * kx, r.y() + (gy - y) * ky, gw * kx, gh * ky)
 
     def paint_pointer(self, p: QPainter, at: QPointF) -> None:
+        if self.shape is not None:
+            pix, w, h, hx, hy, cw = self.shape
+            k = self.width() / cw
+            p.drawPixmap(QRectF(at.x() - hx * k, at.y() - hy * k, w * k, h * k), pix, QRectF(pix.rect()))
+            return
         path = QPainterPath()
         path.moveTo(at + QPointF(*ARROW[0]))
         for x, y in ARROW[1:]:
@@ -697,6 +752,21 @@ class MirrorWindow(QWidget):
         p.setOpacity(1.0)
 
 
+def parse_shape(data: dict) -> tuple[QPixmap, float, float, float, float, float] | None:
+    """A ``mirror_shape`` as (picture, w, h, hx, hy, cw), or None if it's not usable."""
+    try:
+        w, h, hx, hy, cw = (float(data[k]) for k in ("w", "h", "hx", "hy", "cw"))
+        raw = base64.b64decode(data.get("png", ""), validate=True)
+    except (KeyError, TypeError, ValueError):
+        return None
+    if min(w, h, cw) <= 0 or max(w, h) > 512:
+        return None
+    pix = QPixmap()
+    if not pix.loadFromData(raw, "PNG"):
+        return None
+    return pix, w, h, hx, hy, cw
+
+
 def _stdout(line: str) -> None:
     sys.stdout.write(line + "\n")
     sys.stdout.flush()
@@ -709,10 +779,11 @@ class MirrorHelper:
         self.out = out
         self.captures: dict[str, Capture] = {}
         self.windows: dict[str, MirrorWindow] = {}
+        self.shapes: dict[str, dict] = {}  # the pointer's look behind each mirror
 
     def handle(self, line: str) -> bool:
         word, _, rest = line.strip().partition(" ")
-        if word not in ("mirror", "mirror_image", "mirror_pointer"):
+        if word not in ("mirror", "mirror_image", "mirror_pointer", "mirror_shape"):
             return False
         try:
             data = json.loads(rest)
@@ -726,6 +797,13 @@ class MirrorHelper:
             window = self.windows.get(data.get("id"))
             if window is not None:
                 window.image(data)
+        elif word == "mirror_shape":
+            sid = data.get("id")
+            if isinstance(sid, str):
+                self.shapes[sid] = data
+                window = self.windows.get(sid)
+                if window is not None:
+                    window.set_shape(data)
         else:
             window = self.windows.get(data.get("id"))
             if window is not None:
@@ -747,6 +825,7 @@ class MirrorHelper:
         for sid in list(self.windows):
             if sid not in shows:
                 self.windows.pop(sid).close_soon()
+        self.shapes = {sid: d for sid, d in self.shapes.items() if sid in shows}
         for sid, spec in shows.items():
             window = self.windows.get(sid)
             old = None
@@ -761,6 +840,8 @@ class MirrorHelper:
                     log.warning("mirror: no screen here at %s", spec.get("os"))
                     window.deleteLater()
                     continue
+                if sid in self.shapes:
+                    window.set_shape(self.shapes[sid])
                 if old is not None and old.pixmap is not None:
                     window.pixmap = old.pixmap
                     window.shown_at = time.monotonic() - TAG_S - 1  # no "live" tag again

@@ -1053,3 +1053,112 @@ def test_the_cursor_stays_while_input_is_here_or_a_mirror_is_being_adjusted():
     peer.handle("mirror", {"captures": [], "shows": [dict(show, tune=True)]})
     fire()
     assert sink.calls == []
+
+
+# -- the pointer's real look ----------------------------------------------------
+def _png(qapp, w=16, h=24, color="black"):
+    from PySide6.QtCore import QBuffer, QByteArray, QIODevice
+    from PySide6.QtGui import QColor, QImage
+
+    img = QImage(w, h, QImage.Format.Format_ARGB32)
+    img.fill(QColor(color))
+    data = QByteArray()
+    buf = QBuffer(data)
+    buf.open(QIODevice.OpenModeFlag.WriteOnly)
+    img.save(buf, "PNG")
+    return bytes(data.data())
+
+
+def test_the_pointers_look_goes_with_a_frame_to_the_mirror(qapp):
+    lines = []
+    transport = Transport({"lap"}, {"lap"})
+    host, router, local = make_host(desk(), transport, lines)
+    sid = transport.of("mirror", "lap")[-1]["shows"][0]["id"]
+    cursor = {"png": "QUJD", "w": 16, "h": 24, "hx": 8, "hy": 12, "cw": 200}
+    local.helper_line("mirror_frame " + json.dumps({"id": sid, "jpg": "AAAA", "w": 200, "h": 200, "cursor": cursor}))
+    assert transport.of("mirror_frame", "lap")[-1]["cursor"] == cursor
+    # The agent showing it hands the look to its helper on its own line.
+    helper = []
+    peer = MirrorPeer(helper.append, lambda t, **d: None)
+    peer.handle("mirror", {"captures": [], "shows": [{"id": sid, "os": [0, 0, 5, 5]}]})
+    peer.handle("mirror_frame", transport.of("mirror_frame", "lap")[-1])
+    shape, image = helper[-2:]
+    assert shape.startswith("mirror_shape ") and json.loads(shape.partition(" ")[2]) == dict(cursor, id=sid)
+    assert image.startswith("mirror_image ") and "cursor" not in image
+
+
+def test_a_newer_waiting_frame_keeps_the_pointers_look():
+    sent = []
+    src = MirrorSource(lambda t, **d: sent.append(d))
+    src.reset(["a"])
+    for n in range(IN_FLIGHT):
+        src.offer({"id": "a", "n": n})
+    src.offer({"id": "a", "n": 10, "cursor": {"png": "x"}})
+    src.offer({"id": "a", "n": 11})
+    src.ack("a")
+    assert sent[-1] == {"id": "a", "n": 11, "cursor": {"png": "x"}}
+
+
+def test_the_mirror_draws_the_real_look_at_its_hot_spot(qapp):
+    from curslink.mirror.helper import MirrorHelper
+
+    helper = MirrorHelper(lambda line: None)
+    helper.handle("mirror " + json.dumps({"captures": [], "shows": [{"id": "s", "screen": "main",
+                                                                        "os": [200, 150, 160, 100]}]}))
+    png = base64.b64encode(_png(qapp)).decode()
+    helper.handle("mirror_shape " + json.dumps({"id": "s", "png": png, "w": 16, "h": 24, "hx": 8, "hy": 12,
+                                                "cw": 80}))
+    window = helper.windows["s"]
+    pix, w, h, hx, hy, cw = window.shape
+    assert (w, h, hx, hy, cw) == (16, 24, 8, 12, 80) and not pix.isNull()
+    window.set_pointer((0.5, 0.5))
+    window.pixmap = window.shape[0]
+    window.grab()  # paints the look (twice the size: the mirror is 160 wide for 80 captured)
+    # Junk leaves the arrow.
+    helper.handle('mirror_shape {"id": "s", "png": "!!", "w": 1, "h": 1, "hx": 0, "hy": 0, "cw": 1}')
+    assert window.shape is None
+    helper.handle('mirror {"captures": [], "shows": []}')
+    assert not helper.shapes
+
+
+def test_a_capture_sends_the_pointers_look_when_it_changes_near_there(qapp, monkeypatch):
+    from PySide6.QtGui import QCursor
+
+    import curslink.mirror.cursorshape as cursorshape
+    from curslink.mirror.helper import Capture
+
+    look = {"which": "arrow"}
+
+    def current(dpr=1.0):
+        return cursorshape.shape(look["which"].encode(), 16, 24, 1, 1)
+
+    monkeypatch.setattr(cursorshape, "current", current)
+    out = []
+    cap = Capture({"id": "c", "screen": "main", "os": [10, 10, 120, 80], "fps": 1}, out.append)
+    cap.timer.stop()
+    from PySide6.QtGui import QColor, QImage
+
+    still = QImage(120, 80, QImage.Format.Format_RGB32)
+    still.fill(QColor("teal"))
+    real = cap.image
+
+    def image():
+        real()  # finds where it captures
+        return still
+
+    monkeypatch.setattr(cap, "image", image)
+    QCursor.setPos(50, 50)
+    if (QCursor.pos().x(), QCursor.pos().y()) != (50, 50):
+        pytest.skip("can't place the cursor here")
+    out.clear()
+    cap.last_hash, cap.cursor_key = b"", None
+    cap.grab()
+    frame = json.loads(out[-1].partition(" ")[2])
+    assert frame["cursor"]["cw"] == 120 and "key" not in frame["cursor"]
+    n = len(out)
+    cap.grab()
+    assert len(out) == n  # same picture, same look: nothing new
+    look["which"] = "ibeam"
+    cap.grab()
+    assert len(out) == n + 1 and "cursor" in json.loads(out[-1].partition(" ")[2])
+    cap.stop()
