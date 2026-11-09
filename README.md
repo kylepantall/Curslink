@@ -57,6 +57,10 @@ next computer, with a quick "pop" or "blink" so you always see where it went.
   desktop or in a folder and they're saved there, drop on an app and it
   opens them. Let go before a big file has arrived and the drop waits, with
   a progress popup.
+* **One clipboard.** Copy text, a picture or files on one computer and
+  paste them on any other. Passwords copied from a password manager stay
+  put, and copies over 25 MB aren't shared. Turn it off in Settings >
+  Clipboard.
 
 ## Getting started
 

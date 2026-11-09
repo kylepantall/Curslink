@@ -63,6 +63,13 @@ class MainActivity : AppCompatActivity() {
         render()
     }
 
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        // Android lets an app read the clipboard only while it has focus:
+        // share anything copied in another app since we last could.
+        if (hasFocus) LinkService.instance?.clipChanged()
+    }
+
     override fun onPause() {
         LinkService.unlisten(refresh)
         super.onPause()

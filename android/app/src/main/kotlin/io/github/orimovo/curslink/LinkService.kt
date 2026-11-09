@@ -4,6 +4,8 @@ import android.app.Notification
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.graphics.BitmapFactory
@@ -77,6 +79,13 @@ class LinkService : Service() {
     private var link: AgentLink? = null
     private var mirror: MirrorCapturer? = null
     private var wifiLock: WifiManager.WifiLock? = null
+    // Clipboard sync, text only: what a computer copied goes on the phone's
+    // clipboard; what's copied here goes to the computers. Android only lets
+    // an app read the clipboard while it's on screen, so copies made in other
+    // apps are sent when Curslink can see them (it's in front).
+    private lateinit var clipboard: ClipboardManager
+    @Volatile private var lastClip: String? = null
+    private val clipListener = ClipboardManager.OnPrimaryClipChangedListener { clipChanged() }
     private val main = Handler(Looper.getMainLooper())
     private val netCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) { link?.reconnect() }
@@ -102,9 +111,12 @@ class LinkService : Service() {
         ).also { it.start() }
         discovery.start(prefs.deviceId, prefs.name, pairingServer!!.boundPort)
         mirror = MirrorCapturer(this, { link?.session?.mirror }, ::mediaForeground)
+        clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.addPrimaryClipChangedListener(clipListener)
         link = AgentLink(
             handler = Input(),
             mirror = Mirrors(),
+            clipboard = ::copiedElsewhere,
             pairing = { prefs.pairing },
             hello = { Hello(prefs.name, platform(), screens()) },
             discover = ::candidates,
@@ -125,6 +137,7 @@ class LinkService : Service() {
         AppLog.i(TAG, "stopping")
         instance = null
         runCatching { (getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager).unregisterNetworkCallback(netCallback) }
+        runCatching { clipboard.removePrimaryClipChangedListener(clipListener) }
         link?.stop()
         mirror?.close()
         pairingServer?.close()
@@ -147,6 +160,27 @@ class LinkService : Service() {
     }
 
     /** What pairing tells the computer about us, so it can lay us out right away. */
+    /** Text a computer copied: on the phone's clipboard, ready to paste. */
+    private fun copiedElsewhere(text: String) {
+        main.post {
+            lastClip = text
+            runCatching { clipboard.setPrimaryClip(ClipData.newPlainText("Curslink", text)) }
+                .onFailure { AppLog.i(TAG, "couldn't set the clipboard: ${it.message}") }
+        }
+    }
+
+    /** Called on the main thread when the phone's clipboard changes. Also
+     *  worth calling when the app comes to the front (the only time Android
+     *  lets it read what other apps copied). */
+    fun clipChanged() {
+        val text = runCatching { clipboard.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(this) }
+            .getOrNull()?.toString() ?: return
+        if (text.isEmpty() || text == lastClip) return
+        lastClip = text
+        val session = link?.session?.clipboard ?: return
+        Thread({ runCatching { session.copied(text) } }, "curslink-clip").start()
+    }
+
     fun about() = jsonOf("screens" to screens(), "platform" to platform())
 
     private fun platform() = "Android ${Build.VERSION.RELEASE}"

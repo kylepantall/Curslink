@@ -301,6 +301,7 @@ async def run_host(cfg: HostConfig) -> None:
     handoff = start_file_drags(cfg, router, server, overlay, capture, loop) if cfg.files else None
     isolink = start_popups(router, server, capture) if cfg.isolink else None
     mirror = start_mirror(cfg, router, server, overlay, loop)
+    clipboard = start_host_clipboard(cfg, server, overlay, loop) if cfg.clipboard else None
     bridge = LoopBridge(loop, router, handoff)
     capture.start(bridge)
     reporter = loop.create_task(report_capture(bridge, capture, server, router))
@@ -386,6 +387,8 @@ async def run_host(cfg: HostConfig) -> None:
             await isolink.stop()
         if mirror is not None:
             mirror.stop()
+        if clipboard is not None:
+            clipboard.stop()
         overlay.close()
         await pairing.close()
         if relay:
@@ -528,18 +531,64 @@ def qt_available() -> bool:
         return False
 
 
-def chain_helper_lines(overlay, loop: asyncio.AbstractEventLoop, peer) -> None:
-    """Mirror frames and adjustments the overlay helper prints go to
-    ``peer`` on the loop; every other line to whoever took them before (file drags)."""
+def chain_helper_lines(overlay, loop: asyncio.AbstractEventLoop, peer,
+                       prefixes: tuple[str, ...] = ("mirror_frame ", "mirror_tune ")) -> None:
+    """Lines the overlay helper prints that start with ``prefixes`` (mirror
+    frames and adjustments) go to ``peer`` on the loop; every other line to
+    whoever took them before (file drags)."""
     before = overlay.on_line
 
     def on_line(line: str) -> None:  # the helper's reader thread
-        if line.startswith(("mirror_frame ", "mirror_tune ")):
+        if line.startswith(prefixes):
             loop.call_soon_threadsafe(peer.helper_line, line)
         else:
             before(line)
 
     overlay.on_line = on_line
+
+
+def start_clipboard(overlay, loop: asyncio.AbstractEventLoop, max_mb: int, names=str):
+    """Clipboard sync (see curslink.clipboard): the helper watches this
+    device's clipboard; peers are added as they link up."""
+    from curslink.clipboard.sync import ClipboardSync
+
+    sync = ClipboardSync(overlay.command, max_mb * 1024 * 1024, names=names)
+    chain_helper_lines(overlay, loop, sync, ("clip ",))
+    overlay.startup.append("clipwatch on")
+    overlay.command("clipwatch on")
+    log.info("clipboard sync on (up to %d MB)", max_mb)
+    return sync
+
+
+def start_host_clipboard(cfg: HostConfig, server: HostServer, overlay, loop: asyncio.AbstractEventLoop):
+    """Clipboard sync on the host: every agent that takes it is a peer."""
+    if not qt_available():
+        log.warning("clipboard sync needs Qt (PySide6) on this computer")
+        return None
+    from curslink.protocol import CLIPBOARD_FEATURE, CLIPBOARD_TEXT_FEATURE
+
+    def name(device_id: str) -> str:
+        conn = server.connections.get(device_id)
+        return conn.name if conn is not None else device_id
+
+    sync = start_clipboard(overlay, loop, cfg.clipboard_max_mb, name)
+    server.features.append(CLIPBOARD_FEATURE)
+    server.on_clip = sync.handle
+    connected, disconnected = server.on_connect, server.on_disconnect
+
+    def on_connect(conn) -> None:
+        connected(conn)
+        if CLIPBOARD_FEATURE in conn.features:
+            sync.add_peer(conn.device_id, server.bulk_sender(conn.device_id))
+        elif CLIPBOARD_TEXT_FEATURE in conn.features:  # a phone: text only
+            sync.add_peer(conn.device_id, server.bulk_sender(conn.device_id), ("text",))
+
+    def on_disconnect(device_id: str) -> None:
+        disconnected(device_id)
+        sync.remove_peer(device_id)
+
+    server.on_connect, server.on_disconnect = on_connect, on_disconnect
+    return sync
 
 
 def start_mirror(cfg: HostConfig, router: Router, server: HostServer, overlay, loop: asyncio.AbstractEventLoop):
@@ -1033,7 +1082,10 @@ async def run_agent(cfg: AgentConfig) -> None:
     # The helper draws the switch animation and, for dropped files, the
     # placeholder that follows the pointer and the "Receiving..." popup.
     mirror_on = cfg.mirror and qt_available()
-    overlay = OverlayProcess() if cfg.animations or cfg.files.enabled or mirror_on else None
+    clipboard_on = cfg.clipboard and qt_available()
+    if cfg.clipboard and not clipboard_on:
+        log.warning("clipboard sync needs Qt (PySide6) on this computer")
+    overlay = OverlayProcess() if cfg.animations or cfg.files.enabled or mirror_on or clipboard_on else None
     if overlay:
         overlay.start()
     from curslink.smoothing import PointerSmoother
@@ -1073,6 +1125,11 @@ async def run_agent(cfg: AgentConfig) -> None:
         mirror = MirrorPeer(overlay.command, client.send, writer.put)
         session.mirror = mirror
         chain_helper_lines(overlay, asyncio.get_running_loop(), mirror)
+    clipboard = None
+    if clipboard_on and overlay is not None:
+        clipboard = start_clipboard(overlay, asyncio.get_running_loop(), cfg.clipboard_max_mb,
+                                    lambda _peer: "the host")
+        session.clipboard = clipboard
     if overlay and cfg.animations:
         from curslink.edgehint import command_line
 
@@ -1090,6 +1147,13 @@ async def run_agent(cfg: AgentConfig) -> None:
                 mirror.stop()
             if session.on_edge is not None:
                 session.on_edge({"hide": True})
+        if clipboard is not None:
+            from curslink.protocol import CLIPBOARD_FEATURE
+
+            if state == "connected" and CLIPBOARD_FEATURE in client.host_features:
+                clipboard.add_peer("host", client.send_bulk)
+            else:
+                clipboard.remove_peer("host")
         events.emit("host", state=state, detail=detail)
 
     client.on_state = on_state
@@ -1133,6 +1197,8 @@ async def run_agent(cfg: AgentConfig) -> None:
             smoother.close()
         if isolink is not None:
             await isolink.stop()
+        if clipboard is not None:
+            clipboard.stop()
         await pairing.close()
         if overlay:
             overlay.close()

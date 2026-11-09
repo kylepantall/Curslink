@@ -80,7 +80,11 @@ enum class LinkState { WAITING, CONNECTING, CONNECTED }
  * Applies the host's frames, like curslink.net.client.AgentSession: keeps
  * track of held keys and buttons so a leave or a dropped link lets go of them.
  */
-class AgentSession(private val handler: InputHandler, val mirror: MirrorSession? = null) {
+class AgentSession(
+    private val handler: InputHandler,
+    val mirror: MirrorSession? = null,
+    val clipboard: ClipboardSession? = null,
+) {
     @Volatile var active = false
         private set
     private val keys = LinkedHashSet<String>()
@@ -142,6 +146,7 @@ class AgentSession(private val handler: InputHandler, val mirror: MirrorSession?
             }
             "mirror", "mirror_frame", "mirror_pointer", "mirror_ack" -> return mirror?.handle(f)
             "edge" -> EdgeCommand.parse(f)?.let { handler.edge(it) }
+            "clip", "clip_data" -> clipboard?.handle(f)
             // Everything else (look, hint, drag, files, popups) is only sent to
             // agents that list the feature in hello, and we list none of them.
         }
@@ -175,8 +180,10 @@ class AgentLink(
     private val pingSeconds: Double = 5.0,
     /** Mirror mode (see Mirror.kt); null leaves this phone out of it. */
     mirror: MirrorHandler? = null,
+    /** Text copied on a computer (see Clipboard.kt); null leaves this phone out of clipboard sync. */
+    clipboard: ((String) -> Unit)? = null,
 ) {
-    val session = AgentSession(handler, mirror?.let { MirrorSession(it) })
+    val session = AgentSession(handler, mirror?.let { MirrorSession(it) }, clipboard?.let { ClipboardSession(it) })
     @Volatile private var running = false
     @Volatile private var socket: Socket? = null
     @Volatile private var udp: AgentUdp? = null
@@ -284,7 +291,8 @@ class AgentLink(
             val me = hello()
             val features = listOf("edge") + (if (opened.direct) listOf("udp") else emptyList()) +
                 // mirror_cursor: our captures show the pointer already (it's drawn on the screen).
-                (if (session.mirror != null) listOf("mirror", "mirror_cursor") else emptyList())
+                (if (session.mirror != null) listOf("mirror", "mirror_cursor") else emptyList()) +
+                (if (session.clipboard != null) listOf(CLIPBOARD_TEXT_FEATURE) else emptyList())
             io.send("hello", jsonOf(
                 "v" to PROTOCOL_VERSION,
                 "device_id" to p.myId,
@@ -310,6 +318,7 @@ class AgentLink(
                 }
             }
             session.mirror?.send = { t, data -> io.send(t, data) }
+            session.clipboard?.send = { t, data -> io.send(t, data) }
             onState(LinkState.CONNECTED, via)
             while (running) {
                 val f = try {
@@ -326,6 +335,7 @@ class AgentLink(
             runCatching { s.close() }
             session.releaseAll()
             session.mirror?.let { m -> m.send = { _, _ -> }; m.reset() }
+            session.clipboard?.reset()
         }
     }
 }
