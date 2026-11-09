@@ -563,6 +563,9 @@ class MirrorHost:
             return
         if "tune" in data or data.get("hold") is False:
             self.set_tuning((str(data["behind"]), str(data["front"])) if data.get("tune") else None)
+        if any(k in data for k in ("place", "x", "reset")):
+            # Put somewhere new: the guides start again from there.
+            self._anchors.pop((str(data["behind"]), str(data["front"])), None)
         if "hold" in data:
             device, screen_id = str(data["behind"]).split("/", 1)
             self.hold(self.layout.screen(device, screen_id) if data["hold"] else None)

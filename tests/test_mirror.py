@@ -1499,3 +1499,14 @@ def test_lining_up_in_mirror_mode_takes_one_click_behind(qapp):
     from curslink.gui.fitcalib import corner_at
 
     assert got == [{"place": [1600.0, 950.0], "corner": list(corner_at(corner, 1.0, 1.0))}]
+
+
+def test_placing_it_again_while_adjusting_moves_the_guides_there():
+    transport = Transport({"lap"}, {"lap"})
+    host, router, local = make_host(desk(), transport, [])
+    host.fit({"behind": "pc/main", "front": "lap/main", "hold": True, "tune": True})
+    old = transport.of("mirror", "lap")[-1]["shows"][0]["guides"]
+    host.fit({"behind": "pc/main", "front": "lap/main", "place": [100, 100], "corner": [0, 0],
+              "hold": True, "tune": True})
+    show, = transport.of("mirror", "lap")[-1]["shows"]
+    assert show["guides"] != old and show["guides"] == show["src"]
