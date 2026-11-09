@@ -226,6 +226,12 @@ session for now.
   fingerprint lock still asks to be unlocked when the phone wakes; you can click the PIN in with the mouse. If it won't
   link, **Export logs** in the app shares what the phone tried and what
   the computer answered (never the keys).
+  The app updates itself from the releases too: it looks a few times a
+  day, downloads the new APK on Wi-Fi (checked against `SHA256SUMS.txt`)
+  and installs it while the screen is off. Android asks once to let
+  Curslink install apps and to confirm the first update; on Android 12
+  and later the ones after that go in by themselves. *Updates* in the app
+  shows the version, checks by hand, and turns this off.
 
 ## Security
 

@@ -150,6 +150,15 @@ class LinkService : Service() {
         applyPause()
         link?.start()
         (getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager).registerDefaultNetworkCallback(netCallback)
+        // Updates from GitHub releases: look now (if it's been a while) and every few hours.
+        main.postDelayed(updateCheck, 30_000)
+    }
+
+    private val updateCheck = object : Runnable {
+        override fun run() {
+            Updater.check(this@LinkService)
+            main.postDelayed(this, Updater.CHECK_EVERY_MS / 4)
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
@@ -157,6 +166,7 @@ class LinkService : Service() {
     override fun onDestroy() {
         AppLog.i(TAG, "stopping")
         instance = null
+        main.removeCallbacks(updateCheck)
         runCatching { (getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager).unregisterNetworkCallback(netCallback) }
         runCatching { clipboard.removePrimaryClipChangedListener(clipListener) }
         calls?.stop()

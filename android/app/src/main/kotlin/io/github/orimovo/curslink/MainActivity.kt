@@ -39,6 +39,8 @@ class MainActivity : AppCompatActivity() {
     private var pairDialog: AlertDialog? = null
     private var busy = false
     private val refresh = { render() }
+    private var updateLine: TextView? = null
+    private val updateChanged = { renderUpdate() }
 
     private val scan = registerForActivityResult(ScanContract()) { result ->
         result.contents?.let { pairWithCode(it) }
@@ -62,7 +64,10 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         LinkService.listen(refresh)
+        Updater.listen(updateChanged)
+        Updater.inFront = true
         render()
+        Updater.check(this, maxAgeMs = 60 * 60 * 1000L)
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -74,6 +79,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onPause() {
         LinkService.unlisten(refresh)
+        Updater.unlisten(updateChanged)
+        Updater.inFront = false
         super.onPause()
     }
 
@@ -203,6 +210,8 @@ class MainActivity : AppCompatActivity() {
             LinkService.instance?.relink()
             Toast.makeText(this, "Saved", Toast.LENGTH_SHORT).show()
         })
+        renderUpdates()
+
         root.addView(text("Help", 20f, bold = true, top = 24))
         root.addView(text("If something isn't working, send these to whoever's helping you. They say what the phone tried and what the computer answered, never your keys.", 13f))
         root.addView(button("Export logs") { exportLogs() })
@@ -210,6 +219,54 @@ class MainActivity : AppCompatActivity() {
 
         val request = LinkService.instance?.pairRequest
         if (request != null && pairDialog == null) askForCode(request) else if (request == null) pairDialog?.dismiss()
+    }
+
+    private var updateButton: Button? = null
+
+    private fun renderUpdates() {
+        root.addView(text("Updates", 20f, bold = true, top = 24))
+        updateLine = text("", 15f).also { root.addView(it) }
+        updateButton = button("") {
+            if (Updater.release != null) Updater.updateNow(this) else Updater.check(this, 0, byHand = true)
+        }.also { root.addView(it) }
+        renderUpdate()
+        root.addView(SwitchCompat(this).apply {
+            text = "Update automatically"
+            textSize = 16f
+            isChecked = prefs.autoUpdate
+            setOnCheckedChangeListener { _, on ->
+                prefs.autoUpdate = on
+                if (on) Updater.check(this@MainActivity, 0)
+            }
+        })
+        root.addView(text("Curslink looks for a new release a few times a day, downloads it on Wi-Fi and installs it " +
+            "while the screen is off. Android asks you to confirm the first update; after that they go in by themselves.", 13f))
+        if (!packageManager.canRequestPackageInstalls()) {
+            step(false, "Allow updates", "Android needs your OK for Curslink to install its own updates: turn on \"Allow from this source\".",
+                "Open settings") {
+                runCatching { startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName"))) }
+            }
+        }
+    }
+
+    /** Just the update line and button, so a download's progress doesn't rebuild the page. */
+    private fun renderUpdate() {
+        val line = updateLine ?: return
+        val r = Updater.release
+        val version = Updater.currentVersion(this)
+        val checked = maxOf(Updater.lastChecked, prefs.updateCheckedAt)
+        line.text = when {
+            Updater.message.isNotEmpty() -> "This is $version. ${Updater.message}"
+            r != null -> "This is $version. Curslink ${r.version} is out."
+            checked > 0 -> "This is $version, the newest. Checked " +
+                android.text.format.DateUtils.getRelativeTimeSpanString(checked) + "."
+            else -> "This is $version."
+        }
+        updateButton?.apply {
+            val working = Updater.phase in setOf(Updater.Phase.CHECKING, Updater.Phase.DOWNLOADING, Updater.Phase.INSTALLING)
+            isEnabled = !working
+            text = if (r != null) "Update to ${r.version}" else "Check for updates"
+        }
     }
 
     private fun exportLogs() {
@@ -224,6 +281,7 @@ class MainActivity : AppCompatActivity() {
             append("\nMouse and keyboard (accessibility): ${if (accessibilityOn()) "on" else "off"}")
             append("\nKeep the screen on: ${if (prefs.keepScreenOn) "on" else "off"}")
             append("\nIgnoring battery optimisation: ${(getSystemService(POWER_SERVICE) as PowerManager).isIgnoringBatteryOptimizations(packageName)}")
+            append("\nApp version: ${Updater.currentVersion(this@MainActivity)}, update automatically: ${if (prefs.autoUpdate) "on" else "off"}")
             append("\nScreen layout size: ${prefs.layoutSize?.let { "${it.first} x ${it.second} dp" } ?: "not set"}")
         }
         runCatching { AppLog.share(this, summary) }.onFailure {
