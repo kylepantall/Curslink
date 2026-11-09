@@ -361,3 +361,22 @@ def test_crossing_flare_fades_like_the_mirror():
     ov.flash_at -= edgeoverlay.FADE_S
     ov._tick()
     assert ov.level == 0.0 and not ov.bar.isVisible()
+
+
+def test_landing_animation_is_placed_by_fractions_of_the_screen():
+    QtWidgets = pytest.importorskip("PySide6.QtWidgets")
+    from PySide6.QtGui import QGuiApplication
+
+    from curslink.overlay import make_effect_widget
+
+    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    g = QGuiApplication.primaryScreen().geometry()
+    # Windows scaling: this process has the screen 1.5x bigger than Qt does.
+    ow, oh = round(g.width() * 1.5), round(g.height() * 1.5)
+    w = make_effect_widget("pop", ow // 2, oh // 2, (0, 0, ow, oh))
+    try:
+        c = w.geometry().center()
+        assert abs(c.x() - (g.x() + g.width() / 2)) <= 3 and abs(c.y() - (g.y() + g.height() / 2)) <= 3
+    finally:
+        w.timer.stop()
+        w.close()
