@@ -273,7 +273,7 @@ class LinkService : Service() {
             if (captures.isNotEmpty() || shows.isNotEmpty()) {
                 AppLog.i(TAG, "mirror mode: capturing ${captures.size}, showing ${shows.size}")
             }
-            InputService.instance?.mirrorShows(shows)
+            InputService.instance?.mirrorShows(shows) { id, data -> link?.session?.mirror?.tune(id, data) }
             mirror?.set(captures)
         }
 

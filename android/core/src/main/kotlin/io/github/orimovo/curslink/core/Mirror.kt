@@ -17,10 +17,17 @@ import java.util.Base64
 /** A part of this phone's screen to capture, in the layout's (dp) units. */
 data class MirrorCapture(val id: String, val x: Double, val y: Double, val w: Double, val h: Double, val fps: Int)
 
-/** A part of this phone's screen to show another screen's covered part on. */
+/**
+ * A part of this phone's screen to show another screen's covered part on.
+ * While it's being lined up ([tune]) it takes the pointer (see [MirrorTuner])
+ * and draws alignment guides: [guides] is where they're drawn on the screen
+ * behind and [src] what this mirror shows of it, both in that screen's OS
+ * pixels.
+ */
 data class MirrorShow(
     val id: String, val x: Double, val y: Double, val w: Double, val h: Double,
     val label: String, val edges: Set<String>,
+    val tune: Boolean = false, val guides: List<Double>? = null, val src: List<Double>? = null,
 )
 
 /** What the app does about it. Called on the link's thread. */
@@ -84,6 +91,11 @@ class MirrorSession(private val handler: MirrorHandler) {
         if (now) runCatching { send("mirror_frame", data) }
     }
 
+    /** Lining up mirror [id]: a drag, stretch or zoom of it (see [MirrorTuner]) for the host. */
+    fun tune(id: String, data: Map<String, Any?>) {
+        runCatching { send("mirror_tune", jsonOf("id" to id, *data.toList().toTypedArray())) }
+    }
+
     /** Is capture [id] free to send a frame now? (Saves encoding one that would wait.) */
     fun ready(id: String): Boolean = synchronized(this) { (flying[id] ?: return false) < MIRROR_IN_FLIGHT }
 
@@ -104,8 +116,8 @@ class MirrorSession(private val handler: MirrorHandler) {
         if (had) handler.state(emptyList(), emptyList())
     }
 
-    private fun rect(o: JsonObject): List<Double>? =
-        (o["os"] as? JsonArray)?.mapNotNull { it.numOrNull() }?.takeIf { it.size == 4 && it[2] > 0 && it[3] > 0 }
+    private fun rect(o: JsonObject, key: String = "os"): List<Double>? =
+        (o[key] as? JsonArray)?.mapNotNull { it.numOrNull() }?.takeIf { it.size == 4 && it[2] > 0 && it[3] > 0 }
 
     private fun capture(o: JsonObject?): MirrorCapture? {
         o ?: return null
@@ -120,6 +132,72 @@ class MirrorSession(private val handler: MirrorHandler) {
         val id = o["id"]?.strOrNull() ?: return null
         val r = rect(o) ?: return null
         val edges = (o["edges"] as? JsonArray).orEmpty().mapNotNull { it.strOrNull() }.toSet()
-        return MirrorShow(id, r[0], r[1], r[2], r[3], o["label"]?.strOrNull() ?: "", edges)
+        val tune = (o["tune"] as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { !it.isString }?.content == "true"
+        return MirrorShow(id, r[0], r[1], r[2], r[3], o["label"]?.strOrNull() ?: "", edges,
+            tune, if (tune) rect(o, "guides") else null, if (tune) rect(o, "src") else null)
+    }
+}
+
+/**
+ * Lining up a mirror on the phone, as the computer's mirror window does
+ * (curslink/mirror/helper.py): pressing inside it and dragging moves it,
+ * pressing within [grab] of a side and dragging stretches it about the
+ * opposite side, and the wheel zooms about the pointer. Each step is what to
+ * send as `mirror_tune` (without the id). Rectangles and points in pixels.
+ */
+class MirrorTuner(private val grab: Double) {
+    private var drag: String? = null
+    private var lastX = 0.0
+    private var lastY = 0.0
+    val dragging: Boolean get() = drag != null
+
+    /** Sides of a mirror [x0, y0, w, h] near (px, py): some of "l", "r", "t", "b". */
+    fun sides(r: List<Double>, px: Double, py: Double): String {
+        var out = ""
+        if (px < r[0] + grab) out += "l" else if (px > r[0] + r[2] - grab) out += "r"
+        if (py < r[1] + grab) out += "t" else if (py > r[1] + r[3] - grab) out += "b"
+        return out
+    }
+
+    /** The button went down at (px, py): true if it's on the mirror (it takes the press). */
+    fun press(r: List<Double>, px: Double, py: Double): Boolean {
+        if (px < r[0] || py < r[1] || px > r[0] + r[2] || py > r[1] + r[3]) return false
+        drag = sides(r, px, py).ifEmpty { "move" }
+        lastX = px; lastY = py
+        return true
+    }
+
+    fun move(r: List<Double>, px: Double, py: Double): Map<String, Any?>? {
+        val which = drag ?: return null
+        val dx = px - lastX
+        val dy = py - lastY
+        if (kotlin.math.abs(dx) < 1 && kotlin.math.abs(dy) < 1) return null
+        lastX = px; lastY = py
+        val w = maxOf(1.0, r[2])
+        val h = maxOf(1.0, r[3])
+        if (which == "move") return mapOf("mx" to round(dx / w, 5), "my" to round(dy / h, 5))
+        val factors = mutableListOf<Double>()
+        var ax = 0.5
+        var ay = 0.5
+        if ('r' in which) { factors += (w + dx) / w; ax = 0.0 }
+        if ('l' in which) { factors += (w - dx) / w; ax = 1.0 }
+        if ('b' in which) { factors += (h + dy) / h; ay = 0.0 }
+        if ('t' in which) { factors += (h - dy) / h; ay = 1.0 }
+        val factor = factors.average()
+        return if (factor > 0) mapOf("grow" to round(factor, 5), "ax" to ax, "ay" to ay) else null
+    }
+
+    fun release() { drag = null }
+
+    /** The wheel turned [steps] notches (up is positive) with the pointer at (px, py). */
+    fun wheel(r: List<Double>, px: Double, py: Double, steps: Double): Map<String, Any?>? {
+        if (steps == 0.0 || px < r[0] || py < r[1] || px > r[0] + r[2] || py > r[1] + r[3]) return null
+        return mapOf("grow" to round(Math.pow(1.05, steps), 5),
+            "ax" to round((px - r[0]) / maxOf(1.0, r[2]), 4), "ay" to round((py - r[1]) / maxOf(1.0, r[3]), 4))
+    }
+
+    private fun round(v: Double, places: Int): Double {
+        val k = Math.pow(10.0, places.toDouble())
+        return Math.round(v * k) / k
     }
 }
