@@ -207,6 +207,11 @@ class AgentDragOut:
             await asyncio.sleep(0.3)
             self.helper("shield off")
 
+    @property
+    def busy(self) -> bool:
+        """Ending a drag here (it needs the cursor where it is)."""
+        return self._task is not None and not self._task.done()
+
     def owns(self, tid) -> bool:
         return self.pending is not None and tid == self.pending.id
 

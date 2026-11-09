@@ -19,7 +19,10 @@ to the device in front (or draws itself). The device showing a frame answers
 :data:`IN_FLIGHT` frames unanswered, so a slow link drops frames rather than
 queueing them behind the pointer. Where the pointer on the screen behind is
 in the covered part (``[layout] mirror_pointer``, on by default), the host
-sends where (``mirror_pointer``) and the mirror draws it.
+sends where (``mirror_pointer``) and the mirror draws it. An agent showing
+a mirror moves its own idle cursor (left wherever input last left it) to
+the side of the screen, so it doesn't sit on the mirror like a second
+pointer (:class:`CursorPark`).
 
 On a computer the capturing and drawing happen in the overlay helper process
 (:mod:`curslink.mirror.helper`), which already owns the switch animation.
@@ -45,6 +48,9 @@ MAX_FPS = 30
 IN_FLIGHT = 2
 # The pointer in a mirror is sent at most this often.
 POINTER_EVERY_S = 1 / 90
+# An agent's idle cursor is moved off a mirror this long after it shows
+# (input has just left, and a file drag leaving may still need it there).
+PARK_AFTER_S = 0.8
 
 
 @dataclass(frozen=True)
@@ -318,8 +324,10 @@ class MirrorPeer:
     :class:`MirrorHost` (for the host). Runs on the asyncio loop; feed it the
     helper's lines with :meth:`helper_line` from there."""
 
-    def __init__(self, helper: Callable[[str], None], send: Callable[..., None], images: Callable[[str, str], None] | None = None):
+    def __init__(self, helper: Callable[[str], None], send: Callable[..., None], images: Callable[[str, str], None] | None = None,
+                 on_shows: Callable[[list[dict]], None] | None = None):
         self.helper = helper
+        self.on_shows = on_shows  # an agent's CursorPark.shows
         self.send = send
         # (stream id, line): frames to show, off the loop (see LatestWriter).
         self.images = images or (lambda sid, line: helper(line))
@@ -335,6 +343,8 @@ class MirrorPeer:
             self.source.reset(c["id"] for c in captures)
             self.showing = {s["id"] for s in shows}
             self.helper(_command("mirror", self.state))
+            if self.on_shows is not None:
+                self.on_shows(shows)
         elif t == "mirror_frame":
             sid = data.get("id")
             if sid in self.showing:
@@ -366,6 +376,65 @@ class MirrorPeer:
     def stop(self) -> None:
         if self.state is not EMPTY:
             self.handle("mirror", EMPTY)
+
+
+def park_point(shows: list[dict]) -> tuple[int, int] | None:
+    """Where an agent's idle cursor goes while ``shows`` are up: the middle
+    of the right edge of the screen the first one is on (in the OS pixels the
+    host moves this device's pointer in), so only a pixel of it is seen. Not
+    a corner: Windows' bottom ones peek at the desktop or open widgets on
+    hover. None while adjusting a mirror (that takes this cursor)."""
+    if not shows or any(s.get("tune") for s in shows):
+        return None
+    whole = shows[0].get("screen_os")
+    if not (isinstance(whole, list) and len(whole) == 4):
+        return None
+    try:
+        x, y, w, h = (float(v) for v in whole)
+    except (TypeError, ValueError):
+        return None
+    if w <= 0 or h <= 0:
+        return None
+    return int(x + w) - 1, int(y + h / 2)
+
+
+class CursorPark:
+    """An agent's own cursor stays where input last left this device. In
+    mirror mode a mirror can come up right under it, where it looks like a
+    second pointer next to the one the mirror draws. Once each time input is
+    away, while a mirror shows, move it to the side of the screen.
+    ``session`` is the agent's :class:`curslink.net.client.AgentSession`."""
+
+    def __init__(self, session, call_later: Callable[[float, Callable[[], None]], object],
+                 delay: float = PARK_AFTER_S):
+        self.session = session
+        self.call_later = call_later
+        self.delay = delay
+        self.point: tuple[int, int] | None = None
+        self._parked_at: int | None = None  # session.entered when it was moved
+        self._timer = None
+
+    def shows(self, shows: list[dict]) -> None:
+        self.point = park_point(shows)
+        if self.point is not None and self._timer is None and not self._done():
+            self._timer = self.call_later(self.delay, self._fire)
+
+    def _done(self) -> bool:
+        return self.session.active or self._parked_at == self.session.entered
+
+    def _fire(self) -> None:
+        self._timer = None
+        if self.point is None or self._done():
+            return
+        drag_out = getattr(self.session, "drag_out", None)
+        if self.session.buttons or (drag_out is not None and getattr(drag_out, "busy", False)):
+            self._timer = self.call_later(self.delay, self._fire)  # a drag is still ending here
+            return
+        self._parked_at = self.session.entered
+        try:
+            self.session.sink.move_to(*self.point)
+        except Exception:
+            log.debug("couldn't move the cursor aside", exc_info=True)
 
 
 class MirrorHost:

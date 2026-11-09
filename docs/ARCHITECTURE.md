@@ -248,6 +248,12 @@ front of it shows the part it covers, live (`curslink.mirror`).
   capture) and the mirror draws the same ones mapped through `src`; it's
   lined up when they carry on unbroken past the bezel. After the click
   line-up in mirror mode the Layout page goes straight on to this.
+- An agent's own cursor stays wherever input last left it, which can be
+  right on a mirror that comes up there (a second pointer next to the one
+  the mirror draws). `CursorPark` moves it to the middle of that screen's
+  right edge (not a corner: Windows' bottom corners peek or open widgets on
+  hover) once each time input is away, not while adjusting, and not while a
+  file drag leaving it is still ending.
 - Curslink's own overlay windows (the edge indicator, mirrors) are kept out
   of captures (`curslink.capturehide`; on macOS the capture also leaves out
   the helper's own windows), so they don't show up twice.
