@@ -362,7 +362,34 @@ def write_bundle(dest: Path) -> Path:
             for f in sorted(folder.iterdir()):
                 if f.is_file() and (f.suffix in (".txt", ".log") or ".log." in f.name):
                     z.write(f, f.name)
+        layout = layout_text()
+        if layout:
+            z.writestr("layout.toml", layout)
     return dest
+
+
+def layout_text(path: Path | None = None) -> str:
+    """The config's ``[layout]`` (screens, line-ups, fine-tuning), for a
+    diagnostics bundle: nothing else of it, so no secret goes along."""
+    try:
+        import tomllib
+
+        if path is None:
+            from curslink.configedit import default_config_path
+
+            path = default_config_path()
+        raw = tomllib.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    layout = raw.get("layout")
+    if not isinstance(layout, dict):
+        return ""
+    try:
+        import tomlkit
+
+        return tomlkit.dumps({"layout": layout})
+    except Exception:
+        return repr(layout)
 
 
 def bundle_name() -> str:

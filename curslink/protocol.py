@@ -12,7 +12,10 @@ Host -> agent
                                        for moves by UDP (address only when it
                                        differs), see curslink.net.udp; only to an
                                        agent whose hello.features has "udp"
-    enter        {x, y, effect}        agent now owns the pointer; warp to x, y
+    enter        {x, y, effect, box}   agent now owns the pointer; warp to x, y;
+                                       box (optional): that screen [x, y, w, h] in
+                                       the same OS pixels, to place the effect by
+                                       (as a fraction of it)
     leave        {effect, x, y, park}  host took control back; x, y (optional):
                                        where the pointer left, for the animation;
                                        park (optional, [x, y]): move the idle

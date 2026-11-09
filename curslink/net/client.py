@@ -41,7 +41,7 @@ NETSTATS_EVERY_S = 5.0
 class AgentSession:
     """Applies host messages to the local OS. Pure logic, no networking."""
 
-    def __init__(self, sink: InputSink, show_effect: Callable[[str, int, int], None], smoother=None):
+    def __init__(self, sink: InputSink, show_effect: Callable[..., None], smoother=None):
         self.sink = sink
         self.show_effect = show_effect
         self.scrolls = Tally("scroll from the host")
@@ -143,7 +143,12 @@ class AgentSession:
                 self.sink.move_to(x, y)
             if self.cursor is not None:
                 self.cursor.show()  # after the move: it shows where it lands
-            self.show_effect(msg.get("effect", "none"), x, y)
+            box = msg.data.get("box")
+            if isinstance(box, list) and len(box) == 4 and all(
+                    isinstance(v, (int, float)) and not isinstance(v, bool) for v in box) and box[2] > 0 and box[3] > 0:
+                self.show_effect(msg.get("effect", "none"), x, y, tuple(int(v) for v in box))
+            else:
+                self.show_effect(msg.get("effect", "none"), x, y)
         elif t == "leave":
             self.release_all()
             if "x" in msg.data and "y" in msg.data:  # where the pointer left from (0.4.17+ hosts)

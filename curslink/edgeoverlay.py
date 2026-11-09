@@ -108,16 +108,8 @@ class _Overlay(QWidget):
                      Qt.WidgetAttribute.WA_TransparentForMouseEvents, Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow):
             self.setAttribute(attr, True)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._hidden_from_capture = False
-
-    def showEvent(self, e) -> None:  # noqa: N802
-        super().showEvent(e)
-        if not self._hidden_from_capture:
-            # Mirror mode would otherwise show it again on the screen in front.
-            from curslink.capturehide import exclude_from_capture
-
-            exclude_from_capture(self)
-            self._hidden_from_capture = True
+        # Not kept out of captures: where it's under a mirror, the mirror
+        # streams it to the screen in front, drawn as on this screen.
 
 
 class Bar(_Overlay):

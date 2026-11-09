@@ -121,6 +121,7 @@ confirm_with_agents = true   # agents running their own camera ([agent.gaze])
 # mirror = false
 # mirror_pointer = true
 # mirror_fps = 30
+# mirror_quality = "high"   # "lossless" (PNG), "high" or "standard"
 #
 # A screen behind can stay mirrored while the pointer is on any screen
 # joined to it edge to edge (or along a row of them), not only on it:
