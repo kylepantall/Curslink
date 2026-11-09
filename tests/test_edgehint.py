@@ -342,3 +342,22 @@ def test_bar_renders_at_the_screens_resolution():
     column = [img.pixelColor(400, y).alpha() for y in range(0, 128)]
     assert column[0] > 150 and column[-1] < 5
     assert len(set(column)) > 40  # changes smoothly, pixel by pixel
+
+
+def test_crossing_flare_fades_like_the_mirror():
+    QtWidgets = pytest.importorskip("PySide6.QtWidgets")
+    from curslink import edgeoverlay
+    from curslink.edgeoverlay import EdgeOverlay
+
+    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    ov = EdgeOverlay(lambda x, y: (x, y))
+    ov.handle({"role": "to", "rect": [0, 0, 1000, 800], "side": "left", "a": 0, "b": 800, "at": 400, "near": 1})
+    settle(ov)
+    ov.handle({"flash": True})
+    # Halfway through the mirror's fade, the flare is halfway down: a straight line, same length.
+    ov.flash_at -= edgeoverlay.FADE_S / 2
+    ov._tick()
+    assert ov.level == pytest.approx(0.5, abs=0.05)
+    ov.flash_at -= edgeoverlay.FADE_S
+    ov._tick()
+    assert ov.level == 0.0 and not ov.bar.isVisible()
