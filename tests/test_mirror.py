@@ -1309,3 +1309,86 @@ def test_a_mac_capture_that_has_the_cursor_in_it_casts_that_one(qapp, monkeypatc
     cap.grab()
     assert calls == []  # not looked up, so not drawn in
     cap.stop()
+
+
+# -- joined screens -------------------------------------------------------------------
+
+
+def wall(joined=None, gap=0):
+    """Kyle's desk: A (a laptop) in front of B (the Mac's ultrawide), and C
+    (another Mac monitor) to B's right, ``gap`` px apart."""
+    devices = [
+        Device("mac", "Mac", (Screen("b", "mac", 0, 0, 3440, 1440),
+                              Screen("c", "mac", 3440 + gap, 0, 1920, 1080, os_x=3440))),
+        Device("pc", "Laptop", (Screen("a", "pc", -200, 900, 1000, 600, z=1),)),
+    ]
+    return Layout.from_devices(devices, allow_overlap=True, pointer_through=True, mirror=True,
+                               mirror_joined=joined)
+
+
+def test_joined_screens_share_an_edge_and_skip_the_screen_in_front():
+    lay = wall()
+    b, c, a = lay.screen("mac", "b"), lay.screen("mac", "c"), lay.screen("pc", "a")
+    assert lay.joined(b) == [c]
+    assert lay.joined(c) == [b]  # A overlaps B: not joined to it, and C's row stops there
+    assert not lay.touching(a, b)
+    apart = wall(gap=40)
+    assert apart.joined(apart.screen("mac", "b")) == [apart.screen("mac", "c")]
+    assert apart.joined(apart.screen("mac", "b"), gap=10) == []
+
+
+def test_joined_screens_carry_on_along_a_row():
+    devices = [Device("mac", "Mac", (Screen("b", "mac", 0, 0, 1000, 600), Screen("c", "mac", 1000, 0, 800, 600),
+                                     Screen("d", "mac", 1800, 100, 800, 600))),
+               Device("pc", "Laptop", (Screen("a", "pc", 100, 300, 400, 300, z=1),))]
+    lay = Layout.from_devices(devices, allow_overlap=True, mirror=True)
+    b = lay.screen("mac", "b")
+    assert [s.id for s in lay.joined(b)] == ["c", "d"]
+
+
+def test_mirror_stays_on_while_on_a_joined_screen_only_when_set():
+    off = wall()
+    assert streams_for(off, off.screen("mac", "c")) == []
+    on = wall({("mac", "b"): "all"})
+    c = on.screen("mac", "c")
+    stream, = streams_for(on, c)
+    assert stream.id == "mac:b>pc:a"
+    assert streams_for(on, c, joined=False) == []
+    # On the laptop itself, its own desktop shows.
+    assert streams_for(on, on.screen("pc", "a")) == []
+    # Listed: only those screens count.
+    assert streams_for(wall({("mac", "b"): frozenset({("mac", "c")})}), c)
+    assert streams_for(wall({("mac", "b"): frozenset({("mac", "x")})}), c) == []
+
+
+def test_host_keeps_the_mirror_up_moving_onto_a_joined_screen():
+    lay = wall({("mac", "b"): "all"})
+    transport = Transport({"pc"}, {"pc"})
+    router = Router(lay, "mac", FakeCapture(), FakeSink(), transport, FakeOverlay())
+    host = None
+    lines = []
+    local = MirrorPeer(lines.append, lambda t, **d: host.local_send(t, **d))
+    host = MirrorHost(lay, router, transport, local, fps=12, clock=lambda: 0.0)
+    router.on_moved = host.update
+    router.on_pointer(1000, 300)
+    host.refresh()
+    assert transport.of("mirror", "pc")[-1]["shows"]
+    router.on_pointer(4000, 300)  # onto C
+    assert router.screen.id == "c"
+    assert transport.of("mirror", "pc")[-1]["shows"]
+    state = json.loads(lines[-1].partition(" ")[2])
+    assert "cursor" not in state["captures"][0]  # the pointer isn't on B to cast
+
+
+def test_parse_mirror_joined():
+    from curslink.config import ConfigError, parse_layout
+
+    raw = {"layout": {"allow_overlap": True, "mirror": True,
+                      "mirror_joined": {"mac/b": "all", "mac/c": ["mac/b", "gone/x"], "gone/y": "all"}},
+           "devices": [{"id": "mac", "screens": [{"id": "b", "x": 0, "y": 0, "width": 100, "height": 100},
+                                                 {"id": "c", "x": 100, "y": 0, "width": 100, "height": 100}]}]}
+    lay = parse_layout(raw)
+    assert lay.mirror_joined == {("mac", "b"): "all", ("mac", "c"): frozenset({("mac", "b")})}
+    raw["layout"]["mirror_joined"] = {"mac/b": 3}
+    with pytest.raises(ConfigError):
+        parse_layout(raw)

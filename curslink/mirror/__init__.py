@@ -17,7 +17,9 @@ rectangle and sends JPEG frames (``mirror_frame``), which the host passes on
 to the device in front (or draws itself). The device showing a frame answers
 ``mirror_ack``, which goes back to the device capturing it: it keeps at most
 :data:`IN_FLIGHT` frames unanswered, so a slow link drops frames rather than
-queueing them behind the pointer. Where the pointer on the screen behind is
+queueing them behind the pointer. A screen behind can be set to stay
+mirrored while you use any screen joined to it edge to edge, not only
+while you use it (``[layout.mirror_joined]``). Where the pointer on the screen behind is
 in the covered part, the device behind draws its real cursor (shape and
 all) into the picture it captures (capture ``cursor``), so the mirror casts
 it rather than drawing a copy. Only an older agent behind, which can't, gets
@@ -41,7 +43,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable
 
-from curslink.layout import Fit, Layout, Screen
+from curslink.layout import JOIN_GAP, Fit, Layout, Screen
 
 log = logging.getLogger(__name__)
 
@@ -107,13 +109,19 @@ class Stream:
         return None
 
 
-def streams_for(layout: Layout, screen: Screen, can: Callable[[str], bool] = lambda device_id: True) -> list[Stream]:
+def streams_for(layout: Layout, screen: Screen, can: Callable[[str], bool] = lambda device_id: True,
+                joined: bool = True, gap: int = JOIN_GAP) -> list[Stream]:
     """The mirrors wanted while ``screen`` is the one in use: one for every
-    screen in front of it, on devices that take part (``can``)."""
-    if not layout.mirror or not layout.allow_overlap or not can(screen.device_id):
+    screen in front of it, on devices that take part (``can``). With
+    ``joined``, also those of screens set to stay mirrored while a screen
+    joined to them is in use (``[layout.mirror_joined]``, see
+    :meth:`Layout.mirrored_while`)."""
+    if not layout.mirror or not layout.allow_overlap:
         return []
-    return [Stream(screen, front, rect, None if there == rect else there)
-            for front, rect, there in layout.covered_parts(screen) if can(front.device_id)]
+    behind = [screen] + (layout.mirrored_while(screen, gap) if joined else [])
+    return [Stream(b, front, rect, None if there == rect else there)
+            for b in behind if can(b.device_id)
+            for front, rect, there in layout.covered_parts(b) if can(front.device_id)]
 
 
 def nudge(fit: tuple[float, float, float], dx: float, dy: float) -> tuple[float, float, float]:
@@ -489,7 +497,7 @@ class MirrorHost:
     an agent connects or goes."""
 
     def __init__(self, layout: Layout, router, server, local: MirrorPeer | None, fps: int = DEFAULT_FPS,
-                 clock: Callable[[], float] = time.monotonic):
+                 clock: Callable[[], float] = time.monotonic, gap: int = JOIN_GAP):
         self.layout = layout
         self.router = router
         self.server = server
@@ -497,6 +505,7 @@ class MirrorHost:
         self.local_id = router.local_id
         self.fps = max(1, min(MAX_FPS, int(fps)))
         self.clock = clock
+        self.gap = gap  # screens this far apart still count as joined
         self.names = {d.id: d.name for d in layout.devices.values()}
         self.streams: dict[str, Stream] = {}
         self.sent: dict[str, dict] = {}  # device -> the state it was last sent
@@ -599,7 +608,8 @@ class MirrorHost:
         self._send_pointer()
 
     def _plan(self, screen: Screen) -> None:
-        streams = streams_for(self.layout, screen, self.can)
+        # Held (fine-tuning one overlap), only that screen's mirrors.
+        streams = streams_for(self.layout, screen, self.can, joined=self.held is None, gap=self.gap)
         self.streams = {s.id: s for s in streams}
         self._pointer = {sid: p for sid, p in self._pointer.items() if sid in self.streams}
         states = device_states(streams, self.names, self.fps, self.tuning, self._anchors,

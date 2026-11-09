@@ -176,6 +176,10 @@ class Fit:
     scale: float
 
 
+# Screens up to this many pixels apart still count as joined (Layout.touching).
+JOIN_GAP = 64
+
+
 def overlap_message(a: Screen, b: Screen) -> str:
     return f"screens {a.device_id}/{a.id} and {b.device_id}/{b.id} overlap"
 
@@ -195,14 +199,73 @@ class Layout:
     # (device, screen) -> (width_mm, height_mm). Not in the config: filled in
     # while running, for overlaps that aren't calibrated.
     physical: dict[tuple[str, str], tuple[float, float]] = field(default_factory=dict)
+    # Mirror mode: screens behind whose mirrors stay on while the pointer is
+    # on a screen joined to them (see :meth:`mirrored_while`): (device,
+    # screen) behind -> "all" of its joined screens, or just these.
+    mirror_joined: dict[tuple[str, str], str | frozenset[tuple[str, str]]] = field(default_factory=dict)
 
     @classmethod
     def from_devices(cls, devices: Iterable[Device], allow_overlap: bool = False,
                      links: Iterable[EdgeLink] = (), pointer_through: bool = False,
-                     mirror: bool = False, fits: Iterable[Fit] = ()) -> "Layout":
+                     mirror: bool = False, fits: Iterable[Fit] = (),
+                     mirror_joined: dict | None = None) -> "Layout":
         layout = cls({d.id: d for d in devices}, allow_overlap, tuple(links), pointer_through, mirror, tuple(fits))
+        layout.mirror_joined = dict(mirror_joined or {})
         layout.validate()
         return layout
+
+    def touching(self, a: Screen, b: Screen, gap: int = JOIN_GAP) -> bool:
+        """Do ``a`` and ``b`` share an edge: side by side (or one above the
+        other) along a stretch, up to ``gap`` pixels apart, or joined by an
+        edge link? Overlapping screens don't count."""
+        if a == b or a.overlap(b) is not None:
+            return False
+        for link in self.links:
+            ends = {(link.a.device_id, link.a.screen_id), (link.b.device_id, link.b.screen_id)}
+            if ends == {(a.device_id, a.id), (b.device_id, b.id)}:
+                return True
+        across = min(a.bottom, b.bottom) > max(a.y, b.y)  # their heights meet
+        down = min(a.right, b.right) > max(a.x, b.x)  # their widths meet
+        if across and (0 <= b.x - a.right <= gap or 0 <= a.x - b.right <= gap):
+            return True
+        return down and (0 <= b.y - a.bottom <= gap or 0 <= a.y - b.bottom <= gap)
+
+    def joined(self, screen: Screen, gap: int = JOIN_GAP) -> list[Screen]:
+        """The screens joined to ``screen`` edge to edge, directly or along
+        a row of them (B joins C, C joins D: both are joined to B), nearest
+        first. Screens overlapping ``screen`` (one in front of it) aren't,
+        and the row doesn't carry on through them."""
+        out: list[Screen] = []
+        seen = {screen}
+        todo = [screen]
+        others = list(self.screens())
+        while todo:
+            here = todo.pop(0)
+            for s in others:
+                if s in seen or screen.overlap(s) is not None or not self.touching(here, s, gap):
+                    continue
+                seen.add(s)
+                out.append(s)
+                todo.append(s)
+        return out
+
+    def mirrored_while(self, screen: Screen, gap: int = JOIN_GAP) -> list[Screen]:
+        """Screens behind others that keep their mirrors on while ``screen``
+        is the one in use, because it's joined to them and they're set to
+        (``mirror_joined``). Not ``screen`` itself."""
+        out = []
+        for key, which in self.mirror_joined.items():
+            try:
+                behind = self.screen(*key)
+            except KeyError:
+                continue
+            if behind == screen or not self.covering(behind):
+                continue
+            if which != "all" and (screen.device_id, screen.id) not in which:
+                continue
+            if screen in self.joined(behind, gap):
+                out.append(behind)
+        return out
 
     def overlaps(self) -> list[tuple[Screen, Screen]]:
         """Every overlapping pair, as ``(behind, in front)``."""
