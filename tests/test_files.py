@@ -1206,3 +1206,41 @@ def test_drag_debug_snapshot_runs_on_this_computer():
     dd.format_snapshot(snap)
     if sys.platform in ("win32", "darwin"):
         assert isinstance(snap.get("windows"), list)
+
+
+async def test_slow_file_reads_keep_the_loop_free_and_say_so(monkeypatch):
+    import threading
+    import time as _time
+
+    import curslink.files.transfer as tr
+
+    monkeypatch.setattr(tr, "OPEN_SLOW_S", 0.05)
+    gate = threading.Event()
+    slow, ticks = [], []
+
+    def blocked(path):  # like open() waiting on a permission prompt
+        gate.wait(2)
+        return path
+
+    async def ticker():
+        for _ in range(5):
+            ticks.append(_time.monotonic())
+            await asyncio.sleep(0.02)
+
+    t = asyncio.ensure_future(ticker())
+    got = asyncio.ensure_future(tr.off_loop_watched("/Users/k/Desktop/a.txt", slow.append, blocked, "x"))
+    await asyncio.sleep(0.12)
+    assert slow == ["/Users/k/Desktop/a.txt"]  # said once it was slow
+    assert len(ticks) >= 4                     # the loop kept going meanwhile
+    gate.set()
+    assert await got == "x"
+    await t
+
+
+async def test_a_slow_read_brings_input_home_to_answer_the_prompt(new_drag):
+    handoff, router, transport, helper, injected = new_drag
+    router.on_pointer(3839, 500)
+    router.on_button("left", True)
+    assert not router.is_local
+    handoff._slow_read("/Users/k/Desktop/a.txt")
+    assert router.is_local

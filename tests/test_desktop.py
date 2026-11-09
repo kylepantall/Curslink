@@ -371,7 +371,7 @@ def test_macos_capture_reads_deltas_and_survives_a_disabled_tap(monkeypatch):
     capture._grabbed = True
     assert capture._mac_mouse_tap(5, fields) is None
     assert capture._mac_mouse_tap(6, {**fields, pb._MAC_SOURCE_PID: 99}) is None  # ours: no motion
-    assert capture._mac_key_tap(10, "key") is None
+    assert capture._mac_key_tap(10, {pb._MAC_KEYCODE: 0, pb._MAC_SOURCE_PID: 0}) is None
     assert calls == [("motion", 3, -2), ("warp", 7, 8)]  # held at the park point after every report
     del calls[1]
 
@@ -676,3 +676,62 @@ def test_mac_wheel_mouse_scrolls_whole_lines_and_trackpad_fractions():
     assert mac_scroll_lines(False, (0, -1), (0.0, -0.1)) == (0.0, -1.0)
     # A trackpad's fractions are the real amount.
     assert mac_scroll_lines(True, (0, 1), (0.0, 0.25)) == (0.0, 0.25)
+
+
+def _mac_capture(monkeypatch, fields=None):
+    import curslink.inputs.pynput_backend as pb
+
+    monkeypatch.setattr(pb, "_mac_attach_cursor", lambda attached: None)
+    monkeypatch.setattr(pb, "_mac_warp", lambda x, y: None)
+    monkeypatch.setattr(pb, "_mac_cursor_visible", lambda visible: None)
+    monkeypatch.setattr(pb, "_mac_injected", lambda event: False)
+    monkeypatch.setattr(pb, "_mac_field", lambda event, field: (fields or {}).get(field, 0))
+    released = []
+    monkeypatch.setattr(pb, "mac_cursor", lambda: (5, 6))
+    monkeypatch.setattr(pb, "_drag_release", lambda x, y: released.append((x, y)))
+    capture = pb.PynputCapture(park_at=(7, 8))
+    capture._mac = True
+    return pb, capture, released
+
+
+def test_mac_input_comes_home_when_the_loop_forwarding_it_is_stuck(monkeypatch):
+    # 0.4.39: a file read waiting on a macOS permission prompt held up the
+    # loop; the tap kept swallowing the Mac's input, so nothing could click it.
+    pb, capture, _ = _mac_capture(monkeypatch)
+    capture.set_grab(True)
+    assert capture._mac_key_tap(pb._MAC_KEY_DOWN, object()) is None   # forwarded, as normal
+    capture.loop_alive = lambda: False
+    event = object()
+    assert capture._mac_key_tap(pb._MAC_KEY_DOWN, event) is event     # this Mac sees it
+    assert not capture._grabbed and capture.took_back
+    capture.took_back = False
+    capture.set_grab(True)
+    assert capture._mac_mouse_tap(5, event) is event                  # mouse too
+    assert not capture._grabbed and capture.took_back
+
+
+def test_escape_three_times_always_brings_mac_input_home(monkeypatch):
+    pb, capture, _ = _mac_capture(monkeypatch, {9: 53})  # kCGKeyboardEventKeycode: Escape
+    capture.set_grab(True)
+    event = object()
+    capture._mac_key_tap(pb._MAC_KEY_DOWN, event)
+    capture._mac_key_tap(pb._MAC_KEY_DOWN, event)
+    assert capture._grabbed
+    assert capture._mac_key_tap(pb._MAC_KEY_DOWN, event) is event
+    assert not capture._grabbed and capture.took_back
+
+
+def test_a_held_button_up_goes_at_the_next_click_or_after_a_while(monkeypatch):
+    pb, capture, released = _mac_capture(monkeypatch)
+    now = [100.0]
+    monkeypatch.setattr(pb.time, "monotonic", lambda: now[0])
+    capture.hold_left_up = lambda: True
+    assert capture._mac_mouse_tap(pb._MAC_LEFT_UP, object()) is None    # held for the drop
+    assert capture._held_up
+    event = object()
+    assert capture._mac_mouse_tap(pb._MAC_LEFT_DOWN, event) is event    # clicked again
+    assert released == [(5, 6)] and not capture._held_up
+    capture._mac_mouse_tap(pb._MAC_LEFT_UP, object())
+    now[0] += pb.HOLD_MAX_S + 1
+    capture._mac_mouse_tap(5, object())                                 # any move, much later
+    assert released == [(5, 6), (5, 6)] and not capture._held_up

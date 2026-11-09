@@ -238,6 +238,35 @@ class HostRelays:
         self.links.clear()
 
 
+LOOP_STALL_S = 1.5   # the loop that forwards input stuck this long: input goes home
+LOOP_BEAT_S = 0.2
+
+
+def watch_input_loop(capture, router) -> asyncio.Task:
+    """Let the event tap tell when the loop that forwards input is stuck,
+    and give the input back to this computer then (PynputCapture.loop_alive;
+    0.4.39 locked a Mac's mouse and keyboard while a file read waited on a
+    permission prompt). Once the loop is going again, the router catches up."""
+    beat = {"at": time.monotonic()}
+    if hasattr(capture, "loop_alive"):
+        capture.loop_alive = lambda: time.monotonic() - beat["at"] < LOOP_STALL_S
+
+    async def run() -> None:
+        while True:
+            now = time.monotonic()
+            if now - beat["at"] > LOOP_STALL_S:
+                log.warning("the event loop was stuck for %.1f s", now - beat["at"])
+            beat["at"] = now
+            if getattr(capture, "took_back", False):
+                capture.took_back = False
+                if not router.is_local:
+                    log.info("input: back on this computer after the safety net took it")
+                    router.go_home("hotkey")
+            await asyncio.sleep(LOOP_BEAT_S)
+
+    return asyncio.get_running_loop().create_task(run())
+
+
 async def run_host(cfg: HostConfig) -> None:
     from curslink.inputs.pynput_backend import PynputCapture, PynputSink
     from curslink.overlay import OverlayProcess
@@ -303,6 +332,7 @@ async def run_host(cfg: HostConfig) -> None:
     mirror = start_mirror(cfg, router, server, overlay, loop)
     clipboard = start_host_clipboard(cfg, server, overlay, loop) if cfg.clipboard else None
     bridge = LoopBridge(loop, router, handoff)
+    watch_input_loop(capture, router)
     capture.start(bridge)
     reporter = loop.create_task(report_capture(bridge, capture, server, router))
     network = loop.create_task(report_network_host(server, cfg.optimise)) if events.channel.enabled else None

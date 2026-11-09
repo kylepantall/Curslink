@@ -182,7 +182,18 @@ reaches an edge, the real drag starts, the window under the pointer
 changes, each try at bringing one forward, the let-go, the drop, the end)
 leaves a `drag-debug` line in the log (`curslink/files/dragdebug.py`): the
 cursor, the app and window in front, the window under the cursor, and the
-windows on screen front to back. Let go on the desktop or in a
+windows on screen front to back.
+
+Input can never be trapped on a Mac host. Dragged and copied files are only
+ever touched off the event loop (`transfer.off_loop_watched`,
+`ClipboardSync`): opening one in a protected folder waits on a macOS
+permission prompt, and 0.4.39 did that on the loop that forwards input, so
+the Mac's mouse and keyboard went nowhere and the prompt couldn't be
+answered. A read slower than a second brings input home to answer it. And
+the event tap itself, which needs nothing else to be running, gives the
+Mac its input back when the loop has been stuck for 1.5 s
+(`app.watch_input_loop`) or when Escape is pressed three times within 1.5 s,
+and lets go of a button-up held for a drop at the next click or after 60 s. Let go on the desktop or in a
 folder and the file manager copies them there; on an app, it gets the temp
 paths. If you let go before every byte has arrived, the button-up waits
 (the agent simply doesn't send it yet; a Mac host's event tap holds the

@@ -122,6 +122,19 @@ class PynputCapture:
         # release_held(). Called from the event tap: must be quick.
         self.hold_left_up: Callable[[], bool] = lambda: False
         self._held_up = False
+        self._held_at = 0.0
+        # Safety nets that need nothing but the event tap's own thread, so
+        # they work when everything else is stuck (0.4.39: a file read
+        # waiting on a macOS permission prompt held up the loop that
+        # forwards input, so the Mac's mouse and keyboard went nowhere and
+        # the prompt couldn't be clicked):
+        # - loop_alive() false while input is grabbed: give it back here;
+        # - Escape three times quickly: give it back here, always;
+        # - a held button-up goes after HOLD_MAX_S, or at the next click.
+        # took_back is set when one of them fires, for the router to catch up.
+        self.loop_alive: Callable[[], bool] = lambda: True
+        self.took_back = False
+        self._escapes: list[float] = []
 
     def start(self, handler: CaptureHandler) -> None:
         from pynput import mouse
@@ -268,10 +281,38 @@ class PynputCapture:
             x, y = mac_cursor()
             _drag_release(x, y)
 
+    def take_back(self, why: str) -> None:
+        """Give this computer its own mouse and keyboard back, from any
+        thread, without the event loop (see loop_alive)."""
+        log.warning("input: %s; giving the mouse and keyboard back to this computer", why)
+        self.took_back = True
+        if self._held_up:
+            self.release_held()
+        if self._grabbed:
+            self.set_grab(False)
+
+    def _escape_pressed(self) -> bool:
+        """Escape three times within ESCAPE_WINDOW_S?"""
+        now = time.monotonic()
+        self._escapes = [t for t in self._escapes if now - t < ESCAPE_WINDOW_S] + [now]
+        if len(self._escapes) >= 3:
+            self._escapes = []
+            return True
+        return False
+
     def _mac_mouse_tap(self, event_type, event):
+        if self._held_up and not _mac_injected(event) and (
+                event_type == _MAC_LEFT_DOWN or time.monotonic() - self._held_at > HOLD_MAX_S):
+            log.warning("drop: letting go of the held button (%s)",
+                        "clicked again" if event_type == _MAC_LEFT_DOWN else "waited too long")
+            self.release_held()
+        if self._grabbed and not self.loop_alive():
+            self.take_back("Curslink stopped forwarding input")
+            return event
         if not self._grabbed:
             if event_type == _MAC_LEFT_UP and not _mac_injected(event) and self.hold_left_up():
                 self._held_up = True
+                self._held_at = time.monotonic()
                 return None  # held back until the dropped files have arrived
             return event
         if self._pass_injected and _mac_injected(event):
@@ -323,6 +364,14 @@ class PynputCapture:
         return dx, dy
 
     def _mac_key_tap(self, event_type, event):
+        if (event_type == _MAC_KEY_DOWN and not _mac_injected(event)
+                and _mac_field(event, _MAC_KEYCODE) == _MAC_ESCAPE and self._escape_pressed()):
+            if self._grabbed or self._held_up:
+                self.take_back("Escape pressed three times")
+            return event
+        if self._grabbed and not self.loop_alive():
+            self.take_back("Curslink stopped forwarding input")
+            return event
         if not self._grabbed or (self._pass_injected and _mac_injected(event)):
             return event
         return None
@@ -375,7 +424,12 @@ class PynputCapture:
 # ------------------------------------------------------------------ macOS bits
 # CGEventType values: mouse moved and the three drags; the two tap-disabled notices.
 _MAC_MOVES = frozenset({5, 6, 7, 27})
-_MAC_LEFT_UP = 2
+_MAC_LEFT_DOWN, _MAC_LEFT_UP = 1, 2
+_MAC_KEY_DOWN = 10                         # kCGEventKeyDown
+_MAC_KEYCODE = 9                           # kCGKeyboardEventKeycode
+_MAC_ESCAPE = 53
+ESCAPE_WINDOW_S = 1.5   # Escape three times within this: input comes home
+HOLD_MAX_S = 60.0       # a button-up held for a drop goes after this at most
 _MAC_TAP_DISABLED = frozenset({0xFFFFFFFE, 0xFFFFFFFF})
 _MAC_DELTA_X, _MAC_DELTA_Y = 4, 5          # kCGMouseEventDeltaX / DeltaY
 _MAC_SOURCE_PID = 41                       # kCGEventSourceUnixProcessID
