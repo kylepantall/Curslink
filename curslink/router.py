@@ -373,7 +373,9 @@ class Router:
             self._remote_keys.add(key)
         else:
             self._remote_keys.discard(key)
-        self.transport.send(self.active_device, "key", key=self.key_for(self.active_device, key), pressed=pressed)
+        out = self.key_for(self.active_device, key)
+        if out:  # "" is a key that computer has nothing for (a Mac's fn on a PC)
+            self.transport.send(self.active_device, "key", key=out, pressed=pressed)
 
     # ------------------------------------------------------------------ gaze
     def set_gaze_paused(self, paused: bool) -> None:
@@ -464,7 +466,9 @@ class Router:
                 self._release_local_keys()
             elif self.transport.is_connected(old):
                 for key in sorted(self._remote_keys):
-                    self.transport.send(old, "key", key=self.key_for(old, key), pressed=False)
+                    out = self.key_for(old, key)
+                    if out:
+                        self.transport.send(old, "key", key=out, pressed=False)
                 # A drag leaving that device (for this one, or for another that
                 # takes files) may be a file: the device finds out and ends its
                 # drag itself, rather than let go of the button wherever its

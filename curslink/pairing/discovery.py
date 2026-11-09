@@ -17,6 +17,7 @@ import ipaddress
 import logging
 import re
 import socket
+import threading
 from dataclasses import dataclass, field
 
 from curslink.pairing.handshake import DeviceInfo, PAIRING_VERSION
@@ -24,6 +25,45 @@ from curslink.pairing.handshake import DeviceInfo, PAIRING_VERSION
 log = logging.getLogger(__name__)
 
 SERVICE_TYPE = "_curslink._tcp.local."
+
+
+# ------------------------------------------------------- zeroconf's own loop
+# zeroconf does blocking work on the loop it runs on: closing its sockets
+# took about 2 s on a Mac (0.4.55: every "Check the network", and 4 s when
+# the advert was renewed for a new address). On the loop that forwards
+# input, that set off the safety net ("Curslink stopped forwarding input")
+# and the mouse came home mid-use. So all of it runs on a loop of its own.
+_zc_loop: asyncio.AbstractEventLoop | None = None
+_zc_lock = threading.Lock()
+
+
+def zeroconf_loop() -> asyncio.AbstractEventLoop:
+    """The event loop, on its own thread, that every zeroconf call runs on."""
+    global _zc_loop
+    with _zc_lock:
+        if _zc_loop is None or _zc_loop.is_closed():
+            loop = asyncio.new_event_loop()
+            threading.Thread(target=loop.run_forever, name="curslink-zeroconf", daemon=True).start()
+            _zc_loop = loop
+        return _zc_loop
+
+
+async def on_zeroconf_loop(coro):
+    """Run ``coro`` on :func:`zeroconf_loop` and wait for it here without
+    holding this loop up. Cancelling the wait cancels it there too."""
+    loop = zeroconf_loop()
+    try:
+        here = asyncio.get_running_loop()
+    except RuntimeError:
+        here = None
+    if here is loop:
+        return await coro
+    future = asyncio.run_coroutine_threadsafe(coro, loop)
+    try:
+        return await asyncio.wrap_future(future)
+    except asyncio.CancelledError:
+        future.cancel()
+        raise
 
 
 @dataclass(frozen=True)
@@ -204,9 +244,19 @@ class Advertiser:
             server=f"{local_hostname()}.",
             parsed_addresses=addresses,
         )
-        self._zc = AsyncZeroconf(**zeroconf_options())
-        # allow_name_change: two devices with the same display name still both show up.
-        await self._zc.async_register_service(self._info, allow_name_change=True)
+        info = self._info
+
+        async def register():
+            zc = AsyncZeroconf(**zeroconf_options())
+            try:
+                # allow_name_change: two devices with the same display name still both show up.
+                await zc.async_register_service(info, allow_name_change=True)
+            except BaseException:
+                await zc.async_close()
+                raise
+            return zc
+
+        self._zc = await on_zeroconf_loop(register())
         log.info("advertising %s on the LAN for pairing (port %d) as %s, %s", self.me.name, self.pairing_port,
                  local_hostname(), ", ".join(addresses) or "no LAN address")
 
@@ -214,10 +264,14 @@ class Advertiser:
         if self._zc is None:
             return
         zc, self._zc = self._zc, None
-        try:
-            await zc.async_unregister_all_services()
-        finally:
-            await zc.async_close()
+
+        async def unregister():
+            try:
+                await zc.async_unregister_all_services()
+            finally:
+                await zc.async_close()
+
+        await on_zeroconf_loop(unregister())
 
     async def _watch_addresses(self) -> None:
         """Advertise again when this computer's addresses change.
@@ -259,7 +313,12 @@ async def browse(timeout: float = 3.0, exclude: str | None = None, want: str | N
 
     With ``want`` (a device id) it returns as soon as that device has
     answered, so a long ``timeout`` (Wi-Fi drops the odd multicast packet)
-    only costs time when the device really isn't there."""
+    only costs time when the device really isn't there. It runs on
+    :func:`zeroconf_loop`, so the caller's loop never waits on zeroconf."""
+    return await on_zeroconf_loop(_browse(timeout, exclude, want))
+
+
+async def _browse(timeout: float, exclude: str | None, want: str | None) -> list[Found]:
     from zeroconf import ServiceStateChange
     from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZeroconf
 

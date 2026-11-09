@@ -245,8 +245,11 @@ class InputService : AccessibilityService() {
         keepScreenOn(true)
     }
 
-    /** Keep the screen on while the mouse is here and in use; let it sleep when idle. */
-    private fun keepScreenOn(on: Boolean) {
+    /** Keep the screen on while the mouse is here and in use; let it sleep when idle.
+     *  "Keep the screen on" (holding) wins over a let-go: the pointer leaving
+     *  the phone mustn't let it sleep while it's linked. */
+    private fun keepScreenOn(wanted: Boolean) {
+        val on = wanted || holding
         val lp = params ?: return
         val v = view ?: return
         val flag = WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON

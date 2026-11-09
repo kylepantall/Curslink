@@ -189,6 +189,13 @@ pointer off a screen) and the hotkeys.
 connected to the host as they are; Curslink forwards their input in
 software, so any mouse or keyboard works.
 
+**Do shortcuts like Alt+F4 and Cmd+Tab go to the other computer?** Yes.
+While input is on another computer, the host's own system shortcuts are
+off, so they go there instead. From a Mac keyboard to a PC, Option is Alt
+(Option+F4 is Alt+F4, also with the Spotlight or Launchpad key in F4's
+spot) and Cmd is Ctrl. Ctrl+Alt+Delete and Windows+L can't be sent:
+Windows only takes them from a real keyboard.
+
 **Is my typing safe on the network?** Yes. Everything is encrypted, and
 only devices you've paired can connect. See [Security](#security).
 

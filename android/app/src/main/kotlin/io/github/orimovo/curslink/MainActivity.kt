@@ -279,6 +279,7 @@ class MainActivity : AppCompatActivity() {
             append("\nPaused: ${if (prefs.paused) "yes" else "no"}, pause during calls: ${if (prefs.pauseDuringCalls) "on" else "off"}")
             append("\nLink: $state${if (detail.isNotEmpty()) " ($detail)" else ""}")
             append("\nMouse and keyboard (accessibility): ${if (accessibilityOn()) "on" else "off"}")
+            append("\nKeep the screen on: ${if (prefs.keepScreenOn) "on" else "off"}")
             append("\nIgnoring battery optimisation: ${(getSystemService(POWER_SERVICE) as PowerManager).isIgnoringBatteryOptimizations(packageName)}")
             append("\nApp version: ${Updater.currentVersion(this@MainActivity)}, update automatically: ${if (prefs.autoUpdate) "on" else "off"}")
             append("\nScreen layout size: ${prefs.layoutSize?.let { "${it.first} x ${it.second} dp" } ?: "not set"}")
