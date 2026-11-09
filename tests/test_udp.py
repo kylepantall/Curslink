@@ -247,3 +247,39 @@ def test_no_fast_probes_with_the_optimiser_off():
     agent = udp.AgentUdp(offer, lambda x, y, ts: None, active=lambda: True)
     agent.warm()
     assert not agent.warming()
+
+
+def test_an_idle_path_that_dozes_is_not_logged_until_a_move_needs_it(caplog):
+    now = [100.0]
+    host = udp.HostUdp(clock=lambda: now[0])
+    path = host.add("android-1")
+    path.addr = ("192.168.68.60", 37978)
+    caplog.set_level("INFO", logger="curslink.net.udp")
+
+    def ok_probe():
+        path.heard_at = now[0]
+        host.check(path)
+
+    ok_probe()
+    assert [r.message for r in caplog.records] == ["pointer moves to android-1 now go over UDP (192.168.68.60:37978)"]
+    for _ in range(5):  # the phone dozes for seconds at a time, then probes again
+        now[0] += 4.0
+        host.check(path)
+        ok_probe()
+    assert len(caplog.records) == 1
+    now[0] += 4.0
+    assert host.send_move(path, 1, 2, 3.0) is False  # a move has to go by TCP: worth saying
+    assert "went quiet (nothing heard for 4.0 s)" in caplog.records[-1].message
+    assert host.send_move(path, 1, 2, 4.0) is False
+    assert len(caplog.records) == 2
+    ok_probe()
+    assert caplog.records[-1].message.startswith("pointer moves to android-1 now go over UDP")
+
+
+async def test_a_move_counts_as_hearing_from_the_host():
+    now = [50.0]
+    agent = udp.AgentUdp({"port": 9, "id": udp.b64(b"\0" * 8), "key": udp.b64(b"\1" * 32)},
+                         lambda *a: None, clock=lambda: now[0])
+    assert not agent.heard_lately()
+    agent.datagram_received(udp.seal(agent.keys, agent.conn_id, udp.MOVE, 1, 1.0, 2.0, 3.0), None)
+    assert agent.heard_lately()

@@ -15,7 +15,12 @@ import java.util.Base64
  */
 class UdpOffer(val port: Int, val id: ByteArray, val key: ByteArray, val address: String? = null)
 
-class AgentUdp(offer: UdpOffer, private val onMove: (Double, Double, Double) -> Unit) {
+class AgentUdp(
+    offer: UdpOffer,
+    /** True while input is on this phone (between enter and leave). */
+    private val active: () -> Boolean = { false },
+    private val onMove: (Double, Double, Double) -> Unit,
+) {
     companion object {
         private const val VERSION = 1
         const val PROBE = 1
@@ -24,6 +29,12 @@ class AgentUdp(offer: UdpOffer, private val onMove: (Double, Double, Double) -> 
         private const val HEADER = 20
         private const val TAG = 16
         private const val PROBE_EVERY_MS = 500L
+        // While input is here and for WARM_AFTER_MS after, probe this often:
+        // a phone's Wi-Fi dozes between packets, and a steady trickle keeps
+        // it awake so the next moves aren't held at the access point
+        // (PROBE_WARM_S in curslink/net/udp.py).
+        internal const val PROBE_WARM_MS = 40L
+        internal const val WARM_AFTER_MS = 5000L
         private const val ALIVE_MS = 1600L
         private fun bodySize(kind: Int) = when (kind) { PROBE -> 1; ACK -> 8; MOVE -> 24; else -> -1 }
 
@@ -50,6 +61,8 @@ class AgentUdp(offer: UdpOffer, private val onMove: (Double, Double, Double) -> 
     private val address = offer.address  // the host's reply address, if not the one we dialled
     private var socket: DatagramSocket? = null
     @Volatile private var ackedAt = 0L
+    @Volatile private var warmUntil = 0L
+    private val kick = java.util.concurrent.Semaphore(0)
     private var seqOut = 0L
     private var seqIn = 0L
     @Volatile var moves = 0L
@@ -91,7 +104,8 @@ class AgentUdp(offer: UdpOffer, private val onMove: (Double, Double, Double) -> 
             try {
                 while (!Thread.currentThread().isInterrupted) {
                     probe()
-                    Thread.sleep(PROBE_EVERY_MS)
+                    kick.tryAcquire(if (warming()) PROBE_WARM_MS else PROBE_EVERY_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
+                    kick.drainPermits()
                 }
             } catch (_: InterruptedException) {
             }
@@ -101,6 +115,15 @@ class AgentUdp(offer: UdpOffer, private val onMove: (Double, Double, Double) -> 
         receiver.isDaemon = true
         threads = listOf(prober, receiver)
         threads.forEach { it.start() }
+    }
+
+    internal fun warming(): Boolean = active() || System.currentTimeMillis() < warmUntil
+
+    /** Input is here: probe fast for a while (don't wait out a slow interval). */
+    private fun warm() {
+        val was = warming()
+        warmUntil = System.currentTimeMillis() + WARM_AFTER_MS
+        if (!was) kick.release()
     }
 
     @Synchronized
@@ -131,6 +154,8 @@ class AgentUdp(offer: UdpOffer, private val onMove: (Double, Double, Double) -> 
                     if (first) probe()  // tell the host straight away
                 }
                 MOVE -> {
+                    ackedAt = System.currentTimeMillis()  // the host's datagrams get here: as good as an ACK
+                    warm()
                     val b = ByteBuffer.wrap(body)
                     moves++
                     onMove(b.double, b.double, b.double)

@@ -21,7 +21,10 @@ Setting up (all over the TLS connection first, so it's as private as that):
   says whether the agent has heard an ACK lately (``ok``);
 * while the host keeps hearing ``ok`` probes, it sends moves as MOVE
   datagrams to wherever they came from. When they stop (Wi-Fi changed, a
-  firewall in the way) it goes back to sending moves over TCP.
+  firewall in the way) it goes back to sending moves over TCP. A move that
+  arrives counts as hearing from the host too, like an ACK. A phone that's
+  idle dozes and its probes pause for seconds; that's only logged when a
+  move then has to go by TCP.
 
 Datagram: header ``magic "CL", version, kind, connection id (8 bytes),
 sequence number (u64)``, then the body XORed with a keystream of
@@ -194,7 +197,12 @@ class HostPath:
     seq_in: int = 0
     seq_out: int = 0
     sent: int = 0                   # moves sent by UDP since last taken (diagnostics)
-    up: bool = False                # last logged state
+    up: bool = False                # usable when last checked
+    # Whether the log last said moves go by UDP. Only a move that has to go
+    # by TCP logs the path as quiet: an idle phone dozes and stops probing
+    # for seconds at a time, which costs nothing while no moves are going
+    # there, so that alone isn't worth a line (it was two lines a few seconds).
+    reported: bool = False
     copies: int = 1                 # each move sent this many times (the optimiser's choice)
     probes: SeqLoss = field(default_factory=SeqLoss)  # agent -> host loss, from probe gaps
     # The newest move sent by UDP that TCP hasn't carried: sent over TCP
@@ -259,20 +267,25 @@ class HostUdp(asyncio.DatagramProtocol):
         self._send(path, seal(path.keys, path.conn_id, ACK, path.seq_out, seq))
         self.check(path)
 
-    def check(self, path: HostPath) -> None:
-        up = path.usable(self.clock())
+    def check(self, path: HostPath, moving: bool = False) -> None:
+        """Note whether the path is up; ``moving``: a move is waiting on the answer."""
+        now = self.clock()
+        up = path.usable(now)
         if up != path.up:
             path.up = up
-            if up:
-                log.info("pointer moves to %s now go over UDP (%s:%s)", path.device_id, *path.addr[:2])
-            else:
-                log.info("UDP path to %s went quiet; pointer moves are back on TCP", path.device_id)
+            log.debug("UDP path to %s %s", path.device_id, "up" if up else "quiet")
+        if up and not path.reported:
+            path.reported = True
+            log.info("pointer moves to %s now go over UDP (%s:%s)", path.device_id, *path.addr[:2])
+        elif not up and moving and path.reported:
+            path.reported = False
+            log.info("UDP path to %s went quiet (nothing heard for %.1f s); pointer moves are back on TCP",
+                     path.device_id, now - path.heard_at)
 
     def send_move(self, path: HostPath, x: float, y: float, ts: float) -> bool:
         """Send a move by UDP if the path is up. False: use TCP instead."""
         if self.transport is None or not path.usable(self.clock()):
-            if path.up:
-                self.check(path)
+            self.check(path, moving=True)
             return False
         path.seq_out += 1
         seq, values = path.seq_out, (float(x), float(y), float(ts))
@@ -415,6 +428,7 @@ class AgentUdp(asyncio.DatagramProtocol):
                 log.info("UDP path to the host is up; pointer moves can come over it")
                 self.probe()  # tell the host straight away
         elif kind in (MOVE, MOVE2):
+            self.acked_at = self.clock()  # the host's datagrams get here: as good as an ACK
             self.warm()
             self.moves += 1
             self.copies += kind == MOVE2

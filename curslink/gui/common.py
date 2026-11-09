@@ -41,6 +41,8 @@ class Agent:
     name: str = ""
     platform: str = ""
     connected: bool = False
+    # Paused on the device itself (the phone's Pause button, or a call there).
+    paused: bool = False
     screens: list = field(default_factory=list)
 
 
@@ -104,6 +106,7 @@ class Status(QObject):
         elif kind == "agent":
             agent = self.agents.setdefault(event["device_id"], Agent(event["device_id"]))
             agent.connected = bool(event.get("connected"))
+            agent.paused = bool(event.get("paused"))
             for key in ("name", "platform", "screens"):
                 if key in event:
                     setattr(agent, key, event[key])

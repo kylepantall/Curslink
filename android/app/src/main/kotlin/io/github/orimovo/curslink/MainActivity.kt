@@ -14,6 +14,7 @@ import android.text.InputType
 import android.view.Gravity
 import android.view.View
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -21,6 +22,7 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.widget.SwitchCompat
 import androidx.core.content.ContextCompat
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
@@ -112,12 +114,29 @@ class MainActivity : AppCompatActivity() {
         val (state, detail) = LinkService.state
         val status = when {
             pairing == null -> "Not paired with a computer yet."
+            prefs.paused -> "Paused. ${pairing.hostName}'s mouse and keyboard won't come over to the phone until you resume."
+            state == LinkState.PAUSED -> "Paused for your call. Curslink comes back on by itself when the call ends."
             state == LinkState.CONNECTED -> "Linked to ${pairing.hostName}" +
                 (if (detail.startsWith("relay")) " through your relay." else " on this network.") +
                 " Move the pointer past the phone's edge on the computer to use it here."
             else -> "Looking for ${pairing.hostName}…" + if (detail.isNotEmpty() && detail != "not paired") "\n$detail" else ""
         }
         root.addView(text(status, 16f))
+        if (pairing != null) {
+            root.addView(button(if (prefs.paused) "Resume" else "Pause") {
+                LinkService.setPaused(this, !prefs.paused)
+                render()
+            })
+            root.addView(CheckBox(this).apply {
+                text = "Pause during calls"
+                isChecked = prefs.pauseDuringCalls
+                setOnCheckedChangeListener { _, on ->
+                    prefs.pauseDuringCalls = on
+                    LinkService.instance?.applyPause()
+                }
+            })
+            root.addView(text("Also on the notification, and as a Quick Settings tile: edit your tiles and drag Curslink in.", 13f))
+        }
 
         root.addView(text("Set up", 20f, bold = true, top = 24))
         step(accessibilityOn(), "Mouse and keyboard",
@@ -154,6 +173,20 @@ class MainActivity : AppCompatActivity() {
             root.addView(text("Or pick \"${prefs.name}\" under Nearby on the computer's Devices page, and type the code it shows here.", 13f))
         }
 
+        root.addView(text("Screen", 20f, bold = true, top = 24))
+        root.addView(SwitchCompat(this).apply {
+            text = "Keep the screen on"
+            textSize = 16f
+            isChecked = prefs.keepScreenOn
+            setOnCheckedChangeListener { _, on ->
+                prefs.keepScreenOn = on
+                InputService.instance?.holdScreen(on && LinkService.state.first == LinkState.CONNECTED)
+            }
+        })
+        root.addView(text("While the phone is linked to ${pairing?.hostName ?: "your computer"}, its screen stays on " +
+            "instead of dimming and locking, so it's ready when the pointer comes over. It sleeps as usual once the " +
+            "link drops. Without this it stays on for 2 minutes after you use the mouse here.", 13f))
+
         root.addView(text("Away from home", 20f, bold = true, top = 24))
         root.addView(text("With a Curslink relay, the phone can reach the computer from any network. A QR code from a computer that uses one fills this in.", 13f))
         val (relay, relayKey) = prefs.relay
@@ -186,6 +219,7 @@ class MainActivity : AppCompatActivity() {
             append("This phone: ${prefs.name} (${prefs.deviceId})\n")
             append(pairing?.let { "Paired with: ${it.hostName} (${it.hostId}), addresses ${it.addresses.joinToString().ifEmpty { "none" }}, port ${it.controlPort}" +
                 (if (it.hasRelay) ", relay ${it.relay}" else ", no relay") } ?: "Not paired")
+            append("\nPaused: ${if (prefs.paused) "yes" else "no"}, pause during calls: ${if (prefs.pauseDuringCalls) "on" else "off"}")
             append("\nLink: $state${if (detail.isNotEmpty()) " ($detail)" else ""}")
             append("\nMouse and keyboard (accessibility): ${if (accessibilityOn()) "on" else "off"}")
             append("\nIgnoring battery optimisation: ${(getSystemService(POWER_SERVICE) as PowerManager).isIgnoringBatteryOptimizations(packageName)}")
