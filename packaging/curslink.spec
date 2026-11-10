@@ -30,9 +30,11 @@ hiddenimports += collect_submodules("curslink")
 # zeroconf (LAN discovery) is partly compiled and imported lazily.
 hiddenimports += collect_submodules("zeroconf") + ["ifaddr"]
 # macOS: pyobjc for the window glass, the Dock icon, camera names and raising
-# the window under a file drag (Quartz, HIServices).
+# the window under a file drag (Quartz, HIServices), and mirror mode's capture
+# stream (ScreenCaptureKit, CoreMedia).
 if sys.platform == "darwin":
-    hiddenimports += ["objc", "AppKit", "Foundation", "AVFoundation", "Quartz", "HIServices"]
+    hiddenimports += ["objc", "AppKit", "Foundation", "AVFoundation", "Quartz", "HIServices",
+                      "ScreenCaptureKit", "CoreMedia"]
 # The app's icons (curslink/assets). PyInstaller's own hooks bring Qt along,
 # with its platform, image format and SVG icon plugins.
 datas += collect_data_files("curslink", includes=["assets/*.svg", "assets/*.png", "assets/navigation/*.svg", "assets/illustrations/**/*.svg"])

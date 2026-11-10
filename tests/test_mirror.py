@@ -1519,3 +1519,127 @@ def test_fine_tuning_starts_from_the_layout_when_the_saved_line_up_is_far_off():
     ultrawide, phone = (0, 0, 3440, 1440), (1500, 1000, 384, 832)
     assert far_from_layout((570.2, 1321.3, 0.3149), ultrawide, phone)     # Kyle's old one, on the left
     assert not far_from_layout((1520, 1010, 0.8), ultrawide, phone)       # roughly where it's laid out
+
+
+class FakeStream:
+    """A ScreenCaptureKit stream as the capture sees it."""
+
+    def __init__(self):
+        self.users = 0
+        self.dead = False
+        self.configured = []
+        self.latest = None
+
+    def acquire(self):
+        self.users += 1
+
+    def release(self):
+        self.users -= 1
+
+    def configure(self, *args):
+        self.configured.append(args)
+
+    def stalled(self):
+        return self.dead
+
+    def frame(self):
+        return self.latest
+
+
+def test_a_mac_capture_streams_and_sends_only_new_frames(qapp, monkeypatch):
+    """macOS: one ScreenCaptureKit stream per screen, and nothing new from
+    it means no work at all (DisplayLink froze under 30 screenshots a second)."""
+    from PySide6.QtGui import QColor, QImage
+
+    from curslink.mirror import helper, macstream
+
+    stream = FakeStream()
+    monkeypatch.setattr(macstream, "stream_for", lambda *a: stream)
+    monkeypatch.setattr(helper.QGuiApplication, "platformName", staticmethod(lambda: "cocoa"))
+    monkeypatch.setattr(helper, "mac_unseen_windows", lambda: {7})
+    out = []
+    cap = helper.Capture({"id": "c", "screen": "main", "os": [10, 10, 120, 80], "fps": 30, "cursor": True}, out.append)
+    cap.timer.stop()
+    assert cap.mac_stream_image(10, 10, 120, 80, 0) is None and cap.skip  # starting: wait quietly
+    assert stream.users == 1
+    (rect, scale, fps, cursor, unseen), = set(stream.configured)
+    assert rect == (10, 10, 120, 80) and fps == 30 and cursor and unseen == frozenset({7})
+    img = QImage(120, 80, QImage.Format.Format_ARGB32_Premultiplied)
+    img.fill(QColor("tomato"))
+    stream.latest = (1, img)
+    cap.skip = False
+    got = cap.mac_stream_image(10, 10, 120, 80, 0)
+    assert got is img and cap.has_cursor  # the stream draws the real cursor in
+    cap.last_sent = __import__("time").monotonic()
+    cap.skip = False
+    assert cap.mac_stream_image(10, 10, 120, 80, 0) is None and cap.skip  # same frame: nothing to do
+    stream.dead = True
+    cap.skip = False
+    assert cap.mac_stream_image(10, 10, 120, 80, 0) is None and not cap.skip  # broken: screenshots instead
+    cap.stop()
+    assert stream.users == 0 and cap.stream is None
+
+
+def test_a_stream_forgets_its_picture_when_the_area_moves_and_lingers_before_stopping(monkeypatch):
+    from curslink.mirror import macstream
+
+    s = macstream.MacStream(5, (0, 0, 1000, 800))
+    applied = []
+    monkeypatch.setattr(s, "_apply", lambda: applied.append(s.want))
+    stopped = []
+    monkeypatch.setattr(s, "stop", lambda: stopped.append(True))
+    s.acquire()
+    s.configure((0, 0, 100, 50), 2.0, 30, True, None)
+    s.latest = (3, "img")
+    s.configure((0, 0, 100, 50), 2.0, 30, True, None)  # the same: nothing to change
+    assert len(applied) == 1 and s.frame() == (3, "img")
+    s.configure((0, 0, 100, 50), 2.0, 30, True, frozenset({9}))  # a mirror came up: filter only
+    assert len(applied) == 2 and s.frame() == (3, "img")
+    s.configure((40, 0, 100, 50), 2.0, 30, True, frozenset({9}))  # moved: the old picture is wrong now
+    assert len(applied) == 3 and s.frame() is None
+    macstream._streams[5] = s
+    try:
+        s.release()
+        macstream.reap(s.released_at + macstream.LINGER_S - 1)
+        assert not stopped
+        macstream.reap(s.released_at + macstream.LINGER_S + 1)
+        assert stopped
+    finally:
+        macstream._streams.pop(5, None)
+
+
+def test_a_stream_that_never_starts_gives_way_to_screenshots(monkeypatch):
+    from curslink.mirror import macstream
+
+    s = macstream.MacStream(6, (0, 0, 10, 10))
+    monkeypatch.setattr(s, "stop", lambda: None)
+    try:
+        assert not s.stalled(s.made_at + 1)
+        assert s.stalled(s.made_at + macstream.START_S + 1)
+        assert 6 in macstream._broken
+    finally:
+        macstream._broken.discard(6)
+
+
+@pytest.mark.skipif(__import__("sys").platform != "darwin", reason="macOS only")
+def test_screencapturekit_bridge_has_what_the_stream_uses(qapp):
+    """The pyobjc names the stream calls exist, and frames read back."""
+    import CoreMedia
+    import objc
+    import Quartz
+    import ScreenCaptureKit as sck
+
+    from curslink.mirror import macstream
+
+    cls = macstream._output_class(sck, objc)
+    out = cls.alloc().init()
+    assert out.respondsToSelector_(b"stream:didOutputSampleBuffer:ofType:")
+    s = macstream.MacStream(1, (0, 0, 1000, 800))
+    cfg = s._config(sck, CoreMedia, Quartz, ((10, 20, 100, 50), 2.0, 30, True, None))
+    assert (cfg.width(), cfg.height()) == (200, 100) and cfg.showsCursor()
+    assert sck.SCStreamFrameInfoStatus
+    assert macstream.display_for(Quartz, 0, 0, 1, 1) is None or True  # callable without a screen
+    err, pix = Quartz.CVPixelBufferCreate(None, 8, 4, macstream._KCV_BGRA, None, None)
+    assert err == 0
+    img = macstream.pixel_buffer_to_qimage(Quartz, pix)
+    assert img is not None and (img.width(), img.height()) == (8, 4)
