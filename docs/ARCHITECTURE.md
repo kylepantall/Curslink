@@ -306,6 +306,14 @@ front of it shows the part it covers, live (`curslink.mirror`).
   newer copy of a waiting tile replaces it in place. The mirror puts them
   together and scales the whole once onto the screen in front. Older
   devices in front still get whole frames squeezed into one protocol frame.
+  Within a changed tile only the box around its changed 32 px squares
+  goes (numpy compares the picture with the last one sent); a still screen
+  sends nothing. Each capture carries a `key` the host bumps when the
+  mirror in front is new (or its device came back), and then every tile
+  goes once more; otherwise all tiles are resent only every 60 s (6 s for
+  an older host). Queued parts keep their order, a newer copy going last.
+  `[layout] mirror_quality` "auto" is lossless/high/standard by the same
+  link levels as the frame rate.
   `[layout] mirror_fps` is "auto" by default: 120 fps while every link a
   stream crosses is good, 30 when one is fair and 15 when poor (the
   network optimiser's levels; the host replans when a level changes), or a

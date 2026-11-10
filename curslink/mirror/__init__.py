@@ -54,6 +54,8 @@ MAX_FPS = 120
 # stream crosses are doing (curslink.net.quality's optimiser levels).
 AUTO = 0
 AUTO_FPS = {"good": 120, "fair": 30, "poor": 15}
+# [layout] mirror_quality = "auto": the picture's quality by the same levels.
+AUTO_QUALITY = {"good": "lossless", "fair": "high", "poor": "standard"}
 # Frames a capture may have on their way before one is shown; past that the
 # newest waits (replacing any older waiting one) for an answer.
 IN_FLIGHT = 2
@@ -230,7 +232,8 @@ def screen_os(screen: Screen) -> list[int]:
 def device_states(streams: list[Stream], names: dict[str, str], fps: int | Callable[[Stream], int],
                   tuning: tuple[str, str] | None = None, anchors: dict | None = None,
                   cast: Callable[[Stream], bool] | None = None,
-                  tiles: Callable[[Stream], bool] | None = None, quality: str = "high") -> dict[str, dict]:
+                  tiles: Callable[[Stream], bool] | None = None, quality: str | Callable[[Stream], str] = "high",
+                  keys: dict[str, int] | None = None) -> dict[str, dict]:
     """What each device should capture and show for ``streams`` (the payload
     of its ``mirror`` frame). Devices with nothing to do aren't listed.
 
@@ -251,7 +254,11 @@ def device_states(streams: list[Stream], names: dict[str, str], fps: int | Calla
             src["captures"][-1]["cursor"] = True
         if tiles is not None and tiles(s):
             src["captures"][-1]["tiles"] = True
-            src["captures"][-1]["quality"] = quality
+            src["captures"][-1]["quality"] = quality(s) if callable(quality) else quality
+        if keys is not None:
+            # Bumped when the device in front needs the whole picture again
+            # (its mirror is new): the capture sends every tile once more.
+            src["captures"][-1]["key"] = keys.get(s.id, 0)
         dst = out.setdefault(s.target.device_id, {"captures": [], "shows": []})
         dst["shows"].append({"id": s.id, "screen": s.target.id, "os": s.os_rect(s.target),
                              "screen_os": screen_os(s.target), "size": list(s.shown[2:]),
@@ -291,7 +298,15 @@ class MirrorSource:
     @staticmethod
     def _key(frame: dict):
         tile = frame.get("tile")
-        return tuple(tile[:2]) if isinstance(tile, list) and len(tile) >= 2 else None
+        return tuple(tile[:4]) if isinstance(tile, list) and len(tile) >= 4 else None
+
+    @staticmethod
+    def _covers(a: tuple, b: tuple) -> bool:
+        """Tile part ``a`` (x, y, w, h) covers all of ``b``."""
+        try:
+            return a[0] <= b[0] and a[1] <= b[1] and a[0] + a[2] >= b[0] + b[2] and a[1] + a[3] >= b[1] + b[3]
+        except (TypeError, IndexError):
+            return False
 
     def offer(self, frame: dict) -> None:
         sid = frame.get("id")
@@ -300,12 +315,19 @@ class MirrorSource:
         key = self._key(frame)
         if self.flying[sid] >= (IN_FLIGHT if key is None else TILES_IN_FLIGHT):
             waiting = self.waiting.setdefault(sid, {})
-            older = waiting.get(key)
+            older = waiting.pop(key, None)
             if key is None:
                 waiting.clear()  # a whole frame overtakes everything before it
+            else:
+                # Parts of the picture: a waiting part this one covers is out
+                # of date. The newer goes last, so where parts overlap the
+                # newest pixels land on top.
+                for k in [k for k in waiting if k is not None and self._covers(key, k)]:
+                    gone = waiting.pop(k)
+                    older = older or (gone if "cursor" in gone else None)
             if older is not None and "cursor" in older and "cursor" not in frame:
                 frame = dict(frame, cursor=older["cursor"])  # the pointer's new look still has to go
-            waiting[key] = frame  # a newer copy of a waiting tile keeps its place
+            waiting[key] = frame
             return
         self.flying[sid] += 1
         self.send("mirror_frame", **frame)
@@ -350,6 +372,9 @@ class LatestWriter:
 
     def put(self, key: str, line: str) -> None:
         with self.cond:
+            # A newer copy goes last, behind lines that came before it (parts
+            # of a picture can overlap: the newest must land on top).
+            self.pending.pop(key, None)
             self.pending[key] = line
             self.cond.notify()
 
@@ -413,7 +438,7 @@ class MirrorPeer:
                     # its own, so a newer frame can't drop it on the way.
                     self.images(f"shape:{sid}", _command("mirror_shape", dict(data["cursor"], id=sid)))
                 tile = data.get("tile")
-                key = sid if not isinstance(tile, list) else f"{sid}@{tile[:2]}"
+                key = sid if not isinstance(tile, list) else f"{sid}@{tile[:4]}"
                 self.images(key, _command("mirror_image", {k: data[k] for k in ("id", "jpg", "w", "h", "tile") if k in data}))
             self.send("mirror_ack", id=sid)  # answered even if dropped, so the capture never stalls
         elif t == "mirror_pointer":
@@ -524,7 +549,8 @@ class MirrorHost:
         self.local = local
         self.local_id = router.local_id
         self.fps = AUTO if int(fps) <= AUTO else min(MAX_FPS, int(fps))
-        self.quality = quality if quality in QUALITIES else "high"
+        self.quality = quality if quality == "auto" or quality in QUALITIES else "high"
+        self.keys: dict[str, int] = {}  # each stream's whole-picture count (see device_states)
         self.clock = clock
         self.gap = gap  # screens this far apart still count as joined
         self.names = {d.id: d.name for d in layout.devices.values()}
@@ -636,9 +662,17 @@ class MirrorHost:
         streams = streams_for(self.layout, screen, self.can, joined=self.held is None, gap=self.gap)
         self.streams = {s.id: s for s in streams}
         self._pointer = {sid: p for sid, p in self._pointer.items() if sid in self.streams}
+        for s in streams:
+            # A mirror that's new on the device in front (or the device came
+            # back) starts from nothing: it needs every tile, not just changes.
+            shown = {sh.get("id") for sh in self.sent.get(s.target.device_id, EMPTY).get("shows", [])}
+            if s.id not in shown:
+                self.keys[s.id] = self.keys.get(s.id, 0) + 1
+        self.keys = {sid: n for sid, n in self.keys.items() if sid in self.streams}
         states = device_states(streams, self.names, self.stream_fps, self.tuning, self._anchors,
                                cast=lambda s: self.router.screen == s.source and self._captures_cursor(s.source.device_id),
-                               tiles=lambda s: self._takes_tiles(s.target.device_id), quality=self.quality)
+                               tiles=lambda s: self._takes_tiles(s.target.device_id), quality=self.stream_quality,
+                               keys=self.keys)
         for device in set(self.sent) | set(states):
             state = states.get(device, EMPTY)
             if self.sent.get(device, EMPTY) == state:
@@ -664,9 +698,15 @@ class MirrorHost:
         of the links its frames cross (both ends through the host)."""
         if self.fps != AUTO:
             return self.fps
+        return AUTO_FPS[self._level(s)]
+
+    def _level(self, s: Stream) -> str:
         levels = {self.link_level(s.source.device_id), self.link_level(s.target.device_id)}
-        worst = next((lv for lv in ("poor", "fair") if lv in levels), "good")
-        return AUTO_FPS[worst]
+        return next((lv for lv in ("poor", "fair") if lv in levels), "good")
+
+    def stream_quality(self, s: Stream) -> str:
+        """A stream's picture quality: the setting, or on auto by its links."""
+        return AUTO_QUALITY[self._level(s)] if self.quality == "auto" else self.quality
 
     def _to(self, device_id: str, t: str, **data) -> None:
         if device_id == self.local_id:
