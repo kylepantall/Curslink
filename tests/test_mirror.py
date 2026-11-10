@@ -1223,7 +1223,8 @@ def test_tiles_go_at_full_resolution_and_only_when_they_change(qapp, monkeypatch
     p.fillRect(300, 20, 4, 4, QColor("white"))
     p.end()
     cap.grab()
-    assert [json.loads(line.partition(" ")[2])["tile"][:2] for line in out] == [[mh.TILE, 0]]
+    # Only the changed 32 px square around those pixels, not the whole tile.
+    assert [json.loads(line.partition(" ")[2])["tile"] for line in out] == [[288, 0, mh.BLOCK, mh.BLOCK]]
     cap.stop()
 
 
@@ -1254,7 +1255,8 @@ def test_tiles_wait_for_room_without_dropping_each_other():
     assert len(sent) == TILES_IN_FLIGHT
     for _ in range(3):
         src.ack("a")
-    assert [f["n"] for f in sent[TILES_IN_FLIGHT:]] == [99, TILES_IN_FLIGHT + 1, TILES_IN_FLIGHT + 2]
+    # It replaced the older copy and went last: where parts overlap, newest lands on top.
+    assert [f["n"] for f in sent[TILES_IN_FLIGHT:]] == [TILES_IN_FLIGHT + 1, TILES_IN_FLIGHT + 2, 99]
 
 
 def test_crossing_goes_by_where_the_line_up_put_the_screen_in_front():
@@ -1357,7 +1359,7 @@ def test_lossless_tiles_are_png_and_the_mirror_reads_them(qapp, monkeypatch):
 def test_mirror_quality_must_be_one_of_the_choices(tmp_path):
     from curslink.config import ConfigError, _mirror_quality
 
-    assert _mirror_quality({}) == "high"
+    assert _mirror_quality({}) == "auto" and _mirror_quality({"mirror_quality": "auto"}) == "auto"
     assert _mirror_quality({"mirror_quality": "lossless"}) == "lossless"
     with pytest.raises(ConfigError):
         _mirror_quality({"mirror_quality": "ultra"})
@@ -1690,3 +1692,91 @@ def test_a_capture_never_runs_faster_than_its_screen_refreshes(qapp, monkeypatch
     assert cap.fps() == 120
     cap.spec = dict(cap.spec, fps=24)
     assert cap.fps() == 24
+
+
+def test_only_the_changed_squares_of_each_tile_are_found():
+    import numpy as np
+
+    from curslink.mirror.helper import BLOCK, TILE, changed_parts
+
+    before = np.zeros((300, 600), dtype=np.uint32)
+    assert changed_parts(before, before.copy()) == []  # still: nothing to send
+    after = before.copy()
+    after[5, 5] = 1  # one pixel in the first tile
+    after[40:70, 260:300] = 7  # across squares in the second tile
+    after[299, 599] = 3  # the last, partial, tile's corner
+    assert changed_parts(before, after) == [
+        (0, 0, BLOCK, BLOCK),
+        (256, 32, 64, 64),
+        (576, 288, 24, 12),
+    ]
+    assert TILE % BLOCK == 0
+
+
+def test_overlapping_parts_keep_their_order_and_covered_ones_go():
+    from curslink.mirror import IN_FLIGHT, TILES_IN_FLIGHT
+
+    sent = []
+    src = MirrorSource(lambda t, **d: sent.append(d))
+    src.reset(["a"])
+    for n in range(TILES_IN_FLIGHT):
+        src.offer({"id": "a", "tile": [1000 + n, 0, 1, 1], "n": n})
+    src.offer({"id": "a", "tile": [0, 0, 32, 32], "n": "small"})
+    src.offer({"id": "a", "tile": [0, 0, 64, 32], "n": "wider"})  # covers the small one: it's out of date
+    src.offer({"id": "a", "tile": [32, 0, 64, 64], "n": "overlap"})  # only overlaps: both go, in order
+    for _ in range(4):
+        src.ack("a")
+    assert [f["n"] for f in sent[TILES_IN_FLIGHT:]] == ["wider", "overlap"]
+
+
+def test_the_host_asks_for_the_whole_picture_when_a_mirror_is_new_in_front():
+    lay = desk()
+    transport = Transport({"lap"}, mirror={"lap"})
+    router = Router(lay, "pc", FakeCapture(), FakeSink(), transport, FakeOverlay())
+    host = MirrorHost(lay, router, transport, None, 30)
+    host.local = object()  # this computer captures (never called here)
+    host._to = lambda device, t, **data: transport.sent.append((device, t, data))
+    host.refresh()
+    key = lambda: [c["key"] for d, t, data in transport.sent if t == "mirror" and d == "pc"
+                   for c in data["captures"]][-1]
+    first = key()
+    host.refresh()  # nothing new in front: the same key
+    assert key() == first
+    host.sent.pop("lap")  # the laptop went and came back: its mirror starts empty
+    host.refresh()
+    assert key() == first + 1
+
+
+def test_a_new_key_sends_every_tile_again(qapp, monkeypatch):
+    cap, out = _still_capture(qapp, monkeypatch, {"id": "c", "screen": "main", "os": [10, 10, 120, 80], "fps": 1,
+                                                 "tiles": True, "key": 1}, size=(600, 300))
+    cap.grab()
+    out.clear()
+    cap.grab()
+    assert out == []
+    cap.set(dict(cap.spec, key=2))
+    cap.timer.stop()
+    out.clear()
+    cap.grab()
+    assert len(out) == 6  # 3 x 2 tiles
+
+
+def test_auto_quality_follows_the_worse_link():
+    lay = desk()
+    router = Router(lay, "pc", FakeCapture(), FakeSink(), Transport({"lap"}, mirror={"lap"}), FakeOverlay())
+
+    class Server(Transport):
+        levels = {}
+
+        def link_level(self, device_id):
+            return self.levels.get(device_id, "good")
+
+    server = Server({"lap"}, mirror={"lap"})
+    host = MirrorHost(lay, router, server, None, 0, quality="auto")
+    (s,) = streams_for(lay, lay.screen("pc", "main"))
+    assert host.stream_quality(s) == "lossless"
+    Server.levels = {"lap": "fair"}
+    assert host.stream_quality(s) == "high"
+    Server.levels = {"lap": "poor"}
+    assert host.stream_quality(s) == "standard"
+    assert MirrorHost(lay, router, server, None, 0, quality="standard").stream_quality(s) == "standard"

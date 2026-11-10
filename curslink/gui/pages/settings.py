@@ -168,12 +168,14 @@ class SettingsPage(Page):
             "The pointer can go into the covered part of the screen behind and is drawn in the mirror, so "
             "you can click there. It moves to the screen in front once it leaves the covered part."),
             self.mirror_pointer)
-        self.mirror_quality = Segmented([("standard", "Standard"), ("high", "High"), ("lossless", "Lossless")])
+        self.mirror_quality = Segmented([("auto", "Auto"), ("standard", "Standard"), ("high", "High"),
+                                         ("lossless", "Lossless")])
         self.mirror_quality.picked.connect(lambda value: self.set_config("layout", "mirror_quality", value))
         self.mirror_quality_row = self.mirror_card.add_row(text_block(
             "Mirror quality",
             "Lossless sends every pixel exactly as the screen behind shows it; High is very close and lighter "
-            "on Wi-Fi; Standard is lightest. The mirror can't be sharper than the screen behind: where that "
+            "on Wi-Fi; Standard is lightest. Auto is lossless while the network is quick, High when it's busy "
+            "and Standard when it's slow. Only what changed on the screen behind is sent. The mirror can't be sharper than the screen behind: where that "
             "screen has fewer pixels per inch than the one in front, it's scaled up once to fit."),
             self.mirror_quality)
         self.mirror_fps = Segmented([("auto", "Auto"), ("30", "30"), ("60", "60"), ("120", "120")])
@@ -376,7 +378,7 @@ class SettingsPage(Page):
             self.mirror.setEnabled(overlap)
             self.mirror_pointer.setChecked(bool(layout_raw.get("mirror_pointer", True)))
             self.mirror_pointer_row.setVisible(overlap and self.mirror.isChecked())
-            self.mirror_quality.set_value(str(layout_raw.get("mirror_quality", "high")))
+            self.mirror_quality.set_value(str(layout_raw.get("mirror_quality", "auto")))
             self.mirror_quality_row.setVisible(overlap and self.mirror.isChecked())
             fps = layout_raw.get("mirror_fps", "auto")
             self.mirror_fps.set_value(str(fps) if str(fps) in ("30", "60", "120") else "auto")

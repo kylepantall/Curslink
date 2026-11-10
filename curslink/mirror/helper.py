@@ -65,6 +65,12 @@ REFRESH_S = 2.0
 # this often (in case one went missing). Their quality: the capture's.
 TILE = 256
 TILE_REFRESH_S = 6.0
+# With a host that says when the mirror needs the whole picture (a capture's
+# "key"), every tile goes again only this rarely, in case.
+KEYED_REFRESH_S = 60.0
+# Within a tile only the part that changed goes: the box around the changed
+# BLOCK x BLOCK px squares (found with numpy where it's there).
+BLOCK = 32
 # The pointer's look is sent while it's this close to the captured area
 # (logical pixels), so it's right as soon as it gets there.
 CURSOR_NEAR = 48
@@ -377,6 +383,46 @@ def cgimage_to_qimage(quartz, cg) -> QImage | None:
     return QImage(data, w, h, bpr, fmt).copy()
 
 
+def image_pixels(img: QImage):
+    """An RGB32 QImage's pixels as an (h, w) uint32 numpy array (a copy), or
+    None without numpy."""
+    try:
+        import numpy as np
+    except ImportError:  # pragma: no cover - numpy comes with the gaze extra
+        return None
+    w, h, bpl = img.width(), img.height(), img.bytesPerLine()
+    raw = np.frombuffer(img.constBits(), dtype=np.uint8, count=bpl * h).reshape(h, bpl)
+    return raw[:, : w * 4].copy().view(np.uint32).reshape(h, w)
+
+
+def changed_parts(before, after, tile: int = TILE, block: int = BLOCK) -> list[tuple[int, int, int, int]]:
+    """Where ``after`` differs from ``before`` (same-size pixel arrays): per
+    ``tile`` x ``tile`` tile with a change, the box (x, y, w, h) around its
+    changed ``block`` px squares. Still parts send nothing."""
+    import numpy as np
+
+    h, w = after.shape
+    diff = before != after
+    if not diff.any():
+        return []
+    bh, bw = -(-h // block), -(-w // block)
+    padded = np.zeros((bh * block, bw * block), dtype=bool)
+    padded[:h, :w] = diff
+    blocks = padded.reshape(bh, block, bw, block).any(axis=(1, 3))
+    per = tile // block
+    out = []
+    for ty in range(0, bh, per):
+        for tx in range(0, bw, per):
+            sub = blocks[ty:ty + per, tx:tx + per]
+            if not sub.any():
+                continue
+            rows, cols = np.flatnonzero(sub.any(axis=1)), np.flatnonzero(sub.any(axis=0))
+            x0, y0 = (tx + int(cols[0])) * block, (ty + int(rows[0])) * block
+            x1, y1 = min(w, (tx + int(cols[-1]) + 1) * block), min(h, (ty + int(rows[-1]) + 1) * block)
+            out.append((x0, y0, x1 - x0, y1 - y0))
+    return out
+
+
 class Capture:
     """Grabs one covered rectangle ``fps`` times a second and prints it."""
 
@@ -396,6 +442,7 @@ class Capture:
         self.tiles: dict[tuple[int, int], bytes] = {}  # each tile's hash, as last sent
         self.tiles_size = (0, 0)
         self.tiles_sent = 0.0  # last full send of every tile
+        self.previous = None  # the last picture sent as tiles, as pixels (numpy), to find what changed
         self.cursor_cache: tuple[str, QImage] | None = None
         self.stream = None  # macOS: the display's ScreenCaptureKit stream (curslink.mirror.macstream)
         self.stream_seq = 0  # its last frame sent
@@ -406,10 +453,14 @@ class Capture:
         self.set(spec)
 
     def set(self, spec: dict) -> None:
-        if spec.get("os") != self.spec.get("os") or spec.get("tiles") != self.spec.get("tiles"):
+        if (spec.get("os") != self.spec.get("os") or spec.get("tiles") != self.spec.get("tiles")
+                or spec.get("key") != self.spec.get("key") or spec.get("quality") != self.spec.get("quality")):
+            # Moved, or the mirror needs the whole picture again: send it all.
             self.last_hash = b""
             self.cursor_key = None
             self.tiles = {}
+            self.previous = None
+            self.stream_seq = -1
         self.spec = spec
         self.show_guides(bool(spec.get("tune")))
         self.timer.start(round(1000 / self.fps()))
@@ -549,12 +600,29 @@ class Capture:
         self.out("mirror_frame " + json.dumps(frame, separators=(",", ":")))
 
     def send_tiles(self, img: QImage, now: float) -> None:
-        """The tiles of ``img`` that changed (all of them now and then)."""
+        """Only what changed in ``img`` since the last picture sent: in each
+        tile, the part around the pixels that changed (all of every tile
+        when the mirror needs the whole picture, and now and then in case)."""
         w, h = img.width(), img.height()
-        if (w, h) != self.tiles_size or now - self.tiles_sent >= TILE_REFRESH_S:
-            self.tiles, self.tiles_size, self.tiles_sent = {}, (w, h), now
+        refresh = KEYED_REFRESH_S if "key" in self.spec else TILE_REFRESH_S
+        if (w, h) != self.tiles_size or now - self.tiles_sent >= refresh:
+            self.tiles, self.tiles_size, self.tiles_sent, self.previous = {}, (w, h), now, None
         if img.format() != QImage.Format.Format_RGB32:
             img = img.convertToFormat(QImage.Format.Format_RGB32)
+        pixels = image_pixels(img)
+        if pixels is not None and self.previous is not None and self.previous.shape == pixels.shape:
+            parts = changed_parts(self.previous, pixels)
+        elif pixels is not None:
+            parts = [(x, y, min(TILE, w - x), min(TILE, h - y)) for y in range(0, h, TILE) for x in range(0, w, TILE)]
+        else:
+            parts = None
+        if parts is not None:
+            self.previous = pixels
+            for x, y, pw, ph in parts:
+                self.send_part(img, x, y, pw, ph, w, h)
+            self.last_sent = now
+            return
+        # Without numpy: whole tiles, the ones whose pixels hash differently.
         for y in range(0, h, TILE):
             for x in range(0, w, TILE):
                 part = img.copy(x, y, min(TILE, w - x), min(TILE, h - y))
@@ -562,11 +630,15 @@ class Capture:
                 if self.tiles.get((x, y)) == digest:
                     continue
                 self.tiles[(x, y)] = digest
-                raw = encode_tile(part, self.spec.get("quality", "high"))
-                frame = {"id": self.id, "jpg": base64.b64encode(raw).decode("ascii"), "w": w, "h": h,
-                         "tile": [x, y, part.width(), part.height()]}
-                self.out("mirror_frame " + json.dumps(frame, separators=(",", ":")))
+                self.send_part(img, x, y, part.width(), part.height(), w, h, part)
         self.last_sent = now
+
+    def send_part(self, img: QImage, x: int, y: int, pw: int, ph: int, w: int, h: int, part: QImage | None = None) -> None:
+        part = part if part is not None else img.copy(x, y, pw, ph)
+        raw = encode_tile(part, self.spec.get("quality", "high"))
+        frame = {"id": self.id, "jpg": base64.b64encode(raw).decode("ascii"), "w": w, "h": h,
+                 "tile": [x, y, part.width(), part.height()]}
+        self.out("mirror_frame " + json.dumps(frame, separators=(",", ":")))
 
     def draw_cursor(self, img: QImage) -> tuple[QImage, tuple | None]:
         """``img`` with this computer's cursor drawn in where it is (if it's
@@ -822,9 +894,12 @@ class MirrorWindow(QWidget):
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         p.drawImage(QRectF(x, y, tw, th), part, QRectF(part.rect()))
         p.end()
-        self.got[(x, y)] = tw * th
-        if sum(self.got.values()) < w * h:
+        if self.got.get("whole"):
+            return True  # a change to a picture that's whole already
+        self.got[(x, y)] = max(self.got.get((x, y), 0), tw * th)
+        if sum(v for k, v in self.got.items() if k != "whole") < w * h:
             return self.isVisible() and not self.closing_at  # not whole yet: show it once it is
+        self.got["whole"] = True
         self.pixmap = None
         return True
 

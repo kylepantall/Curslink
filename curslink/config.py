@@ -87,7 +87,7 @@ class HostConfig:
     # 1 to 120 (never more than the screen behind refreshes), or 0 for "auto" (by how each link is doing).
     mirror_fps: int = 0
     # How sharp a mirror's picture is ([layout] mirror_quality, see curslink.mirror.QUALITIES).
-    mirror_quality: str = "high"
+    mirror_quality: str = "auto"
     # Share what's copied with the agents ([host] clipboard; see curslink.clipboard).
     clipboard: bool = True
     # Copies bigger than this (MB) stay on their own device ([host] clipboard_max_mb).
@@ -364,9 +364,9 @@ def _mirror_fps(layout: Any) -> int:
 def _mirror_quality(layout: Any) -> str:
     from curslink.mirror import QUALITIES
 
-    value = layout.get("mirror_quality", "high") if isinstance(layout, dict) else "high"
-    if value not in QUALITIES:
-        raise ConfigError(f"[layout].mirror_quality must be one of {', '.join(QUALITIES)}")
+    value = layout.get("mirror_quality", "auto") if isinstance(layout, dict) else "auto"
+    if value != "auto" and value not in QUALITIES:
+        raise ConfigError(f"[layout].mirror_quality must be auto or one of {', '.join(QUALITIES)}")
     return value
 
 
