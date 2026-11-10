@@ -668,6 +668,13 @@ def start_mirror(cfg: HostConfig, router: Router, server: HostServer, overlay, l
     host = MirrorHost(cfg.layout, router, server, local, cfg.mirror_fps, gap=cfg.router.gap_tolerance_px,
                       quality=cfg.mirror_quality)
     host.on_fit = lambda fit: events.emit("fit", **fit)
+    tuned = server.on_tuning
+
+    def on_tuning(device_id, tuning) -> None:
+        tuned(device_id, tuning)
+        loop.call_soon(host.refresh)  # on auto, frames a second follow the link
+
+    server.on_tuning = on_tuning
     server.on_mirror = host.on_message
     router.on_moved = host.update
     connected, disconnected = server.on_connect, server.on_disconnect

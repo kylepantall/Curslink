@@ -208,6 +208,11 @@ def mac_screen_recording(ask: bool = False) -> bool:
 
 
 _listed_ok = True
+# The screenshot fallback takes at most this many a second.
+SHOT_FPS = 30
+# The screenshot fallback lists the windows to take in at most this often.
+WINDOW_LIST_S = 1.0
+_windows_cache: tuple | None = None  # (when, unseen, ids, cursor ids)
 # Whether the last mac_grab already has the cursor in it: macOS can draw it
 # as a window of its own (WindowServer's "Cursor", at the cursor level, as
 # with a bigger or coloured pointer), which a grab then takes in. Then it's
@@ -310,14 +315,23 @@ def mac_grab(x: float, y: float, w: float, h: float) -> QImage | None:
             try:
                 import os
 
+                global _windows_cache
                 me = os.getpid()
-                infos = Quartz.CGWindowListCopyWindowInfo(Quartz.kCGWindowListOptionOnScreenOnly,
-                                                          Quartz.kCGNullWindowID) or []
                 unseen = mac_unseen_windows()
-                ids = [int(i["kCGWindowNumber"]) for i in infos if "kCGWindowNumber" in i
-                       and (int(i["kCGWindowNumber"]) not in unseen if unseen is not None
-                            else int(i.get("kCGWindowOwnerPID", -1)) != me)]
-                cursor = set(mac_cursor_windows(Quartz, infos)) & set(ids)
+                key = frozenset(unseen) if unseen is not None else None
+                now = time.monotonic()
+                if (_windows_cache is not None and _windows_cache[1] == key
+                        and now - _windows_cache[0] < WINDOW_LIST_S):
+                    ids, cursor = _windows_cache[2], _windows_cache[3]
+                else:
+                    # Listing every window each frame is slow work for WindowServer.
+                    infos = Quartz.CGWindowListCopyWindowInfo(Quartz.kCGWindowListOptionOnScreenOnly,
+                                                              Quartz.kCGNullWindowID) or []
+                    ids = [int(i["kCGWindowNumber"]) for i in infos if "kCGWindowNumber" in i
+                           and (int(i["kCGWindowNumber"]) not in unseen if unseen is not None
+                                else int(i.get("kCGWindowOwnerPID", -1)) != me)]
+                    cursor = set(mac_cursor_windows(Quartz, infos)) & set(ids)
+                    _windows_cache = (now, key, ids, cursor)
                 mac_grab_has_cursor = bool(cursor)
                 if mac_grab_has_cursor != _said_cursor:
                     _said_cursor = mac_grab_has_cursor
@@ -383,6 +397,10 @@ class Capture:
         self.tiles_size = (0, 0)
         self.tiles_sent = 0.0  # last full send of every tile
         self.cursor_cache: tuple[str, QImage] | None = None
+        self.stream = None  # macOS: the display's ScreenCaptureKit stream (curslink.mirror.macstream)
+        self.stream_seq = 0  # its last frame sent
+        self.skip = False
+        self.shot_at = 0.0  # macOS: the last screenshot (when there's no stream)
         self.timer = QTimer()
         self.timer.timeout.connect(self.grab)
         self.set(spec)
@@ -394,12 +412,66 @@ class Capture:
             self.tiles = {}
         self.spec = spec
         self.show_guides(bool(spec.get("tune")))
-        fps = max(1, min(30, int(spec.get("fps", 30) or 30)))
-        self.timer.start(round(1000 / fps))
+        self.timer.start(round(1000 / self.fps()))
         QTimer.singleShot(0, self.grab)
+
+    def fps(self) -> int:
+        """Frames a second asked for, never more than the screen behind
+        refreshes (more would only send the same picture again)."""
+        from curslink.mirror import MAX_FPS
+
+        try:
+            fps = max(1, min(MAX_FPS, int(self.spec.get("fps", 30) or 30)))
+        except (TypeError, ValueError):
+            fps = 30
+        found = spec_to_logical(self.spec)
+        screens = QGuiApplication.screens()
+        if found is not None and 0 <= found[4] < len(screens):
+            hz = screens[found[4]].refreshRate()
+            if hz and hz >= 20:
+                fps = min(fps, round(hz))
+        return fps
+
+    def mac_stream_image(self, lx: float, ly: float, lw: float, lh: float, index: int) -> QImage | None:
+        """macOS: the area's newest frame from its display's stream, or None
+        (with :attr:`skip` when there's nothing new to send, or the stream is
+        still starting). None without ``skip``: no stream, take a screenshot."""
+        from curslink.mirror import macstream
+
+        if QGuiApplication.platformName() != "cocoa":
+            return None  # another Qt platform (offscreen, in tests)
+        try:
+            stream = macstream.stream_for(lx, ly, lw, lh)
+        except Exception:  # pragma: no cover - macOS only
+            log.debug("mirror: no ScreenCaptureKit stream", exc_info=True)
+            stream = None
+        if stream is not self.stream:
+            if self.stream is not None:
+                self.stream.release()
+            self.stream, self.stream_seq = stream, 0
+            if stream is not None:
+                stream.acquire()
+        if stream is None:
+            return None
+        screens = QGuiApplication.screens()
+        dpr = screens[index].devicePixelRatio() if 0 <= index < len(screens) else 1.0
+        cursor = bool(self.spec.get("cursor")) and not self.spec.get("tune")
+        unseen = mac_unseen_windows()
+        stream.configure((lx, ly, lw, lh), dpr or 1.0, self.fps(), cursor,
+                         frozenset(unseen) if unseen is not None else None)
+        if stream.stalled():
+            return None
+        got = stream.frame()
+        if got is None or (got[0] == self.stream_seq and time.monotonic() - self.last_sent < REFRESH_S):
+            self.skip = True  # starting, or nothing changed: nothing to do
+            return None
+        self.stream_seq = got[0]
+        self.has_cursor = cursor  # ScreenCaptureKit drew the real one in
+        return got[1]
 
     def image(self) -> QImage | None:
         self.has_cursor = False  # the grab has the cursor in it already
+        self.skip = False
         found = spec_to_logical(self.spec)
         if found is None:
             self.why = "no screen of this computer is there"
@@ -410,8 +482,20 @@ class Capture:
             self.why = MAC_NO_RECORDING
             return None
         if sys.platform == "darwin":
-            # Through Quartz first: it can leave out this process's own
-            # windows (the edge indicator), which would show up twice.
+            # A ScreenCaptureKit stream first: set up once, it hands over a
+            # frame only when the screen changed, and it shares the screen
+            # with other captures (DisplayLink drives its screens by one).
+            streamed = self.mac_stream_image(lx, ly, lw, lh, index)
+            if streamed is not None or self.skip:
+                return streamed
+            # Else screenshots through Quartz: it can leave out this
+            # process's own windows (the mirrors and guides). Never more
+            # than 30 a second: each one is a capture set up and torn down.
+            now = time.monotonic()
+            if now - self.shot_at < 1 / SHOT_FPS - 0.004 and self.last_sent:
+                self.skip = True
+                return None
+            self.shot_at = now
             img = mac_grab(lx, ly, lw, lh)
             if img is not None:
                 self.has_cursor = mac_grab_has_cursor
@@ -433,6 +517,8 @@ class Capture:
             if not self.failed:
                 log.exception("mirror: couldn't capture %s", self.spec.get("os"))
             self.failed = True
+            return
+        if img is None and self.skip:
             return
         if img is None:
             if not self.failed:
@@ -534,6 +620,13 @@ class Capture:
     def stop(self) -> None:
         self.timer.stop()
         self.show_guides(False)
+        if self.stream is not None:
+            from curslink.mirror import macstream
+
+            self.stream.release()
+            self.stream = None
+            # It lingers in case the pointer comes straight back; then it stops.
+            QTimer.singleShot(round(macstream.LINGER_S * 1000) + 200, macstream.reap)
 
 
 # Alignment guides while a mirror is being adjusted: the same lines and ring

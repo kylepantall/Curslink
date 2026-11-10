@@ -306,7 +306,15 @@ front of it shows the part it covers, live (`curslink.mirror`).
   newer copy of a waiting tile replaces it in place. The mirror puts them
   together and scales the whole once onto the screen in front. Older
   devices in front still get whole frames squeezed into one protocol frame.
-  Mirrors run at 30 fps by default (`[layout] mirror_fps`).
+  `[layout] mirror_fps` is "auto" by default: 120 fps while every link a
+  stream crosses is good, 30 when one is fair and 15 when poor (the
+  network optimiser's levels; the host replans when a level changes), or a
+  fixed 1-120. A capture never goes faster than its own screen refreshes.
+- macOS captures through one ScreenCaptureKit stream per display
+  (`curslink.mirror.macstream`), which only delivers frames when the screen
+  changed and shares the display with other captures (DisplayLink drives its
+  screens by capturing them; 30 screenshots a second froze them). Without a
+  stream it falls back to Quartz screenshots, at most 30 a second.
 - An agent's own cursor stays wherever input last left it, which can be
   right on a mirror that comes up there (a second pointer next to the one
   the mirror draws). `CursorPark` moves it to the middle of that screen's

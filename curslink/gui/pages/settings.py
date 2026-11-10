@@ -176,6 +176,15 @@ class SettingsPage(Page):
             "on Wi-Fi; Standard is lightest. The mirror can't be sharper than the screen behind: where that "
             "screen has fewer pixels per inch than the one in front, it's scaled up once to fit."),
             self.mirror_quality)
+        self.mirror_fps = Segmented([("auto", "Auto"), ("30", "30"), ("60", "60"), ("120", "120")])
+        self.mirror_fps.picked.connect(
+            lambda value: self.set_config("layout", "mirror_fps", value if value == "auto" else int(value)))
+        self.mirror_fps_row = self.mirror_card.add_row(text_block(
+            "Mirror frame rate",
+            "Frames a second the mirror updates at, never more than the screen behind refreshes, so 120 "
+            "needs a 120 Hz screen. Auto goes up to 120 while the network is quick and drops to 30 or 15 "
+            "when it's busy or slow."),
+            self.mirror_fps)
         # Rows for screens behind others: keep mirroring while on a screen joined to it.
         self.joined_rows: list = []
         self.joined_toggles: dict[tuple[str, str | None], Toggle] = {}
@@ -369,6 +378,9 @@ class SettingsPage(Page):
             self.mirror_pointer_row.setVisible(overlap and self.mirror.isChecked())
             self.mirror_quality.set_value(str(layout_raw.get("mirror_quality", "high")))
             self.mirror_quality_row.setVisible(overlap and self.mirror.isChecked())
+            fps = layout_raw.get("mirror_fps", "auto")
+            self.mirror_fps.set_value(str(fps) if str(fps) in ("30", "60", "120") else "auto")
+            self.mirror_fps_row.setVisible(overlap and self.mirror.isChecked())
             self.mirror_note.setVisible(not overlap)
             self.load_joined(raw, overlap and self.mirror.isChecked() and role == "host")
             self.agent_keys_card.setVisible(role == "agent")

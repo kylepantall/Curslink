@@ -83,8 +83,9 @@ class HostConfig:
     files: bool = True
     # Carry Isolink's floating chats to other devices ([isolink] enabled; see curslink.popups).
     isolink: bool = True
-    # Mirror mode's frames a second ([layout] mirror_fps; on with [layout] mirror, see curslink.mirror).
-    mirror_fps: int = 30
+    # Mirror mode's frames a second ([layout] mirror_fps; on with [layout] mirror, see curslink.mirror):
+    # 1 to 120 (never more than the screen behind refreshes), or 0 for "auto" (by how each link is doing).
+    mirror_fps: int = 0
     # How sharp a mirror's picture is ([layout] mirror_quality, see curslink.mirror.QUALITIES).
     mirror_quality: str = "high"
     # Share what's copied with the agents ([host] clipboard; see curslink.clipboard).
@@ -348,6 +349,18 @@ def parse_links(value: Any, devices: list[Device]) -> list[EdgeLink]:
     return out
 
 
+def _mirror_fps(layout: Any) -> int:
+    """``[layout] mirror_fps``: "auto" (the default) as 0, else 1 to 120."""
+    from curslink.mirror import MAX_FPS
+
+    value = layout.get("mirror_fps", "auto") if isinstance(layout, dict) else "auto"
+    if value == "auto":
+        return 0
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigError('[layout].mirror_fps must be "auto" or a number of frames a second')
+    return max(1, min(MAX_FPS, value))
+
+
 def _mirror_quality(layout: Any) -> str:
     from curslink.mirror import QUALITIES
 
@@ -524,7 +537,7 @@ def host_config(raw: dict[str, Any], base_dir: Path = Path(".")) -> HostConfig:
         pairing=pairing_config(raw, base_dir),
         files=bool(raw.get("files", {}).get("enabled", True)) if isinstance(raw.get("files", {}), dict) else True,
         isolink=_enabled(raw.get("isolink", {}), "[isolink]"),
-        mirror_fps=max(1, min(30, _int(raw.get("layout", {}), "mirror_fps", 30))),
+        mirror_fps=_mirror_fps(raw.get("layout", {})),
         mirror_quality=_mirror_quality(raw.get("layout", {})),
         clipboard=bool(host.get("clipboard", True)),
         clipboard_max_mb=_clipboard_max_mb(host, "[host]"),
