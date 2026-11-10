@@ -649,6 +649,88 @@ def test_mac_cursor_shown_again_if_a_hung_app_kept_it_hidden(monkeypatch):
     assert CG.shows == 1                       # stale check (hidden again since): ignored
 
 
+def test_mac_cursor_hidden_again_if_macos_shows_it_while_away(monkeypatch, caplog):
+    """macOS can bring the hidden cursor back while input is on another
+    computer (it sat on the laptop's screen at the park point). While hidden
+    it's looked at and hidden again; showing it matches every hide."""
+    import logging
+
+    import curslink.inputs.pynput_backend as pb
+
+    class IsVisible:
+        restype = None
+
+        def __call__(self):
+            return CG.visible
+
+    class CG:
+        hides = shows = 0
+        visible = True
+        CGCursorIsVisible = IsVisible()
+
+        def CGDisplayHideCursor(self, d):
+            CG.hides += 1
+            CG.visible = False
+
+        def CGDisplayShowCursor(self, d):
+            CG.shows += 1
+
+    cg = CG()
+    monkeypatch.setattr(pb, "_mac_lib", lambda path: cg)
+    monkeypatch.setattr(pb, "_mac_sets_cursor_in_background", lambda a, b: None)
+    started, checked = [], []
+    monkeypatch.setattr(pb, "_mac_start_keeping_hidden", lambda gen: started.append(gen))
+    monkeypatch.setattr(pb, "_mac_check_shown", lambda gen, attempt: checked.append((gen, attempt)))
+    monkeypatch.setattr(pb, "_mac_hidden", False)
+    monkeypatch.setattr(pb, "_mac_hides", 0)
+    monkeypatch.setattr(pb, "_mac_rehides", 0)
+
+    with caplog.at_level(logging.INFO, logger="curslink.inputs.pynput_backend"):
+        pb._mac_cursor_visible(False)
+        gen = pb._mac_show_gen
+        assert CG.hides == 1 and started == [gen]
+        assert pb._mac_keep_hidden(gen) and CG.hides == 1      # still hidden: left alone
+        CG.visible = True                                      # macOS showed it
+        assert pb._mac_keep_hidden(gen) and CG.hides == 2
+        CG.visible = True
+        assert pb._mac_keep_hidden(gen) and CG.hides == 3
+        pb._mac_cursor_visible(True)
+    assert CG.shows == 3                                       # every hide matched
+    assert checked == [(pb._mac_show_gen, 0)]
+    assert not pb._mac_keep_hidden(gen)                        # shown on purpose: stops looking
+    lines = [r.getMessage() for r in caplog.records]
+    assert sum("hiding it again" in line for line in lines) == 1
+    assert any("2 time(s)" in line for line in lines)
+
+
+def test_mac_cursor_stops_hiding_again_if_macos_keeps_showing_it(monkeypatch):
+    import curslink.inputs.pynput_backend as pb
+
+    class IsVisible:
+        restype = None
+
+        def __call__(self):
+            return True                                        # never stays hidden
+
+    class CG:
+        hides = 0
+        CGCursorIsVisible = IsVisible()
+
+        def CGDisplayHideCursor(self, d):
+            CG.hides += 1
+
+    monkeypatch.setattr(pb, "_mac_lib", lambda path: CG())
+    monkeypatch.setattr(pb, "_mac_sets_cursor_in_background", lambda a, b: None)
+    monkeypatch.setattr(pb, "_mac_hidden", True)
+    monkeypatch.setattr(pb, "_mac_hides", 1)
+    monkeypatch.setattr(pb, "_mac_rehides", 0)
+    monkeypatch.setattr(pb, "_MAC_REHIDE_MAX", 3)
+    gen = pb._mac_show_gen
+    while pb._mac_keep_hidden(gen):
+        pass
+    assert CG.hides == 3 and pb._mac_hides == 4
+
+
 def test_windows_refused_moves_are_logged_now_and_then(monkeypatch, caplog):
     import logging
 

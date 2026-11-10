@@ -655,8 +655,14 @@ def _mac_sets_cursor_in_background(cg, cf) -> None:
 def _mac_cursor_visible(visible: bool) -> None:
     """Hide or show the Mac's cursor. A background process may only do that
     after setting "SetsCursorInBackground" on its window server connection
-    (what Synergy and Barrier do)."""
-    global _mac_hidden, _mac_show_gen
+    (what Synergy and Barrier do).
+
+    macOS doesn't always keep it hidden: something else can bring it back
+    while input is on another computer (Kyle saw it sitting on the laptop's
+    screen, at the park point). So while hidden, :func:`_mac_keep_hidden`
+    looks every so often and hides it again if it's showing; every hide is
+    counted, and showing it matches them all."""
+    global _mac_hidden, _mac_show_gen, _mac_hides, _mac_rehides
     if visible != _mac_hidden:
         return  # already that way (hiding counts, so never hide twice)
     try:
@@ -665,12 +671,66 @@ def _mac_cursor_visible(visible: bool) -> None:
         _mac_show_gen += 1
         if not visible:
             cg.CGDisplayHideCursor(0)
+            _mac_hides, _mac_rehides = 1, 0
+            _mac_hidden = True
+            _mac_start_keeping_hidden(_mac_show_gen)
         else:
-            cg.CGDisplayShowCursor(0)
+            if _mac_rehides:
+                log.info("macOS showed the cursor %d time(s) while input was on another computer; "
+                         "it was hidden again each time", _mac_rehides)
+            for _ in range(max(1, _mac_hides)):
+                cg.CGDisplayShowCursor(0)
+            _mac_hides = _mac_rehides = 0
+            _mac_hidden = False
             _mac_check_shown(_mac_show_gen, 0)
-        _mac_hidden = not visible
     except Exception:  # pragma: no cover - macOS only
         log.debug("couldn't %s the cursor", "show" if visible else "hide", exc_info=True)
+
+
+_mac_hides = 0     # CGDisplayHideCursor calls not yet matched by a show
+_mac_rehides = 0   # times it was found showing and hidden again, this time away
+# While hidden: how soon to look whether it's showing again (the first one
+# soon, after the system shortcuts are turned off), then how often.
+_MAC_HIDE_CHECKS_S = (0.05, 0.2)
+# Hidden again this many times while away and still showing: macOS won't
+# have it, so stop (and say so) rather than pile up hides.
+_MAC_REHIDE_MAX = 50
+
+
+def _mac_keep_hidden(gen: int) -> bool:
+    """One look while hidden: hide the cursor again if it's showing. False
+    once there's nothing more to do (shown on purpose since, or given up)."""
+    global _mac_hides, _mac_rehides
+    if gen != _mac_show_gen or not _mac_hidden:
+        return False
+    try:
+        cg, cf = _mac_lib(_CG_PATH), _mac_lib(_CF_PATH)
+        cg.CGCursorIsVisible.restype = ctypes.c_bool
+        if not cg.CGCursorIsVisible():
+            return True
+        if _mac_rehides >= _MAC_REHIDE_MAX:
+            log.warning("macOS keeps showing the cursor while input is on another computer "
+                        "(hidden again %d times); leaving it", _mac_rehides)
+            return False
+        if not _mac_rehides:
+            log.info("the cursor showed again while input is on another computer; hiding it again")
+        _mac_sets_cursor_in_background(cg, cf)
+        cg.CGDisplayHideCursor(0)
+        _mac_hides += 1
+        _mac_rehides += 1
+    except Exception:  # pragma: no cover - macOS only
+        log.debug("couldn't check the cursor is hidden", exc_info=True)
+        return False
+    return True
+
+
+def _mac_start_keeping_hidden(gen: int) -> None:
+    def run():
+        time.sleep(_MAC_HIDE_CHECKS_S[0])
+        while _mac_keep_hidden(gen):
+            time.sleep(_MAC_HIDE_CHECKS_S[1])
+
+    threading.Thread(target=run, name="curslink-cursor-hidden", daemon=True).start()
 
 
 _mac_show_gen = 0
