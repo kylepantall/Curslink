@@ -572,6 +572,7 @@ class FilesOverlay:
     def __init__(self, to_logical):
         self.to_logical = to_logical
         self.strips: list = []
+        self._spare: dict = {}   # strip windows taken down, by rect, to show again
         self.shield: list = []
         self.card = None
         self.toast = None
@@ -582,10 +583,10 @@ class FilesOverlay:
         word, _, rest = line.strip().partition(" ")
         rest = rest.strip()
         if word == "strips":
-            self._close(self.strips)
+            self._hide_strips()
             if rest == "edges":
                 rects = edge_rects()
-                self.strips = [make_catcher(r) for r in rects]
+                self.strips = [self._strip(r) for r in rects]
                 _say("log drop targets on the screen edges: " + ", ".join(
                     f"{r.x()},{r.y()} {r.width()}x{r.height()}" for r in rects))
             elif rest != "off":
@@ -601,7 +602,7 @@ class FilesOverlay:
                         r = strip_rect(s, self.to_logical)
                         if r not in rects:
                             rects.append(r)
-                self.strips = [make_catcher(QRect(r)) for r in rects]
+                self.strips = [self._strip(QRect(r)) for r in rects]
                 _say("log drop targets on " + ", ".join(
                     f"{r.x()},{r.y()} {r.width()}x{r.height()}" for r in rects))
         elif word == "shield":
@@ -651,6 +652,31 @@ class FilesOverlay:
         else:
             return False
         return True
+
+    def _strip(self, rect):
+        """A strip window over ``rect``: one taken down before if there is
+        one (making native windows over and over is the slow part)."""
+        key = (rect.x(), rect.y(), rect.width(), rect.height())
+        w = self._spare.pop(key, None)
+        if w is None:
+            return make_catcher(rect)
+        w.last = None
+        w.show()
+        return w
+
+    def _hide_strips(self) -> None:
+        for w in self.strips:
+            w.hide()
+            g = w.geometry()
+            old = self._spare.pop((g.x(), g.y(), g.width(), g.height()), None)
+            if old is not None:
+                old.close()
+            self._spare[(g.x(), g.y(), g.width(), g.height())] = w
+        self.strips = []
+        if len(self._spare) > 32:  # screens come and go: don't keep every old one
+            for w in self._spare.values():
+                w.close()
+            self._spare.clear()
 
     @staticmethod
     def _close(windows: list) -> None:

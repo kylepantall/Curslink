@@ -126,6 +126,8 @@ class AgentSession:
             ts = msg.data.get("ts")
             if not self._fresh(ts):
                 return None
+            if self.drag_out is not None and "left" in self.buttons:
+                self.drag_out.on_pointer(msg.data["x"], msg.data["y"])
             if self.smoother is not None and isinstance(ts, (int, float)) and not isinstance(ts, bool):
                 self.smoother.add(msg.data["x"], msg.data["y"], ts)
             else:

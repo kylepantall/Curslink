@@ -877,10 +877,7 @@ def test_outer_sides_skip_edges_between_screens():
     assert {(0, "left"), (0, "top"), (0, "bottom"), (1920, "right"), (1920, "top"), (1920, "bottom")} <= sides
 
 
-async def test_agent_knows_the_file_before_it_crosses(tmp_path, monkeypatch):
-    import curslink.files.dragout as dragout
-
-    monkeypatch.setattr(dragout, "WATCH_AFTER_S", 0.01)
+async def test_agent_knows_the_file_before_it_crosses(tmp_path):
     f = tmp_path / "x.pdf"
     f.write_text("x")
     sent, helper, order = [], [], []
@@ -894,7 +891,8 @@ async def test_agent_knows_the_file_before_it_crosses(tmp_path, monkeypatch):
     out = AgentDragOut(helper.append, lambda t, **d: (sent.append((t, d)), order.append(t)), nothing, "PC",
                        nudge=nudge, explorer=lambda: [], screens=lambda: [{"x": 0, "y": 0, "width": 800, "height": 600}])
     out.on_button("left", True)
-    await asyncio.sleep(0.05)
+    for x in (400, 500, 650, 780):                              # dragged towards the right edge
+        out.on_pointer(x, 300)
     assert helper[-1].startswith("strips ") and len(json.loads(helper[-1][7:])) == 4
     out.on_helper("drag " + json.dumps({"paths": [str(f)]}))   # the drag reached an edge
     out.start()
@@ -904,10 +902,9 @@ async def test_agent_knows_the_file_before_it_crosses(tmp_path, monkeypatch):
     assert "strips off" in helper
 
 
-async def test_a_plain_click_takes_the_strips_down(monkeypatch):
-    import curslink.files.dragout as dragout
-
-    monkeypatch.setattr(dragout, "WATCH_AFTER_S", 0.01)
+async def test_holding_the_button_puts_no_strips_up_until_a_drag_nears_an_edge():
+    # 0.4.62 put the strips (always-on-top windows) up 0.1 s into every
+    # press, and on Windows they made the pointer lag while the button was held.
     helper = []
 
     async def nothing(t, **d):
@@ -916,13 +913,47 @@ async def test_a_plain_click_takes_the_strips_down(monkeypatch):
     out = AgentDragOut(helper.append, lambda t, **d: None, nothing, "PC", nudge=lambda r: None,
                        explorer=lambda: [], screens=lambda: [{"x": 0, "y": 0, "width": 800, "height": 600}])
     out.on_button("left", True)
-    out.on_button("left", False)                                # quicker than the watch
-    await asyncio.sleep(0.05)
+    out.on_pointer(400, 300)
+    await asyncio.sleep(0.2)
+    assert helper == []                                         # held still: nothing
+    for x in (420, 500, 600):                                   # dragging, but mid-screen
+        out.on_pointer(x, 300)
     assert helper == []
-    out.on_button("left", True)
-    await asyncio.sleep(0.05)
-    out.on_button("left", False)
+    out.on_pointer(700, 300)                                    # 99 px from the right edge
+    assert helper[-1].startswith("strips ")
+    out.on_pointer(720, 300)
+    assert len(helper) == 1                                     # once, not per move
+    out.on_pointer(400, 300)                                    # back mid-screen
     assert helper[-1] == "strips off"
+    out.on_button("left", False)
+    assert helper.count("strips off") == 1
+
+
+async def test_a_plain_click_puts_no_strips_up():
+    helper = []
+
+    async def nothing(t, **d):
+        pass
+
+    out = AgentDragOut(helper.append, lambda t, **d: None, nothing, "PC", nudge=lambda r: None,
+                       explorer=lambda: [], screens=lambda: [{"x": 0, "y": 0, "width": 800, "height": 600}])
+    for _ in range(3):
+        out.on_button("left", True)
+        out.on_pointer(790, 300)                                # right at the edge, not moving
+        out.on_pointer(791, 300)
+        out.on_button("left", False)
+    assert helper == []
+
+
+def test_edge_distance():
+    from curslink.files.dragout import edge_distance, outer_sides
+
+    sides = outer_sides([{"x": 0, "y": 0, "width": 800, "height": 600},
+                         {"x": 800, "y": 0, "width": 800, "height": 600}])
+    assert edge_distance(sides, 799, 300) == 299                # the bottom: the shared side doesn't count
+    assert edge_distance(sides, 1590, 300) == 9
+    assert edge_distance(sides, 10, 300) == 10
+    assert edge_distance(sides, 400, 595) == 4
 
 
 async def test_the_card_shows_at_once_and_gives_way_to_the_real_drag(tmp_path):
@@ -942,10 +973,7 @@ async def test_a_mac_drag_keeps_the_card_following_the_pointer(tmp_path):
     assert helper[-1] == "card hide"
 
 
-async def test_agent_without_screen_info_asks_the_helper_for_edges(monkeypatch):
-    import curslink.files.dragout as dragout
-
-    monkeypatch.setattr(dragout, "WATCH_AFTER_S", 0.01)
+async def test_agent_without_screen_info_asks_the_helper_for_edges():
     helper = []
 
     async def nothing(t, **d):
@@ -953,7 +981,9 @@ async def test_agent_without_screen_info_asks_the_helper_for_edges(monkeypatch):
 
     out = AgentDragOut(helper.append, lambda t, **d: None, nothing, "PC", nudge=lambda r: None, explorer=lambda: [])
     out.on_button("left", True)
-    await asyncio.sleep(0.05)
+    out.on_pointer(100, 100)
+    assert helper == []
+    out.on_pointer(130, 100)                                    # a drag: no layout, so any drag
     assert helper == ["strips edges"]
 
 
@@ -966,8 +996,12 @@ def test_helper_edge_strips(capsys):
     files.handle("strips edges")
     assert len(files.strips) == 4 * len(app.screens())
     assert "drop targets on the screen edges" in capsys.readouterr().out
+    first = list(files.strips)
     files.handle("strips off")
-    assert files.strips == []
+    assert files.strips == [] and not any(w.isVisible() for w in first)
+    files.handle("strips edges")                                # the same windows, shown again
+    assert {id(w) for w in files.strips} == {id(w) for w in first} and all(w.isVisible() for w in first)
+    files.handle("strips off")
 
 
 async def test_a_held_drag_keeps_checking_the_window_under_it(tmp_path, monkeypatch):
@@ -1295,3 +1329,32 @@ async def test_a_slow_read_brings_input_home_to_answer_the_prompt(new_drag):
     assert not router.is_local
     handoff._slow_read("/Users/k/Desktop/a.txt")
     assert router.is_local
+
+
+def test_the_agent_tells_the_drag_out_where_a_held_pointer_is():
+    from curslink.net.client import AgentSession
+    from curslink.protocol import Message
+
+    class Sink:
+        def move_to(self, x, y): pass
+        def button(self, b, p): pass
+
+    class Watch:
+        busy = False
+
+        def __init__(self):
+            self.seen = []
+
+        def on_button(self, *a): pass
+
+        def on_pointer(self, x, y):
+            self.seen.append((x, y))
+
+    session = AgentSession(Sink(), lambda *a: None)
+    session.drag_out = watch = Watch()
+    session.handle(Message("enter", {"x": 5, "y": 6}))
+    session.handle(Message("move", {"x": 10, "y": 10, "ts": 1.0}))
+    assert watch.seen == []                                     # no button held
+    session.handle(Message("button", {"button": "left", "pressed": True}))
+    session.handle(Message("move", {"x": 20, "y": 10, "ts": 2.0}))
+    assert watch.seen == [(20, 10)]

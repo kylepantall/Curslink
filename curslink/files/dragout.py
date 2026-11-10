@@ -39,7 +39,14 @@ from curslink.files.dragdebug import trace
 log = logging.getLogger(__name__)
 
 PROBE_WAIT_S = 0.6
-WATCH_AFTER_S = 0.1   # the left button held this long: put the edge strips up
+# The edge strips are always-on-top windows, and on Windows any such window
+# can knock the app in front off its fast path to the screen (it gets
+# composited instead), which shows as pointer lag for as long as they're up.
+# 0.4.62 put them up 0.1 s into every press, plain clicks and text selections
+# included. Now they go up only for a held drag near an outer edge.
+DRAG_START_PX = 8     # a press that moves this far is a drag
+EDGE_NEAR_PX = 160    # a drag this close to an outer edge: put the strips up
+EDGE_FAR_PX = 240     # and back this far from every outer edge: take them down
 
 
 def outer_sides(screens: list[dict]) -> list[dict]:
@@ -65,6 +72,51 @@ def outer_sides(screens: list[dict]) -> list[dict]:
             if not any(touches(o) for o in others):
                 out.append({"x": x, "y": y, "w": w, "h": h, "side": side})
     return out
+
+
+def edge_distance(sides: list[dict], x: float, y: float) -> float | None:
+    """How far (x, y) is from the nearest of these outer sides (from
+    :func:`outer_sides`), counting only sides alongside it; None if none is."""
+    best = None
+    for s in sides:
+        sx, sy, w, h, side = s["x"], s["y"], s["w"], s["h"], s["side"]
+        if side in ("left", "right"):
+            if not sy <= y < sy + h:
+                continue
+            d = abs(x - sx) if side == "left" else abs(sx + w - 1 - x)
+        else:
+            if not sx <= x < sx + w:
+                continue
+            d = abs(y - sy) if side == "top" else abs(sy + h - 1 - y)
+        if best is None or d < best:
+            best = d
+    return best
+
+
+def win_screens() -> list[dict]:
+    """This PC's monitors (``{"x", "y", "width", "height"}``) as this process
+    sees them, for when screeninfo isn't installed."""
+    if sys.platform != "win32":
+        return []
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.WinDLL("user32")
+        found: list[dict] = []
+        proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HMONITOR, wintypes.HDC,
+                                  ctypes.POINTER(wintypes.RECT), wintypes.LPARAM)
+
+        def each(_mon, _hdc, rect, _data):
+            r = rect.contents
+            found.append({"x": r.left, "y": r.top, "width": r.right - r.left, "height": r.bottom - r.top})
+            return True
+
+        user32.EnumDisplayMonitors(None, None, proc(each), 0)
+        return found
+    except Exception:
+        log.debug("couldn't list the monitors", exc_info=True)
+        return []
 
 
 class AgentDragOut:
@@ -97,7 +149,9 @@ class AgentDragOut:
         self._sending: asyncio.Task | None = None
         self.screens = screens
         self._held = False             # the host holds the left button down here
-        self._watch: asyncio.TimerHandle | None = None
+        self._from: tuple[float, float] | None = None  # where the held button went down
+        self._dragging = False         # and the pointer has moved since: a drag
+        self._sides: list[dict] = []   # the outer sides of this device's screens, at the press
         self._watching = False         # edge strips up
         self._seen: list[str] | None = None  # what a drag at an edge carried
 
@@ -129,27 +183,45 @@ class AgentDragOut:
         if button != "left":
             return
         self._held = pressed
-        if self._watch is not None:
-            self._watch.cancel()
-            self._watch = None
+        self._from = None
+        self._dragging = False
+        self._seen = None
         if pressed:
-            self._seen = None
             try:
-                self._watch = asyncio.get_running_loop().call_later(WATCH_AFTER_S, self._start_watching)
-            except RuntimeError:
-                pass
+                self._sides = outer_sides(self.screens())
+            except Exception:
+                log.debug("couldn't read the screens", exc_info=True)
+                self._sides = []
         else:
             self._stop_watching()
-            self._seen = None
+
+    def on_pointer(self, x: float, y: float) -> None:
+        """The host moved the pointer here to (x, y)."""
+        if not self._held or self.busy:
+            return
+        if self._from is None:
+            self._from = (x, y)
+            return
+        if not self._dragging:
+            if abs(x - self._from[0]) + abs(y - self._from[1]) < DRAG_START_PX:
+                return
+            self._dragging = True
+        if not self._sides:
+            # Without the screens' layout here, the helper works the edges
+            # out itself, and any drag puts them up.
+            self._start_watching()
+            return
+        d = edge_distance(self._sides, x, y)
+        if d is not None and d <= EDGE_NEAR_PX:
+            self._start_watching()
+        elif self._watching and (d is None or d > EDGE_FAR_PX):
+            self._stop_watching()
 
     def _start_watching(self) -> None:
-        self._watch = None
         if not self._held or self._watching:
             return
-        strips = outer_sides(self.screens())
         self._watching = True
-        # Without the screens' layout here, the helper works the edges out itself.
-        self.helper("strips " + (json.dumps(strips, separators=(",", ":")) if strips else "edges"))
+        self.helper("strips " + (json.dumps(self._sides, separators=(",", ":")) if self._sides else "edges"))
 
     def _stop_watching(self) -> None:
         if self._watching:
@@ -161,9 +233,6 @@ class AgentDragOut:
         """``drag_out`` from the host: find out what's dragged, end the drag here."""
         self.pending = None
         self._held = False
-        if self._watch is not None:
-            self._watch.cancel()
-            self._watch = None
         if self._task is not None and not self._task.done():
             return
         seen, self._seen = self._seen, None
