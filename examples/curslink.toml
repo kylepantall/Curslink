@@ -121,7 +121,7 @@ confirm_with_agents = true   # agents running their own camera ([agent.gaze])
 # Curslink. An agent can opt out with [agent] mirror = false.
 # mirror = false
 # mirror_pointer = true
-# mirror_fps = 30
+# mirror_fps = "auto"       # or 1-120; never more than the screen behind refreshes
 # mirror_quality = "high"   # "lossless" (PNG), "high" or "standard"
 #
 # A screen behind can stay mirrored while the pointer is on any screen

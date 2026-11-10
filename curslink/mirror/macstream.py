@@ -201,7 +201,7 @@ class MacStream:
         cfg.setSourceRect_(quartz.CGRectMake(x - bx, y - by, w, h))
         cfg.setWidth_(max(2, round(w * scale)))
         cfg.setHeight_(max(2, round(h * scale)))
-        cfg.setMinimumFrameInterval_(cm.CMTimeMake(1, max(1, min(60, fps))))
+        cfg.setMinimumFrameInterval_(cm.CMTimeMake(1, max(1, min(120, fps))))
         cfg.setPixelFormat_(_KCV_BGRA)
         cfg.setShowsCursor_(cursor)
         cfg.setQueueDepth_(3)

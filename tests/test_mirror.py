@@ -291,8 +291,9 @@ def test_config_reads_mirror_mode_only_with_overlap():
         return {"host": {"device_id": "pc"}, "secret": "s", "layout": layout,
                 "devices": [{"id": "pc", "screens": [{"x": 0, "y": 0, "width": 100, "height": 100}]}]}
 
-    cfg = host_config(raw(allow_overlap=True, mirror=True, mirror_fps=40))
-    assert cfg.layout.mirror and cfg.layout.pointer_through and cfg.mirror_fps == 30
+    cfg = host_config(raw(allow_overlap=True, mirror=True, mirror_fps=400))
+    assert cfg.layout.mirror and cfg.layout.pointer_through and cfg.mirror_fps == 120
+    assert host_config(raw(allow_overlap=True, mirror=True)).mirror_fps == 0  # auto
     cfg = host_config(raw(allow_overlap=True, mirror=True, mirror_pointer=False))
     assert cfg.layout.mirror and not cfg.layout.pointer_through
     assert not host_config(raw(mirror=True)).layout.mirror
@@ -1643,3 +1644,49 @@ def test_screencapturekit_bridge_has_what_the_stream_uses(qapp):
     assert err == 0
     img = macstream.pixel_buffer_to_qimage(Quartz, pix)
     assert img is not None and (img.width(), img.height()) == (8, 4)
+
+
+def test_mirror_fps_is_auto_by_default_and_goes_to_120():
+    from curslink.config import ConfigError, _mirror_fps
+
+    assert _mirror_fps({}) == 0 and _mirror_fps({"mirror_fps": "auto"}) == 0
+    assert _mirror_fps({"mirror_fps": 120}) == 120 and _mirror_fps({"mirror_fps": 500}) == 120
+    assert _mirror_fps({"mirror_fps": 0}) == 1
+    with pytest.raises(ConfigError):
+        _mirror_fps({"mirror_fps": "fast"})
+
+
+def test_auto_frame_rate_follows_the_worse_link_and_a_set_one_stays():
+    lay = desk()
+    router = Router(lay, "pc", FakeCapture(), FakeSink(), Transport({"lap"}, mirror={"lap"}), FakeOverlay())
+
+    class Server(Transport):
+        levels = {}
+
+        def link_level(self, device_id):
+            return self.levels.get(device_id, "good")
+
+    server = Server({"lap"}, mirror={"lap"})
+    host = MirrorHost(lay, router, server, None, 0)
+    (s,) = streams_for(lay, lay.screen("pc", "main"))
+    assert host.stream_fps(s) == 120
+    Server.levels = {"lap": "fair"}
+    assert host.stream_fps(s) == 30
+    Server.levels = {"lap": "poor"}
+    assert host.stream_fps(s) == 15
+    assert MirrorHost(lay, router, server, None, 60).stream_fps(s) == 60
+    assert MirrorHost(lay, router, server, None, 999).stream_fps(s) == 120
+
+
+def test_a_capture_never_runs_faster_than_its_screen_refreshes(qapp, monkeypatch):
+    from curslink.mirror import helper
+
+    cap = helper.Capture({"id": "c", "screen": "main", "os": [10, 10, 120, 80], "fps": 120}, lambda line: None)
+    cap.timer.stop()
+    screen = helper.QGuiApplication.screens()[0]
+    monkeypatch.setattr(type(screen), "refreshRate", lambda self: 60.0)
+    assert cap.fps() == 60
+    monkeypatch.setattr(type(screen), "refreshRate", lambda self: 120.0)
+    assert cap.fps() == 120
+    cap.spec = dict(cap.spec, fps=24)
+    assert cap.fps() == 24

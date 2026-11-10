@@ -208,6 +208,8 @@ def mac_screen_recording(ask: bool = False) -> bool:
 
 
 _listed_ok = True
+# The screenshot fallback takes at most this many a second.
+SHOT_FPS = 30
 # The screenshot fallback lists the windows to take in at most this often.
 WINDOW_LIST_S = 1.0
 _windows_cache: tuple | None = None  # (when, unseen, ids, cursor ids)
@@ -398,6 +400,7 @@ class Capture:
         self.stream = None  # macOS: the display's ScreenCaptureKit stream (curslink.mirror.macstream)
         self.stream_seq = 0  # its last frame sent
         self.skip = False
+        self.shot_at = 0.0  # macOS: the last screenshot (when there's no stream)
         self.timer = QTimer()
         self.timer.timeout.connect(self.grab)
         self.set(spec)
@@ -409,9 +412,25 @@ class Capture:
             self.tiles = {}
         self.spec = spec
         self.show_guides(bool(spec.get("tune")))
-        fps = max(1, min(30, int(spec.get("fps", 30) or 30)))
-        self.timer.start(round(1000 / fps))
+        self.timer.start(round(1000 / self.fps()))
         QTimer.singleShot(0, self.grab)
+
+    def fps(self) -> int:
+        """Frames a second asked for, never more than the screen behind
+        refreshes (more would only send the same picture again)."""
+        from curslink.mirror import MAX_FPS
+
+        try:
+            fps = max(1, min(MAX_FPS, int(self.spec.get("fps", 30) or 30)))
+        except (TypeError, ValueError):
+            fps = 30
+        found = spec_to_logical(self.spec)
+        screens = QGuiApplication.screens()
+        if found is not None and 0 <= found[4] < len(screens):
+            hz = screens[found[4]].refreshRate()
+            if hz and hz >= 20:
+                fps = min(fps, round(hz))
+        return fps
 
     def mac_stream_image(self, lx: float, ly: float, lw: float, lh: float, index: int) -> QImage | None:
         """macOS: the area's newest frame from its display's stream, or None
@@ -438,7 +457,7 @@ class Capture:
         dpr = screens[index].devicePixelRatio() if 0 <= index < len(screens) else 1.0
         cursor = bool(self.spec.get("cursor")) and not self.spec.get("tune")
         unseen = mac_unseen_windows()
-        stream.configure((lx, ly, lw, lh), dpr or 1.0, max(1, min(30, int(self.spec.get("fps", 30) or 30))), cursor,
+        stream.configure((lx, ly, lw, lh), dpr or 1.0, self.fps(), cursor,
                          frozenset(unseen) if unseen is not None else None)
         if stream.stalled():
             return None
@@ -470,7 +489,13 @@ class Capture:
             if streamed is not None or self.skip:
                 return streamed
             # Else screenshots through Quartz: it can leave out this
-            # process's own windows (the mirrors and guides).
+            # process's own windows (the mirrors and guides). Never more
+            # than 30 a second: each one is a capture set up and torn down.
+            now = time.monotonic()
+            if now - self.shot_at < 1 / SHOT_FPS - 0.004 and self.last_sent:
+                self.skip = True
+                return None
+            self.shot_at = now
             img = mac_grab(lx, ly, lw, lh)
             if img is not None:
                 self.has_cursor = mac_grab_has_cursor

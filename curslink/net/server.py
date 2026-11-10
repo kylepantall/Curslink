@@ -185,6 +185,11 @@ class HostServer:
         conn = self.connections.get(device_id)
         return conn is not None and feature in conn.features
 
+    def link_level(self, device_id: str) -> str:
+        """The optimiser's view of a link: good, fair or poor."""
+        conn = self.connections.get(device_id)
+        return conn.optimiser.level if conn is not None and self.optimise else "good"
+
     def send(self, device_id: str, t: str, **data) -> None:
         conn = self.connections.get(device_id)
         if conn is None:

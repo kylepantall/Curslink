@@ -48,7 +48,12 @@ from curslink.layout import JOIN_GAP, Fit, Layout, Screen
 log = logging.getLogger(__name__)
 
 DEFAULT_FPS = 30
-MAX_FPS = 30
+# Up to a 120 Hz screen's refresh; a capture never goes past its own screen's.
+MAX_FPS = 120
+# [layout] mirror_fps = "auto" (0): frames a second by how the links a
+# stream crosses are doing (curslink.net.quality's optimiser levels).
+AUTO = 0
+AUTO_FPS = {"good": 120, "fair": 30, "poor": 15}
 # Frames a capture may have on their way before one is shown; past that the
 # newest waits (replacing any older waiting one) for an answer.
 IN_FLIGHT = 2
@@ -222,7 +227,7 @@ def screen_os(screen: Screen) -> list[int]:
     return [screen.os_x, screen.os_y, screen.width, screen.height]
 
 
-def device_states(streams: list[Stream], names: dict[str, str], fps: int,
+def device_states(streams: list[Stream], names: dict[str, str], fps: int | Callable[[Stream], int],
                   tuning: tuple[str, str] | None = None, anchors: dict | None = None,
                   cast: Callable[[Stream], bool] | None = None,
                   tiles: Callable[[Stream], bool] | None = None, quality: str = "high") -> dict[str, dict]:
@@ -241,7 +246,7 @@ def device_states(streams: list[Stream], names: dict[str, str], fps: int,
     for s in streams:
         src = out.setdefault(s.source.device_id, {"captures": [], "shows": []})
         src["captures"].append({"id": s.id, "screen": s.source.id, "os": s.os_rect(s.source),
-                                "screen_os": screen_os(s.source), "fps": fps})
+                                "screen_os": screen_os(s.source), "fps": fps(s) if callable(fps) else fps})
         if cast is not None and cast(s):
             src["captures"][-1]["cursor"] = True
         if tiles is not None and tiles(s):
@@ -518,7 +523,7 @@ class MirrorHost:
         self.server = server
         self.local = local
         self.local_id = router.local_id
-        self.fps = max(1, min(MAX_FPS, int(fps)))
+        self.fps = AUTO if int(fps) <= AUTO else min(MAX_FPS, int(fps))
         self.quality = quality if quality in QUALITIES else "high"
         self.clock = clock
         self.gap = gap  # screens this far apart still count as joined
@@ -631,7 +636,7 @@ class MirrorHost:
         streams = streams_for(self.layout, screen, self.can, joined=self.held is None, gap=self.gap)
         self.streams = {s.id: s for s in streams}
         self._pointer = {sid: p for sid, p in self._pointer.items() if sid in self.streams}
-        states = device_states(streams, self.names, self.fps, self.tuning, self._anchors,
+        states = device_states(streams, self.names, self.stream_fps, self.tuning, self._anchors,
                                cast=lambda s: self.router.screen == s.source and self._captures_cursor(s.source.device_id),
                                tiles=lambda s: self._takes_tiles(s.target.device_id), quality=self.quality)
         for device in set(self.sent) | set(states):
@@ -646,6 +651,22 @@ class MirrorHost:
         if set(self.streams) != self._logged:
             self._logged = set(self.streams)
             log.info("mirror: %s", ", ".join(f"{s.id} at {s.os_rect(s.source)}" for s in streams) or "nothing to mirror now")
+
+    def link_level(self, device_id: str) -> str:
+        """How the link to a device is doing: good (this computer), fair or poor."""
+        if device_id == self.local_id:
+            return "good"
+        level = getattr(self.server, "link_level", None)
+        return level(device_id) if level is not None else "good"
+
+    def stream_fps(self, s: Stream) -> int:
+        """A stream's frames a second: the setting, or on auto by the worse
+        of the links its frames cross (both ends through the host)."""
+        if self.fps != AUTO:
+            return self.fps
+        levels = {self.link_level(s.source.device_id), self.link_level(s.target.device_id)}
+        worst = next((lv for lv in ("poor", "fair") if lv in levels), "good")
+        return AUTO_FPS[worst]
 
     def _to(self, device_id: str, t: str, **data) -> None:
         if device_id == self.local_id:
