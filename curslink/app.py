@@ -1386,11 +1386,12 @@ def send_files_home(cfg: AgentConfig, session: AgentSession, client: AgentClient
                     loop: asyncio.AbstractEventLoop) -> None:
     """A file dragged from here over the edge to the host (or carried there
     by a look): see curslink.files.dragout."""
-    from curslink.files.dragout import AgentDragOut
+    from curslink.files.dragout import AgentDragOut, win_screens
 
     from curslink.net.client import detect_screens
 
-    drag_out = AgentDragOut(overlay.command, client.send, client.send_bulk, cfg.name, screens=detect_screens)
+    drag_out = AgentDragOut(overlay.command, client.send, client.send_bulk, cfg.name,
+                            screens=lambda: detect_screens() or win_screens())
 
     def on_line(line: str) -> None:  # the helper's reader thread
         try:
