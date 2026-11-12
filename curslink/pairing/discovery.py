@@ -322,16 +322,31 @@ async def _browse(timeout: float, exclude: str | None, want: str | None) -> list
     from zeroconf import ServiceStateChange
     from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZeroconf
 
-    names: set[str] = set()
-
-    def on_change(zeroconf, service_type, name, state_change):
-        if state_change in (ServiceStateChange.Added, ServiceStateChange.Updated):
-            names.add(name)
-
     log.info("discovery: looking for Curslink devices for %.0fs from %s (%s)", timeout, local_hostname(),
              ", ".join(local_addresses()) or "no LAN address")
-    azc = AsyncZeroconf(**zeroconf_options())
-    browser = AsyncServiceBrowser(azc.zeroconf, [SERVICE_TYPE], handlers=[on_change])
+    # Two listeners. The usual one, on port 5353, hears answers sent to the
+    # mDNS group and to 5353 on this computer. The other asks from a port of
+    # its own, and devices answer that straight back to it (RFC 6762 "legacy
+    # unicast"). On Windows the usual one can miss every answer: only one
+    # socket on the computer gets an answer sent to 5353, and the host or
+    # agent beside the app (and Windows' own mDNS) are on 5353 too; and a
+    # mesh router may not pass group traffic to a PC on wired and Wi-Fi at
+    # once. 0.4.64's PC found the Mac about once in 20 searches while the
+    # Mac found the PC every time.
+    zcs = [AsyncZeroconf(**zeroconf_options())]
+    try:
+        zcs.append(AsyncZeroconf(unicast=True, **zeroconf_options()))
+    except Exception as exc:  # pragma: no cover - the usual one still works
+        log.debug("discovery: no direct-answer listener (%s)", exc)
+    names: dict[str, AsyncZeroconf] = {}  # service name -> the listener that heard it
+
+    def on_change_for(azc):
+        def on_change(zeroconf, service_type, name, state_change):
+            if state_change in (ServiceStateChange.Added, ServiceStateChange.Updated):
+                names.setdefault(name, azc)
+        return on_change
+
+    browsers = [AsyncServiceBrowser(z.zeroconf, [SERVICE_TYPE], handlers=[on_change_for(z)]) for z in zcs]
     tag = f"({want[:20]})" if want else None
     try:
         loop = asyncio.get_running_loop()
@@ -340,11 +355,23 @@ async def _browse(timeout: float, exclude: str | None, want: str | None) -> list
             await asyncio.sleep(0.1)
             if tag and any(tag in n for n in names):
                 break
-        infos = [AsyncServiceInfo(SERVICE_TYPE, n) for n in sorted(names)]
-        await asyncio.gather(*(i.async_request(azc.zeroconf, 1500) for i in infos))
+
+        async def resolve(name: str):
+            # Ask on the listener that heard it first, then the other.
+            heard = names[name]
+            info = None
+            for z in [heard, *(z for z in zcs if z is not heard)]:
+                info = AsyncServiceInfo(SERVICE_TYPE, name)
+                if await info.async_request(z.zeroconf, 1500) and found_from_info(info) is not None:
+                    break
+            return info
+
+        infos = list(await asyncio.gather(*(resolve(n) for n in sorted(names))))
     finally:
-        await browser.async_cancel()
-        await azc.async_close()
+        for b in browsers:
+            await b.async_cancel()
+        for z in zcs:
+            await z.async_close()
     found: dict[str, Found] = {}
     for info in infos:
         item = found_from_info(info)

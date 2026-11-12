@@ -160,6 +160,33 @@ PHONE_TEXT = ("Install Curslink on your Android phone, then scan a code from her
               "the pointer past the edge you choose for the phone and it wakes up with your mouse and keyboard on it.")
 
 
+def add_to_layout(app, device_id: str, name: str, paired_screens=None) -> bool:
+    """Host: put a newly paired device in the layout, so the host lets it
+    connect ([[devices]]) and the pointer has an edge to reach it by. False
+    if it's there already. The caller saves and restarts the service.
+
+    Its screens are what it reported when it connected, else what it said
+    while pairing (a phone does), else a placeholder screen."""
+    cfg = app.config()
+    if cfg.has_device(device_id):
+        return False
+    agent = app.status.agents.get(device_id)
+    reported = (agent.screens if agent else []) or paired_screens or []
+    screens = [
+        {"id": s.get("name") or f"screen{i + 1}", "x": s["x"], "y": s["y"],
+         "width": s["width"], "height": s["height"]}
+        for i, s in enumerate(reported)
+        if isinstance(s, dict) and all(isinstance(s.get(k), (int, float)) and not isinstance(s.get(k), bool)
+                                       for k in ("x", "y", "width", "height"))
+    ]
+    cfg.add_device(device_id, name, screens or None)
+    if [sc["id"] for sc in screens] == ["phone"]:
+        # The whole right side leads to it, across every monitor.
+        cfg.place_beside(device_id, cfg.get("host", "device_id"), "right", whole_side=True)
+    cfg.save()
+    return True
+
+
 class DevicesPage(Page):
     def __init__(self, app):
         super().__init__("Devices", "Pair once and each device gets its own key. Nothing secret goes in a config file.")
@@ -558,28 +585,11 @@ class DevicesPage(Page):
         peer = result.peer
         self.store().add(peer.device_id, peer.name, peer.role, result.key, address)
         note = f"Paired with {peer.name}."
-        if self.app.role == "host":
-            cfg = self.app.config()
-            if not cfg.has_device(peer.device_id):
-                agent = self.app.status.agents.get(peer.device_id)
-                # What it reported when it connected, else what it said while
-                # pairing (a phone does), else a placeholder screen.
-                reported = (agent.screens if agent else []) or getattr(result, "extra", {}).get("screens") or []
-                screens = [
-                    {"id": s.get("name") or f"screen{i + 1}", "x": s["x"], "y": s["y"],
-                     "width": s["width"], "height": s["height"]}
-                    for i, s in enumerate(reported)
-                    if isinstance(s, dict) and all(isinstance(s.get(k), (int, float)) and not isinstance(s.get(k), bool)
-                                                   for k in ("x", "y", "width", "height"))
-                ]
-                cfg.add_device(peer.device_id, peer.name, screens or None)
-                if [sc["id"] for sc in screens] == ["phone"]:
-                    # The whole right side leads to it, across every monitor.
-                    cfg.place_beside(peer.device_id, cfg.get("host", "device_id"), "right", whole_side=True)
-                cfg.save()
-                note += (" It's been added to the right of your screens: pick another edge for it below, "
-                         "or arrange it on the Layout page.")
-                self.app.config_saved()
+        if self.app.role == "host" and add_to_layout(self.app, peer.device_id, peer.name,
+                                                    getattr(result, "extra", {}).get("screens")):
+            note += (" It's been added to the right of your screens: pick another edge for it below, "
+                     "or arrange it on the Layout page.")
+            self.app.config_saved()
         self.say(note, ok=True)
         self.refresh()
         if self.app.role == "agent":

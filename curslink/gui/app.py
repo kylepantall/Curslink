@@ -57,6 +57,7 @@ class Curslink(QObject):
         self.service.event.connect(self._on_hint)
         self.calibrating = False  # host: the service gave the camera to calibration
         self.service.event.connect(self._on_calibrating)
+        self.service.event.connect(self._on_paired)
         self._look = None
         self._hint = None
         self.release: update.Release | None = None
@@ -216,6 +217,33 @@ class Curslink(QObject):
     @property
     def linking(self) -> bool:
         return self.service.state in (STARTING, RUNNING)
+
+    def _on_paired(self, event: dict) -> None:
+        """The service paired with a device that asked (it started pairing).
+        A host puts a new agent in its layout and restarts, so the host lets
+        it connect (it turns away devices not in [[devices]])."""
+        if event.get("event") != "paired":
+            return
+        device_id, name = str(event.get("device_id") or ""), str(event.get("name") or "")
+        if not device_id:
+            return
+        log.info("paired with %s (%s, %s), which asked", name, device_id, event.get("role"))
+        added = False
+        if self.role == "host" and event.get("role") == "agent":
+            from curslink.gui.pages.devices import add_to_layout
+
+            try:
+                added = add_to_layout(self, device_id, name or device_id, event.get("screens") or None)
+            except Exception:
+                log.exception("couldn't add %s to the layout", device_id)
+        if added:
+            log.info("added %s to the layout; restarting so it can connect", device_id)
+            if self.tray is not None:
+                self.tray.say(f"Paired with {name or device_id}",
+                              "It's been added to the right of your screens. Arrange it on the Layout page.")
+            self.config_saved()
+        else:
+            self.config_changed.emit()  # the Devices page lists it
 
     def _on_look(self, event: dict) -> None:
         """Agent: the host's calibration wants "Look here" on one of our screens."""

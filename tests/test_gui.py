@@ -1127,3 +1127,34 @@ def test_quit_takes_out_event_filters_and_runs_once(desktop, qapp, monkeypatch):
     desktop.quit()
     assert quits == [1]
     assert stops == [1]
+
+
+def test_an_agent_that_pairs_with_the_host_is_added_to_its_layout(desktop, qapp, monkeypatch):
+    """0.4.64: a Mac that paired with the PC host (from the Mac) stayed
+    "unknown device" on the host until it was added to [[devices]] by hand."""
+    desktop.window.pages["setup"].create()
+    restarts = []
+    monkeypatch.setattr(desktop, "config_saved", lambda restart=True: restarts.append(restart))
+    desktop.service.event.emit({"event": "paired", "device_id": "wks82261", "name": "WKS82261", "role": "agent",
+                                "screens": []})
+    qapp.processEvents()
+    assert desktop.config().has_device("wks82261")
+    assert restarts == [True]
+    # Pairing again (it's in the layout already) changes nothing.
+    desktop.service.event.emit({"event": "paired", "device_id": "wks82261", "name": "WKS82261", "role": "agent"})
+    qapp.processEvents()
+    assert restarts == [True]
+
+
+def test_an_agent_leaves_its_config_alone_when_a_host_pairs_with_it(desktop, qapp, monkeypatch):
+    from curslink.configedit import new_agent_config
+
+    desktop.config_path.parent.mkdir(parents=True, exist_ok=True)
+    desktop.config_path.write_text(new_agent_config("laptop", "Laptop"))
+    before = desktop.config_path.read_text()
+    restarts = []
+    monkeypatch.setattr(desktop, "config_saved", lambda restart=True: restarts.append(restart))
+    desktop.service.event.emit({"event": "paired", "device_id": "kyles-pc", "name": "Kyles_PC", "role": "host"})
+    qapp.processEvents()
+    assert desktop.config_path.read_text() == before
+    assert restarts == []
