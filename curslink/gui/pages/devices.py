@@ -10,6 +10,7 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QVBoxLayout
 
 from curslink.config import agent_config, host_config
+from curslink.configedit import other_role
 from curslink.gui.common import call_on_main, in_background, main_thread
 from curslink.gui.widgets import Card, EmptyState, Page, button, label, pill, spot, text_block
 
@@ -362,24 +363,49 @@ class DevicesPage(Page):
             self.paired.rows.addWidget(EmptyState(
                 "devices-empty", "Nothing paired yet",
                 f"Open Curslink on {other}, on the same network, and pair with it below."))
-        connected = {a.device_id for a in self.app.status.agents.values() if a.connected}
+        connected = self.app.connected_ids()
         paused = {a.device_id for a in self.app.status.agents.values() if a.paused and not a.connected}
-        if self.app.status.host_state == "connected":
-            connected |= {p.device_id for p in peers if p.role == "host"}
         self.draw_phone(peers)
-        for p in peers:
+        mine = self.app.role
+        # Pairings from this computer's other role (a host's agents and phones
+        # while it's an agent, or its host while it's the host) come last:
+        # they're kept for switching back, but can still be unpaired here.
+        for p in sorted(peers, key=lambda p: p.role == mine):
             t = time.localtime(p.paired_at)
             when = f"{t.tm_mday} {time.strftime('%b %Y', t)}" if p.paired_at else "earlier"
             on = p.device_id in connected
-            widgets = [
-                text_block(p.name, f"{p.role.title()} · id {p.device_id} · paired {when}"),
-                pill("Connected" if on else ("Paused" if p.device_id in paused else "Offline"), "on" if on else "off"),
-            ]
-            edge = self.edge_picker(p) if self.app.role == "host" and p.role == "agent" else None
+            if p.role == mine:
+                state = pill(f"Used when this is the {other_role(mine)}", "off")
+            else:
+                state = pill("Connected" if on else ("Paused" if p.device_id in paused else "Offline"),
+                             "on" if on else "off")
+            widgets = [text_block(p.name, f"{p.role.title()} · id {p.device_id} · paired {when}"), state]
+            edge = self.edge_picker(p) if mine == "host" and p.role == "agent" else None
             if edge is not None:
                 widgets.insert(1, edge)
             widgets.append(button("Unpair", "danger", lambda _=False, peer=p: self.unpair(peer)))
             self.paired.add_row(*widgets)
+        if mine == "host":
+            # In the layout but not paired: left over from an unpair or from
+            # before a switch of roles. Removing one needs nothing from it.
+            try:
+                cfg = self.app.config()
+                stale = cfg.unpaired_devices(peers, str(cfg.get("host", "device_id") or ""))
+            except Exception:
+                stale = []
+            try:
+                shared = bool(stale) and bool(host_config(self.app.config().raw(),
+                                                          base_dir=self.app.config_path.parent).secret)
+            except Exception:
+                shared = False
+            for d in stale:
+                device_id, name = str(d.get("id")), str(d.get("name") or d.get("id"))
+                on = device_id in connected
+                self.paired.add_row(
+                    text_block(name, f"In your layout · id {device_id} · "
+                                     + ("uses the shared secret" if shared else "not paired, so it can't connect")),
+                    pill("Connected" if on else "Not paired", "on" if on else "off"),
+                    button("Remove", "danger", lambda _=False, i=device_id, n=name: self.remove_stale(i, n)))
         self.draw_found()
 
     def draw_found(self) -> None:
@@ -585,10 +611,15 @@ class DevicesPage(Page):
         peer = result.peer
         self.store().add(peer.device_id, peer.name, peer.role, result.key, address)
         note = f"Paired with {peer.name}."
+        # Paired again under a new id (a reinstalled phone, say): the old
+        # pairing goes, and the new one takes its place in the layout.
+        tidied = bool(self.app.tidy_devices(adopt=False, apply=False))
         if self.app.role == "host" and add_to_layout(self.app, peer.device_id, peer.name,
                                                     getattr(result, "extra", {}).get("screens")):
             note += (" It's been added to the right of your screens: pick another edge for it below, "
                      "or arrange it on the Layout page.")
+            tidied = True
+        if tidied:
             self.app.config_saved()
         self.say(note, ok=True)
         self.refresh()
@@ -600,14 +631,38 @@ class DevicesPage(Page):
             QTimer.singleShot(1800, self.app.hide_to_tray)
 
     def unpair(self, peer) -> None:
+        in_layout = self.app.role == "host" and peer.role == "agent" and self.app.config().has_device(peer.device_id)
         answer = QMessageBox.question(
             self, "Unpair",
-            f"Forget {peer.name}? Unpair on {peer.name} too, or it keeps its old key.",
+            f"Forget {peer.name}?" + (" It comes off your layout too." if in_layout else "")
+            + f" {peer.name} doesn't need to be on or reachable. If you still use it, unpair it there too, "
+            "or it keeps its old key.",
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
         self.store().remove(peer.device_id)
+        self.forget_in_layout(peer.device_id)
+        self.say(f"Unpaired {peer.name}.", ok=True)
         self.refresh()
+
+    def remove_stale(self, device_id: str, name: str) -> None:
+        answer = QMessageBox.question(
+            self, "Remove", f"Take {name} off your layout? Pair with it again any time to bring it back.")
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.forget_in_layout(device_id)
+        self.say(f"Removed {name}.", ok=True)
+        self.refresh()
+
+    def forget_in_layout(self, device_id: str) -> None:
+        """A host stops expecting an unpaired device: off the layout, along
+        with its calibrated edges, fits and mirror and gaze screens."""
+        if self.app.role != "host":
+            return
+        cfg = self.app.config()
+        if cfg.forget_device(device_id):
+            cfg.save()
+            self.app.config_saved()
 
     def say(self, text: str, ok: bool = False) -> None:
         self.message.setObjectName("info" if ok else "warn")

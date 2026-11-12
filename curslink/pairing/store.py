@@ -146,6 +146,28 @@ class PairingStore:
         self._save()
         return True
 
+    def drop_superseded(self, keep: set[str] = frozenset()) -> list[tuple[Peer, Peer]]:
+        """Forget older pairings that a newer one with the same name and role
+        replaced: a phone that was reinstalled, or a computer that paired
+        again under a new id, otherwise lingers as a second, dead device.
+        Pairings in ``keep`` (connected right now) stay. Returns
+        ``(dropped, newer)`` pairs."""
+        self._reload()
+        newest: dict[tuple[str, str], Peer] = {}
+        for p in self._peers.values():
+            k = (p.role, p.name.strip().casefold())
+            if k not in newest or p.paired_at >= newest[k].paired_at:  # ties: the later entry
+                newest[k] = p
+        dropped = []
+        for p in list(self._peers.values()):
+            newer = newest[(p.role, p.name.strip().casefold())]
+            if newer.device_id != p.device_id and p.device_id not in keep:
+                del self._peers[p.device_id]
+                dropped.append((p, newer))
+        if dropped:
+            self._save()
+        return dropped
+
     def _save(self) -> None:
         data = {
             "v": 1,

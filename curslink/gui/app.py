@@ -188,6 +188,7 @@ class Curslink(QObject):
         log.info("this computer is now the %s", role)
         self.status.add_log("info", f"This computer is now the {role}.")
         self.config_saved(restart=False)
+        self.tidy_devices()
         if self.window is not None:
             if macperms.missing(role):
                 self.window.show_page("status")
@@ -228,12 +229,14 @@ class Curslink(QObject):
         if not device_id:
             return
         log.info("paired with %s (%s, %s), which asked", name, device_id, event.get("role"))
-        added = False
+        # Paired again under a new id: the old pairing goes, and on a host
+        # the new one takes its place in the layout.
+        added = bool(self.tidy_devices(adopt=False, apply=False))
         if self.role == "host" and event.get("role") == "agent":
             from curslink.gui.pages.devices import add_to_layout
 
             try:
-                added = add_to_layout(self, device_id, name or device_id, event.get("screens") or None)
+                added = add_to_layout(self, device_id, name or device_id, event.get("screens") or None) or added
             except Exception:
                 log.exception("couldn't add %s to the layout", device_id)
         if added:
@@ -367,6 +370,59 @@ class Curslink(QObject):
             return PairingStore(store).peers(role)
         except Exception:
             return []
+
+    def pairing_store(self):
+        from curslink.config import pairing_config
+        from curslink.pairing.store import PairingStore
+
+        return PairingStore(pairing_config(self.config().raw(), self.config_path.parent).store)
+
+    def connected_ids(self) -> set[str]:
+        ids = {a.device_id for a in self.status.agents.values() if a.connected}
+        if self.status.host_state == "connected":
+            ids |= {p.device_id for p in self.paired_peers("host")}
+        return ids
+
+    def tidy_devices(self, adopt: bool = True, apply: bool = True) -> list[str]:
+        """Keep the pairings and the layout in step, so no device lingers.
+
+        Drops pairings a newer one with the same name and role replaced (a
+        reinstalled phone, or a computer paired again under a new id); on a
+        host the new pairing takes the old one's place in the layout, else
+        the old one comes off it. With ``adopt``, a host also lays out paired
+        agents it doesn't have yet: ones paired while this computer was an
+        agent, or before 0.4.66 from the agent's side, which the host would
+        turn away ("unknown device"). With ``apply`` a changed config is
+        applied (the host restarts); the caller does it otherwise.
+        Returns what changed."""
+        if not self.has_config():
+            return []
+        try:
+            store = self.pairing_store()
+            dropped = store.drop_superseded(keep=self.connected_ids())
+            notes = [f"Replaced the old pairing with {old.name} (id {old.device_id}) by the new one."
+                     for old, _new in dropped]
+            changed = bool(dropped)
+            if self.role == "host":
+                cfg = self.config()
+                for old, new in dropped:
+                    if not cfg.rename_device(old.device_id, new.device_id, new.name):
+                        cfg.forget_device(old.device_id)
+                if adopt:
+                    added = cfg.adopt_paired(store.peers("agent"), str(cfg.get("host", "device_id") or ""))
+                    notes += [f"Added {name} to your layout." for name in added]
+                    changed = changed or bool(added)
+                if changed:
+                    cfg.save()
+            if changed and apply:
+                self.config_saved()
+        except Exception as exc:  # noqa: BLE001 - tidying is best effort
+            log.warning("couldn't tidy the paired devices: %s", exc)
+            return []
+        for note in notes:
+            log.info("%s", note)
+            self.status.add_log("info", note)
+        return notes
 
     def has_pairings(self) -> bool:
         """Paired with at least one other device (until then, setup isn't done)."""
@@ -665,6 +721,8 @@ def main(argv: list[str] | None = None) -> int:
     if not app.has_config():
         app.show_window("setup")
     else:
+        if app.tidy_devices(apply=False):  # before the host starts, so it lets them in
+            app.config_changed.emit()
         if prefs.start_linking:
             app.start_linking()
         # Agents have nothing to look at once paired, so they start hidden.
