@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import sys
 
 import pytest
 
@@ -1810,3 +1811,15 @@ def test_a_cursor_look_that_cant_be_read_is_cast_as_an_arrow(qapp, monkeypatch):
     # Hidden is still nothing drawn.
     monkeypatch.setattr(cursorshape, "_windows", lambda dpr: None)
     assert cursorshape.current(1.0) is None
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows only")
+def test_the_windows_cursor_look_is_read_without_ctypes_errors(qapp, monkeypatch):
+    import curslink.mirror.cursorshape as cursorshape
+
+    monkeypatch.setattr(cursorshape, "_failed", 0.0)
+    monkeypatch.setattr(cursorshape, "_win_last", None)
+    look = cursorshape._windows(1.0)  # raises on a ctypes mistake; None if the runner hides the cursor
+    assert look is None or (look["png"] and look["w"] > 0)
+    cursorshape.current(1.0)
+    assert cursorshape._failed == 0.0
