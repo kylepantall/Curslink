@@ -409,3 +409,19 @@ async def test_a_qr_request_to_the_usual_listener_is_refused(tmp_path):
         writer.close()
     finally:
         await listener.close()
+
+
+async def test_the_running_service_tells_the_app_who_paired(tmp_path, monkeypatch):
+    """The app adds an agent that paired with the host to the layout (the
+    host turns away devices not in [[devices]]), so the service says so."""
+    from curslink import app as app_mod
+    from curslink.config import PairingConfig
+
+    sent = []
+    monkeypatch.setattr(app_mod.events, "emit", lambda kind, **data: sent.append((kind, data)))
+    monkeypatch.setattr(app_mod.events.channel, "_out", object(), raising=False)
+    store = PairingStore(tmp_path / "host.json")
+    pairing = app_mod.Pairing(PairingConfig(), HOST, store)
+    pairing._paired(handshake.PairResult(AGENT, b"k" * 32, {"screens": [{"x": 0, "y": 0, "width": 10, "height": 10}]}))
+    assert sent == [("paired", {"device_id": "laptop", "name": "Work laptop", "role": "agent",
+                                "screens": [{"x": 0, "y": 0, "width": 10, "height": 10}]})]

@@ -164,7 +164,7 @@ class Pairing:
         # The advert carries the real port, so if ours is taken (say a host and
         # an agent on one machine) any free port will do.
         for port in (self.cfg.port, 0):
-            self.listener = PairingListener(self.me, self.store, ask_in_dialog, port=port)
+            self.listener = PairingListener(self.me, self.store, ask_in_dialog, port=port, on_paired=self._paired)
             try:
                 await self.listener.start()
                 break
@@ -180,6 +180,18 @@ class Pairing:
         except Exception as exc:  # no multicast, no mDNS: pairing by address still works
             log.warning("can't advertise on the LAN (%s); pair with `curslink pair --address`", exc)
             self.advertiser = None
+
+    def _paired(self, result) -> None:
+        """Another device paired with us (it started it). The app adds a new
+        agent to the host's layout and restarts the host, which only lets in
+        devices in [[devices]]; until 0.4.66 nothing did, and the host turned
+        the agent away ("unknown device") until it was added by hand."""
+        peer = result.peer
+        events.emit("paired", device_id=peer.device_id, name=peer.name, role=peer.role,
+                    screens=result.extra.get("screens") or [])
+        if self.me.role == "host" and peer.role == "agent" and not events.channel.enabled:
+            log.warning("paired with %s: add it to [[devices]] in the config (id = %r) and restart the host "
+                        "to let it connect", peer.name, peer.device_id)
 
     async def close(self) -> None:
         if self.advertiser:
