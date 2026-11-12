@@ -1158,3 +1158,108 @@ def test_an_agent_leaves_its_config_alone_when_a_host_pairs_with_it(desktop, qap
     qapp.processEvents()
     assert desktop.config_path.read_text() == before
     assert restarts == []
+
+
+def test_a_phone_paired_again_replaces_the_old_one(desktop, qapp):
+    import time
+
+    desktop.window.pages["setup"].create()
+    me = desktop.config().get("host", "device_id")
+    cfg = desktop.config()
+    cfg.add_device("android-aaaa", "Pixel 9", [{"id": "phone", "x": 0, "y": 0, "width": 411, "height": 914}])
+    cfg.place_beside("android-aaaa", me, "left", whole_side=True)
+    cfg.save()
+    store = desktop.pairing_store()
+    store.add("android-aaaa", "Pixel 9", "agent", b"a" * 32)
+    time.sleep(0.01)
+    store.add("android-bbbb", "Pixel 9", "agent", b"b" * 32)  # reinstalled: a new id
+    desktop.tidy_devices()
+    assert [p.device_id for p in desktop.pairing_store().peers()] == ["android-bbbb"]
+    ids = [d["id"] for d in desktop.config().devices()]
+    assert "android-aaaa" not in ids and ids.count("android-bbbb") == 1
+    assert desktop.config().side_of("android-bbbb", me) == "left"  # kept the old one's place
+    assert {lk["b"] for lk in desktop.config().links()} == {"android-bbbb/phone"}
+
+
+def test_unpair_and_remove_take_devices_off_the_layout(desktop, qapp, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+    desktop.window.pages["setup"].create()
+    me = desktop.config().get("host", "device_id")
+    cfg = desktop.config()
+    cfg.add_device("laptop", "Work laptop")
+    cfg.add_device("old-phone", "Old phone")  # in the layout, no pairing: left over
+    cfg.save()
+    page = desktop.window.pages["devices"]
+    page.store().add("laptop", "Work laptop", "agent", b"k" * 32)
+    desktop.window.show_page("devices")
+    qapp.processEvents()
+    texts = " ".join(lbl.text() for lbl in page.paired.findChildren(QtWidgets.QLabel))
+    assert "Old phone" in texts and "not paired" in texts
+
+    page.remove_stale("old-phone", "Old phone")
+    assert not desktop.config().has_device("old-phone")
+    page.unpair(page.store().get("laptop"))  # offline: nothing needs to answer
+    assert page.store().get("laptop") is None
+    assert [d["id"] for d in desktop.config().devices()] == [me]
+    assert desktop.check_config() is None
+
+
+def test_an_agent_lists_its_host_pairings_first(desktop, qapp, monkeypatch):
+    from curslink import macperms
+
+    monkeypatch.setattr(macperms, "missing", lambda role=None: [])
+    desktop.window.pages["setup"].create()
+    store = desktop.pairing_store()
+    store.add("pixel", "Pixel 9", "agent", b"p" * 32)
+    assert desktop.switch_role() == "agent"
+    store.add("desk", "Desk PC", "host", b"d" * 32)
+    page = desktop.window.pages["devices"]
+    page.refresh()
+    texts = [lbl.text() for lbl in page.paired.findChildren(QtWidgets.QLabel)]
+    assert any("Used when this is the host" in t for t in texts)
+    assert texts.index("Desk PC") < texts.index("Pixel 9")
+
+
+def test_agents_paired_before_switching_to_host_are_laid_out(desktop, qapp, monkeypatch):
+    """Paired while this computer was an agent (or from the agent's side
+    before 0.4.66): in the pairing store, not [[devices]], so the host would
+    turn them away until they were set up again."""
+    from curslink import macperms
+
+    monkeypatch.setattr(macperms, "missing", lambda role=None: [])
+    desktop.window.pages["setup"].create()
+    assert desktop.switch_role() == "agent"
+    store = desktop.pairing_store()
+    store.add("wks82261", "WKS82261", "agent", b"k" * 32)
+    store.add("kyles-pc", "Kyles_PC", "host", b"h" * 32)
+    assert desktop.switch_role() == "host"
+    ids = [d["id"] for d in desktop.config().devices()]
+    assert "wks82261" in ids and "kyles-pc" not in ids
+    assert desktop.tidy_devices() == []  # nothing more to do
+
+
+def test_a_phone_that_pairs_again_from_its_side_replaces_the_old_one(desktop, qapp, monkeypatch):
+    import time
+
+    desktop.window.pages["setup"].create()
+    me = desktop.config().get("host", "device_id")
+    cfg = desktop.config()
+    cfg.add_device("android-aaaa", "Pixel 9", [{"id": "phone", "x": 0, "y": 0, "width": 411, "height": 914}])
+    cfg.place_beside("android-aaaa", me, "left", whole_side=True)
+    cfg.save()
+    store = desktop.pairing_store()
+    store.add("android-aaaa", "Pixel 9", "agent", b"a" * 32)
+    time.sleep(0.01)
+    store.add("android-bbbb", "Pixel 9", "agent", b"b" * 32)  # what the service saved
+    restarts = []
+    monkeypatch.setattr(desktop, "config_saved", lambda restart=True: restarts.append(restart))
+    desktop.service.event.emit({"event": "paired", "device_id": "android-bbbb", "name": "Pixel 9", "role": "agent",
+                                "screens": []})
+    qapp.processEvents()
+    ids = [d["id"] for d in desktop.config().devices()]
+    assert "android-aaaa" not in ids and ids.count("android-bbbb") == 1
+    assert desktop.config().side_of("android-bbbb", me) == "left"
+    assert [p.device_id for p in desktop.pairing_store().peers()] == ["android-bbbb"]
+    assert restarts == [True]  # one restart

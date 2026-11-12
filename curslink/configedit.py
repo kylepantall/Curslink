@@ -469,6 +469,102 @@ class ConfigFile:
                 return True
         return False
 
+    def _refs(self, device_id: str, rewrite) -> None:
+        """Run every "device/screen" and "device:<id>" reference to
+        ``device_id`` through ``rewrite(ref) -> new ref or None`` (None drops
+        it): calibrated edges, fits, mirror_joined, gaze jump screens, keymaps."""
+        prefix = f"{device_id}/"
+
+        def mine(ref: Any) -> bool:
+            return isinstance(ref, str) and ref.startswith(prefix)
+
+        layout = self._table("layout", create=False)
+        for name, keys in (("links", ("a", "b")), ("fit", ("behind", "front"))):
+            if layout is None or name not in layout:
+                continue
+            keep = tomlkit.aot()
+            for t in layout[name]:
+                if any(mine(t.get(k)) for k in keys):
+                    new = {k: rewrite(t.get(k)) if mine(t.get(k)) else t.get(k) for k in keys}
+                    if any(v is None for v in new.values()):
+                        continue
+                    for k, v in new.items():
+                        t[k] = v
+                keep.append(t)
+            if len(keep):
+                layout[name] = keep
+            else:
+                del layout[name]
+        joined = self.raw().get("layout", {}).get("mirror_joined")
+        if isinstance(joined, dict):
+            table: dict[str, Any] = {}
+            for key, which in joined.items():
+                key = rewrite(key) if mine(key) else key
+                if key is None:
+                    continue
+                if isinstance(which, list):
+                    which = [w for w in (rewrite(v) if mine(v) else v for v in which) if w is not None]
+                    if not which:
+                        continue
+                table[key] = which
+            if table != joined:
+                self.set_mirror_joined(table)
+        jump = self.get("gaze", "jump_screens")
+        if isinstance(jump, list) and any(mine(v) for v in jump):
+            self.set("gaze", "jump_screens", [w for w in (rewrite(v) if mine(v) else v for v in jump) if w is not None])
+        mapping = self.keymap(f"device:{device_id}")
+        if mapping is not None:
+            self.set_keymap(f"device:{device_id}", None)
+            renamed = rewrite(prefix)
+            if renamed is not None:
+                self.set_keymap(f"device:{renamed[:-1]}", mapping)
+
+    def forget_device(self, device_id: str) -> bool:
+        """Take a device out of the layout along with everything that points
+        at it (calibrated edges, fits, mirror and gaze screens, its keymap).
+        True if it was there."""
+        if not self.remove_device(device_id):
+            return False
+        self._refs(device_id, lambda _ref: None)
+        return True
+
+    def rename_device(self, old_id: str, new_id: str, name: str | None = None) -> bool:
+        """Give a laid-out device a new id (and name), keeping where it sits
+        and everything calibrated against it: a phone or computer that paired
+        again under a new id takes over its old place."""
+        device = self._device(old_id)
+        if device is None or old_id == new_id or self.has_device(new_id):
+            return False
+        device["id"] = new_id
+        if name:
+            device["name"] = name
+        self._refs(old_id, lambda ref: new_id + ref[len(old_id):])
+        return True
+
+    def adopt_paired(self, peers, host_id: str) -> list[str]:
+        """Lay out paired agents that aren't in the layout yet (``peers`` are
+        pairing-store peers). A laid-out device that's no longer paired but
+        has the same name is taken over instead (it paired again under a new
+        id), so it keeps its place. Returns the names of what was added."""
+        paired = {p.device_id for p in peers}
+        changed = []
+        for p in peers:
+            if p.role != "agent" or p.device_id == host_id or self.has_device(p.device_id):
+                continue
+            stale = next((str(d.get("id")) for d in self.devices()
+                          if d.get("id") not in paired and d.get("id") != host_id
+                          and str(d.get("name", "")).strip().casefold() == p.name.strip().casefold()), None)
+            if stale is None or not self.rename_device(stale, p.device_id, p.name):
+                self.add_device(p.device_id, p.name)
+            changed.append(p.name)
+        return changed
+
+    def unpaired_devices(self, peers, host_id: str) -> list[dict[str, Any]]:
+        """Laid-out devices with no pairing: left over from an unpair, or from
+        before a switch of roles. Without a shared secret they can't connect."""
+        paired = {p.device_id for p in peers}
+        return [d for d in self.devices() if d.get("id") != host_id and d.get("id") not in paired]
+
 
 def touching_edges(devices: list[dict[str, Any]], tolerance: int = 64) -> list[tuple[str, str, str]]:
     """Where screens of different devices meet: ``(from "dev/screen", edge, to "dev/screen")``.

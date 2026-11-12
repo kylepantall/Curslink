@@ -189,3 +189,36 @@ def test_agent_modifier_map_is_written_by_family():
     raw = load_raw(EXAMPLE)
     raw.setdefault("agent", {})["modifier_map"] = {"cmd": "ctrl"}
     assert agent_config(raw).modifier_map["cmd_r"] == "ctrl_r"
+
+
+def test_forgetting_and_renaming_a_device_follows_its_references(tmp_path):
+    from curslink.configedit import ConfigFile, new_host_config
+
+    path = tmp_path / "curslink.toml"
+    path.write_text(new_host_config("desk", "Desk", [{"id": "main", "x": 0, "y": 0, "width": 1920,
+                                                       "height": 1080}]), encoding="utf-8")
+    cfg = ConfigFile(path)
+    cfg.add_device("phone", "Phone", [{"id": "phone", "x": 0, "y": 0, "width": 400, "height": 900}])
+    cfg.set_link("desk/main", "right", (0, 900), "phone/phone", "left", (0, 900))
+    cfg.set_fit("desk/main", "phone/phone", 10, 10, 0.5)
+    cfg.set_mirror_joined({"desk/main": ["phone/phone"], "phone/phone": "all"})
+    cfg.set("gaze", "jump_screens", ["desk/main", "phone/phone"])
+    cfg.set_keymap("device:phone", {"cmd": "alt"})
+    assert cfg.rename_device("phone", "phone2", "Phone 2")
+    cfg.save()
+    cfg = ConfigFile(path)
+    assert {lk["b"] for lk in cfg.links()} == {"phone2/phone"}
+    assert cfg.fits()[0]["front"] == "phone2/phone"
+    assert cfg.get("layout", "mirror_joined") == {"desk/main": ["phone2/phone"], "phone2/phone": "all"}
+    assert cfg.get("gaze", "jump_screens") == ["desk/main", "phone2/phone"]
+    assert cfg.keymap("device:phone2") == {"cmd": "alt"} and cfg.keymap("device:phone") is None
+
+    assert cfg.forget_device("phone2")
+    cfg.save()
+    cfg = ConfigFile(path)
+    assert [d["id"] for d in cfg.devices()] == ["desk"]
+    assert cfg.links() == [] and cfg.fits() == []
+    assert cfg.get("layout", "mirror_joined") is None
+    assert cfg.get("gaze", "jump_screens") == ["desk/main"]
+    assert cfg.keymap("device:phone2") is None
+    host_config(load_raw(path), base_dir=tmp_path)  # still a config that loads

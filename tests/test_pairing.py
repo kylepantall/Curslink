@@ -425,3 +425,19 @@ async def test_the_running_service_tells_the_app_who_paired(tmp_path, monkeypatc
     pairing._paired(handshake.PairResult(AGENT, b"k" * 32, {"screens": [{"x": 0, "y": 0, "width": 10, "height": 10}]}))
     assert sent == [("paired", {"device_id": "laptop", "name": "Work laptop", "role": "agent",
                                 "screens": [{"x": 0, "y": 0, "width": 10, "height": 10}]})]
+
+
+def test_a_newer_pairing_with_the_same_name_replaces_the_old(tmp_path):
+    import time
+
+    from curslink.pairing.store import PairingStore
+
+    store = PairingStore(tmp_path / "pairings.json")
+    store.add("android-1", "Pixel 9", "agent", b"a" * 32)
+    store.add("desk", "Pixel 9", "host", b"d" * 32)  # another role: not the same device
+    time.sleep(0.01)
+    store.add("android-2", "pixel 9 ", "agent", b"b" * 32)
+    assert store.drop_superseded(keep={"android-1"}) == []  # connected right now: kept
+    dropped = store.drop_superseded()
+    assert [(old.device_id, new.device_id) for old, new in dropped] == [("android-1", "android-2")]
+    assert sorted(p.device_id for p in PairingStore(store.path).peers()) == ["android-2", "desk"]
