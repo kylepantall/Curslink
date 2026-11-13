@@ -53,6 +53,9 @@ class NavButton(QPushButton):
         self.setCheckable(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setObjectName("nav")
+        # The macOS style keeps a bezel margin round push buttons, which
+        # squashes rows we draw ourselves; lay out by the widget's own rect.
+        self.setAttribute(Qt.WidgetAttribute.WA_LayoutUsesWidgetRect, True)
         self.setAccessibleName(title)
         self._hover = False
 

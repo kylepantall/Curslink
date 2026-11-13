@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 
 import pytest
 
@@ -99,6 +100,36 @@ def test_theme_modes_and_looks(desktop, qapp, monkeypatch):
             assert th.platform == look and th.dark == (mode == "dark")
             assert "QPushButton#primary" in theme.stylesheet(th)
     theme.manager().set_mode("system")
+
+
+def test_native_style_leaves_standard_controls_to_qt(qapp):
+    from curslink.gui import theme
+
+    for look in ("win", "mac"):
+        native = theme.stylesheet(theme.Theme(look, False, False, True))
+        custom = theme.stylesheet(theme.Theme(look, False, False, False))
+        for rule in ("QPushButton {", "QScrollBar:vertical", "QMenu {", "QSlider::"):
+            assert rule in custom and rule not in native
+        # Qt's macOS text field is a flat box, so macOS keeps ours.
+        assert ("QLineEdit, QComboBox" in native) == (look == "mac")
+        assert "QPushButton#primary" in native and "QFrame#card" in native
+
+
+def test_install_style_falls_back_to_fusion(qapp, monkeypatch):
+    from curslink.gui import theme
+
+    monkeypatch.setenv("CURSLINK_LOOK", "linux")
+    monkeypatch.delenv("CURSLINK_STYLE", raising=False)
+    assert theme.install_style(qapp) == "fusion"
+    monkeypatch.setenv("CURSLINK_LOOK", "win")  # no windows11 plugin off Windows
+    expected = "windows11" if sys.platform == "win32" else "fusion"
+    assert theme.install_style(qapp) == expected
+    theme.manager().apply()
+    assert theme.current().native == (expected == "windows11")
+    monkeypatch.setenv("CURSLINK_STYLE", "fusion")
+    assert theme.install_style(qapp) == "fusion"
+    theme.manager().apply()
+    assert not theme.current().native
 
 
 def test_camera_picker_keeps_the_name(qapp):

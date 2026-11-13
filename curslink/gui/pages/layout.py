@@ -368,6 +368,11 @@ class LayoutPage(Page):
             # Sized for its range (-100000) it wanted 110 px each, which with
             # the Edges card beside it made the page wider than the window.
             spin.setMinimumWidth(64)
+            if theme.native_style_active() and theme.current().platform == "win":
+                # Windows 11's spin box puts both arrows side by side, which
+                # leaves 64 px about two digits; the arrow keys and the wheel
+                # still step the value.
+                spin.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
             spin.valueChanged.connect(lambda v, k=key: self.spin_changed(k, v))
             self.spins[key] = spin
             fields.addWidget(label(text, "small"), 0, i)
@@ -386,6 +391,9 @@ class LayoutPage(Page):
         self.edges_card.body.addStretch(1)
         grid.addWidget(self.edges_card, 2)
         self.add(bottom)
+        # On an agent the canvas is hidden; this takes its space so the note
+        # stays under the title instead of the page spreading out.
+        self.agent_spacer = self.add(QWidget(), 1)
 
         app.config_changed.connect(self.load_if_clean)
         self.load()
@@ -440,6 +448,7 @@ class LayoutPage(Page):
         self.overlap_box.setVisible(is_host)
         self.overlap_row.hide()
         self.agent_note.setVisible(not is_host)
+        self.agent_spacer.setVisible(not is_host)
         if not is_host:
             self.agent_note.setText("The layout lives on the host. Open Curslink on the computer your keyboard "
                                     "and mouse are plugged into to arrange the screens.")
