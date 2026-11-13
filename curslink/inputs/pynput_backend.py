@@ -134,6 +134,8 @@ class PynputCapture:
         # took_back is set when one of them fires, for the router to catch up.
         self.loop_alive: Callable[[], bool] = lambda: True
         self.took_back = False
+        self.hooks_lost = 0  # Windows: times the hooks were found gone (_watch_hooks)
+        self._closed = False
         self._escapes: list[float] = []
         # macOS: what keys typed here mean to a PC, where that differs (Option+D
         # types "∂" but is Alt+D to a PC; the Spotlight key is F4): the host's
@@ -159,6 +161,8 @@ class PynputCapture:
         if self._shortcuts is not None:
             self._shortcuts.restore_left_over()
         self._restart()
+        if sys.platform == "win32":
+            threading.Thread(target=self._watch_hooks, name="curslink-hooks", daemon=True).start()
 
     def stop(self) -> None:
         with self._lock:
@@ -172,6 +176,7 @@ class PynputCapture:
 
     def close(self) -> None:
         """Stop for good: the cursor shows again, and macOS's shortcuts work."""
+        self._closed = True
         self.stop()
         if self._shortcuts is not None:
             self._shortcuts.set_off(False)
@@ -311,6 +316,57 @@ class PynputCapture:
         if self._grabbed:
             self.set_grab(False)
 
+    def _take_back_soon(self, why: str) -> None:
+        """take_back() from a listener's callback: on a thread of its own,
+        as it stops and restarts the very listener that's calling."""
+        if self._grabbed:
+            threading.Thread(target=self.take_back, args=(why,), name="curslink-take-back", daemon=True).start()
+
+    def _watch_hooks(self) -> None:
+        """Windows: while input is grabbed the hooks hold the cursor still
+        at the park point. Windows quietly takes a low-level hook away when
+        it answers too slowly (LowLevelHooksTimeout), and then the hidden
+        cursor moves and the keys go to this PC's apps, while input still
+        looks grabbed: the cursor was gone and Escape did nothing. If the
+        cursor wanders off the park point, put the hooks back."""
+        seen: tuple[float, tuple[float, float]] | None = None  # (grab it's for, where the cursor sat)
+        lost: list[float] = []
+        while not self._closed:
+            time.sleep(HOOK_CHECK_S)
+            if not self._grabbed or self._controller is None or time.monotonic() - self._grabbed_at < 0.5:
+                continue
+            try:
+                x, y = self._controller.position
+            except Exception:
+                continue
+            # Where the OS put the cursor for this grab (the park point, or
+            # as near as the screen allows), read once it has settled.
+            if seen is None or seen[0] != self._grabbed_at:
+                px, py = self.park_at
+                if abs(x - px) + abs(y - py) <= HOOK_DRIFT_PX:
+                    seen = (self._grabbed_at, (x, y))
+                    continue
+                seen = (self._grabbed_at, (px, py))
+            px, py = seen[1]
+            if abs(x - px) + abs(y - py) <= HOOK_DRIFT_PX:
+                continue
+            self.hooks_lost += 1
+            now = time.monotonic()
+            lost = [t for t in lost if now - t < 10.0] + [now]
+            log.warning("input: the cursor moved to (%d, %d) while held at (%d, %d): Windows dropped the "
+                        "input hooks; putting them back (%d time(s))", x, y, px, py, self.hooks_lost)
+            if not self._grabbed:
+                continue
+            if len(lost) >= HOOK_LOST_MAX:
+                self.take_back("Windows kept dropping the input hooks")
+                continue
+            try:
+                self._restart()
+                self._controller.position = self.park_at
+            except Exception:
+                log.exception("input: couldn't put the input hooks back")
+                self.take_back("the input hooks couldn't be put back")
+
     def _escape_pressed(self) -> bool:
         """Escape three times within ESCAPE_WINDOW_S?"""
         now = time.monotonic()
@@ -405,6 +461,9 @@ class PynputCapture:
             return
         if self._mac:
             return  # the event tap reads the deltas
+        if not self.loop_alive():
+            self._take_back_soon("Curslink stopped forwarding input")
+            return
         px, py = self.park_at
         dx, dy = x - px, y - py
         if dx or dy:
@@ -437,6 +496,17 @@ class PynputCapture:
         if injected or self._handler is None:
             return
         name = key_to_name(key)
+        if not self._mac and self._grabbed:
+            # The same safety nets as the Mac's event tap (_mac_key_tap), on
+            # the listener's own thread: Escape three times quickly always
+            # brings input home, and so does a stuck loop. (Before 0.4.72
+            # they were only on macOS, so a Windows host had no way back.)
+            if pressed and name == "esc" and self._escape_pressed():
+                self._take_back_soon("Escape pressed three times")
+                return
+            if not self.loop_alive():
+                self._take_back_soon("Curslink stopped forwarding input")
+                return
         if name and self._mac:
             name = self._mac_key(key, name, pressed)
         if name:
@@ -491,6 +561,9 @@ _MAC_KEY_DOWN = 10                         # kCGEventKeyDown
 _MAC_KEYCODE = 9                           # kCGKeyboardEventKeycode
 _MAC_ESCAPE = 53
 ESCAPE_WINDOW_S = 1.5   # Escape three times within this: input comes home
+HOOK_CHECK_S = 0.25     # Windows: how often the parked cursor is checked (_watch_hooks)
+HOOK_DRIFT_PX = 24      # ... and how far off the park point means the hooks are gone
+HOOK_LOST_MAX = 4       # gone this often in 10 s: input comes home instead
 HOLD_MAX_S = 60.0       # a button-up held for a drop goes after this at most
 _MAC_TAP_DISABLED = frozenset({0xFFFFFFFE, 0xFFFFFFFF})
 _MAC_DELTA_X, _MAC_DELTA_Y = 4, 5          # kCGMouseEventDeltaX / DeltaY

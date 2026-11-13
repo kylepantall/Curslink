@@ -863,3 +863,84 @@ def test_agent_passes_identify_on_to_the_app():
     session.on_identify = got.append
     session.handle(Message("identify", {"screens": [{"screen": "main", "number": 1}]}))
     assert got == [{"screens": [{"screen": "main", "number": 1}]}]
+
+
+def _pc_capture(monkeypatch):
+    import curslink.inputs.pynput_backend as pb
+
+    capture = pb.PynputCapture(park_at=(7, 8))
+    capture._mac = False
+    capture._hider = None
+    restarts = []
+    capture._restart = lambda: restarts.append(1)
+    keys = []
+
+    class Handler:
+        def on_key(self, name, pressed):
+            keys.append((name, pressed))
+
+        def on_motion(self, dx, dy):
+            keys.append(("motion", dx, dy))
+
+        def on_pointer(self, x, y):
+            pass
+
+    capture._handler = Handler()
+    monkeypatch.setattr(pb, "key_to_name", lambda key: key)  # keys by name, no pynput (no display here)
+    monkeypatch.setattr(pb.PynputCapture, "_take_back_soon", lambda self, why: self.take_back(why))
+    return pb, capture, keys, restarts
+
+
+def test_escape_three_times_brings_input_home_on_windows_and_linux_too(monkeypatch):
+    # 0.4.71: a Windows host had no way back; the safety nets were Mac-only.
+    pb, capture, keys, _ = _pc_capture(monkeypatch)
+    capture.set_grab(True)
+    for _ in range(2):
+        capture._on_key("esc", True, False)
+        capture._on_key("esc", False, False)
+    assert capture._grabbed and ("esc", True) in keys   # still forwarded
+    capture._on_key("esc", True, False)
+    assert not capture._grabbed and capture.took_back
+    capture.took_back = False
+    capture.set_grab(True)
+    for _ in range(3):
+        capture._on_key("esc", True, True)               # injected: not ours to count
+    assert capture._grabbed
+
+
+def test_pc_input_comes_home_when_the_loop_forwarding_it_is_stuck(monkeypatch):
+    pb, capture, keys, _ = _pc_capture(monkeypatch)
+    capture.set_grab(True)
+    capture.loop_alive = lambda: False
+    capture._on_move(20, 20)
+    assert not capture._grabbed and capture.took_back
+    capture.took_back = False
+    capture.set_grab(True)
+    capture._on_key("a", True, False)
+    assert not capture._grabbed and capture.took_back
+
+
+def test_windows_puts_dropped_hooks_back_and_gives_up_if_they_keep_going(monkeypatch):
+    pb, capture, _, restarts = _pc_capture(monkeypatch)
+
+    class Controller:
+        position = (7, 8)
+
+    controller = capture._controller = Controller()
+    capture.set_grab(True)
+    capture._grabbed_at -= 1
+    restarts.clear()
+    checks = {"n": 0}
+
+    def sleep(_s):
+        checks["n"] += 1
+        if checks["n"] >= 2:
+            controller.position = (300, 300)  # the hook is gone: the cursor moves (each time)
+        if checks["n"] > 12:
+            capture._closed = True
+
+    capture._restart = lambda: restarts.append(1)
+    monkeypatch.setattr(pb.time, "sleep", sleep)
+    capture._watch_hooks()
+    assert capture.hooks_lost >= 1 and restarts
+    assert not capture._grabbed and capture.took_back  # gave up after HOOK_LOST_MAX
