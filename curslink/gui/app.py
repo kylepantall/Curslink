@@ -22,7 +22,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 
 from curslink import __version__, diagnostics, update
 from curslink.config import ConfigError, agent_config, host_config, load_raw
-from curslink.configedit import ConfigFile, is_whole, role_of
+from curslink.configedit import ConfigFile, is_whole, role_of, screens_note, sync_agent_screens
 from curslink.gui.common import Status, app_icon, call_on_main, in_background, main_thread
 from curslink.gui.prefs import Prefs
 from curslink.gui.service import FAILED, RUNNING, STARTING, STOPPED, Service
@@ -59,6 +59,7 @@ class Curslink(QObject):
         self.calibrating = False  # host: the service gave the camera to calibration
         self.service.event.connect(self._on_calibrating)
         self.service.event.connect(self._on_paired)
+        self.service.event.connect(self._on_agent_screens)
         self._look = None
         self._hint = None
         self._identify = None
@@ -249,6 +250,30 @@ class Curslink(QObject):
             self.config_saved()
         else:
             self.config_changed.emit()  # the Devices page lists it
+
+    def _on_agent_screens(self, event: dict) -> None:
+        """Host: an agent connected or its monitors changed. Lay out each
+        monitor it reported, so the pointer can reach one attached to it."""
+        if event.get("event") != "agent" or not event.get("connected") or self.role != "host":
+            return
+        screens = event.get("screens")
+        device_id = str(event.get("device_id") or "")
+        if not device_id or not isinstance(screens, list) or not screens:
+            return
+        try:
+            done = sync_agent_screens(self.config(), device_id, screens)
+        except Exception:
+            log.exception("couldn't lay out %s's screens", device_id)
+            return
+        if done is None:
+            return
+        name = str(event.get("name") or device_id)
+        note = screens_note(name, done)
+        log.info("%s", note)
+        self.status.add_log("info", note)
+        if self.tray is not None and done["added"]:
+            self.tray.say(f"{name}'s screens", note)
+        self.config_saved()
 
     def _on_look(self, event: dict) -> None:
         """Agent: the host's calibration wants "Look here" on one of our screens."""

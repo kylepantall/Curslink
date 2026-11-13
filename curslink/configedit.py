@@ -367,6 +367,83 @@ class ConfigFile:
             raise KeyError(device_id)
         device["screens"] = _screens_aot(screens)
 
+    def sync_screens(self, device_id: str, reported: list[dict[str, Any]]) -> dict[str, list[str]] | None:
+        """Make ``device_id``'s screens the ones it reported (its OS screens,
+        as in hello.screens): a monitor plugged into it gets a screen, one
+        taken away loses its screen, and each keeps its OS size and place.
+
+        Screens already laid out keep where they are on the canvas; a new
+        one goes where it sits in that device's own display arrangement,
+        next to one that's already laid out (or where the device was, for
+        the 1920x1080 placeholder it got when it reported nothing).
+
+        Returns ``{"added", "removed", "changed"}`` (screen ids), or None
+        when nothing changed."""
+        device = self._device(device_id)
+        if device is None:
+            raise KeyError(device_id)
+        wanted = []
+        for i, s in enumerate(reported or []):
+            if not isinstance(s, dict) or not all(
+                    isinstance(s.get(k), (int, float)) and not isinstance(s.get(k), bool)
+                    for k in ("x", "y", "width", "height")):
+                continue
+            if s["width"] <= 0 or s["height"] <= 0:
+                continue
+            sid = str(s.get("id") or s.get("name") or f"screen{i + 1}")
+            if sid in (w["id"] for w in wanted):
+                continue
+            wanted.append({"id": sid, "os_x": int(s["x"]), "os_y": int(s["y"]),
+                           "width": int(s["width"]), "height": int(s["height"])})
+        if not wanted:
+            return None
+        current = {}
+        for i, s in enumerate(device.get("screens", [])):
+            sid = str(s.get("id", f"screen{i}"))
+            current[sid] = {"id": sid, "x": int(s.get("x", 0)), "y": int(s.get("y", 0)),
+                            "width": int(s.get("width", 0)), "height": int(s.get("height", 0)),
+                            "os_x": int(s.get("os_x", 0)), "os_y": int(s.get("os_y", 0)),
+                            **({"z": int(s["z"])} if "z" in s else {})}
+        kept = [w for w in wanted if w["id"] in current]
+        if kept:
+            anchor = next((w for w in kept if w["id"] == "main"), kept[0])
+            base_x = current[anchor["id"]]["x"] - anchor["os_x"]
+            base_y = current[anchor["id"]]["y"] - anchor["os_y"]
+        else:
+            base_x = min((c["x"] for c in current.values()), default=0) - min(w["os_x"] for w in wanted)
+            base_y = min((c["y"] for c in current.values()), default=0) - min(w["os_y"] for w in wanted)
+        screens, added, changed = [], [], []
+        for w in wanted:
+            old = current.get(w["id"])
+            if old is None:
+                screens.append({"id": w["id"], "x": base_x + w["os_x"], "y": base_y + w["os_y"],
+                                "width": w["width"], "height": w["height"], "os_x": w["os_x"], "os_y": w["os_y"]})
+                added.append(w["id"])
+                continue
+            new = {**old, "width": w["width"], "height": w["height"], "os_x": w["os_x"], "os_y": w["os_y"]}
+            if new != old:
+                changed.append(w["id"])
+            screens.append(new)
+        removed = [sid for sid in current if sid not in {w["id"] for w in wanted}]
+        if not (added or removed or changed):
+            return None
+        self.replace_screens(device_id, screens)
+        return {"added": added, "removed": removed, "changed": changed}
+
+    def move_clear_of_others(self, device_id: str) -> None:
+        """Move ``device_id``'s screens, together, to the right of every other
+        device's (as a new device goes), so none overlap."""
+        device = self._device(device_id)
+        box = self._box(device_id)
+        if device is None or box is None:
+            raise KeyError(device_id)
+        right = max((int(s.get("x", 0)) + int(s.get("width", 0))
+                     for d in self.devices() if d.get("id") != device_id for s in d.get("screens", [])),
+                    default=box[0])
+        dx = right - box[0]
+        for s in device.get("screens", []):
+            s["x"] = int(s.get("x", 0)) + dx
+
     def _box(self, device_id: str) -> tuple[int, int, int, int] | None:
         device = self._device(device_id)
         screens = list(device.get("screens", [])) if device is not None else []
@@ -564,6 +641,48 @@ class ConfigFile:
         before a switch of roles. Without a shared secret they can't connect."""
         paired = {p.device_id for p in peers}
         return [d for d in self.devices() if d.get("id") != host_id and d.get("id") not in paired]
+
+
+def sync_agent_screens(cfg: ConfigFile, device_id: str, reported: list[dict[str, Any]]) -> dict[str, list[str]] | None:
+    """Host: lay out the screens an agent reported (:meth:`ConfigFile.sync_screens`)
+    and save, if that changed anything and still makes a layout the host
+    can run (moving the device clear of the others if its screens, as they
+    are, would overlap theirs). Returns what changed, or None."""
+    from curslink.config import ConfigError, parse_layout
+
+    if not cfg.has_device(device_id):
+        return None
+    done = cfg.sync_screens(device_id, reported)
+    if done is None:
+        return None
+    try:
+        parse_layout(cfg.raw())
+    except ConfigError:
+        cfg.move_clear_of_others(device_id)
+        try:
+            parse_layout(cfg.raw())
+        except ConfigError as exc:
+            log.warning("couldn't lay out %s's screens: %s", device_id, exc)
+            cfg.reload()
+            return None
+        done = {**done, "moved": True}
+    cfg.save()
+    return done
+
+
+def screens_note(name: str, done: dict[str, Any]) -> str:
+    """What :func:`sync_agent_screens` did, in words."""
+    parts = []
+    if done.get("added"):
+        parts.append(f"added {', '.join(done['added'])}")
+    if done.get("removed"):
+        parts.append(f"took away {', '.join(done['removed'])} (unplugged)")
+    if done.get("changed"):
+        parts.append(f"resized {', '.join(done['changed'])}")
+    text = f"Updated {name}'s screens on the Layout page to match its monitors: " + "; ".join(parts) + "."
+    if done.get("moved"):
+        text += " They'd have overlapped yours, so it's now to the right of your screens: arrange it there."
+    return text
 
 
 def touching_edges(devices: list[dict[str, Any]], tolerance: int = 64) -> list[tuple[str, str, str]]:
