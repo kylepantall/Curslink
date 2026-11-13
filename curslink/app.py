@@ -565,9 +565,12 @@ def start_file_drags(cfg: HostConfig, router: Router, server: HostServer, overla
     from curslink.files.native import clean_old
 
     # A real drag of files arriving from an agent needs the real button-up
-    # held back until they're all here, which the Mac's event tap can do.
+    # held back until they're all here, which the Mac's event tap and the
+    # Windows mouse hook can do. (Before 0.4.76 a Windows host had no real
+    # drag: a file from a Mac only showed a card and went to Downloads, so
+    # apps took no drop and showed no drop feedback.)
     native_press = follow = None
-    if sys.platform == "darwin":
+    if sys.platform in ("darwin", "win32"):
         from curslink.files.focus import FocusFollower
         from curslink.inputs.pynput_backend import press_left_here as native_press
 
@@ -1223,7 +1226,7 @@ async def run_agent(cfg: AgentConfig) -> None:
         overlay.start()
     from curslink.smoothing import PointerSmoother
 
-    sink = PynputSink(cfg.modifier_map)
+    sink = PynputSink(cfg.modifier_map, post_moves=True)
     if sys.platform == "win32":
         # The input helper, if it's switched on, reaches admin apps and UAC
         # prompts (see curslink.winhelper); without it, input goes in here.

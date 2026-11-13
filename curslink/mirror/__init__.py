@@ -526,7 +526,8 @@ class CursorPark:
             return
         self._parked_at = self.session.entered
         try:
-            self.session.sink.move_to(*self.point)
+            sink = self.session.sink
+            getattr(sink, "park", sink.move_to)(*self.point)
         except Exception:
             log.debug("couldn't move the cursor aside", exc_info=True)
 

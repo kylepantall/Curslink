@@ -230,11 +230,13 @@ class PynputCapture:
                 )
             else:
                 suppress = self._grabbed
+                extra = {"win32_event_filter": self._win_mouse_filter} if sys.platform == "win32" else {}
                 self._mouse_listener = mouse.Listener(
                     on_move=self._on_move,
                     on_click=self._on_click,
                     on_scroll=self._on_scroll,
                     suppress=suppress,
+                    **extra,
                 )
                 self._key_listener = keyboard.Listener(
                     on_press=lambda k, injected=False: self._on_key(k, True, injected),
@@ -303,7 +305,10 @@ class PynputCapture:
         """Let go of a button-up held back by ``hold_left_up`` (now)."""
         if self._held_up:
             self._held_up = False
-            x, y = mac_cursor()
+            if self._mac:
+                x, y = mac_cursor()
+            else:
+                x, y = _win_cursor_pos() or (0, 0)  # (Windows lets go where the cursor is anyway)
             _drag_release(x, y)
 
     def take_back(self, why: str) -> None:
@@ -400,6 +405,28 @@ class PynputCapture:
             except Exception:
                 log.exception("input: couldn't put the input hooks back")
                 self.take_back("the input hooks couldn't be put back")
+
+    def _win_mouse_filter(self, msg, data):
+        """Windows: the mouse hook's first look at every event (on the hook's
+        thread, so quick). A real left button-up is held back while a file
+        drop waits for its files (``hold_left_up``, as the Mac's event tap
+        does), and let go by ``release_held()``: reported as let go, kept
+        from Windows, so the drag it ends carries on until then."""
+        if msg not in (_WM_LBUTTONDOWN, _WM_LBUTTONUP) or (getattr(data, "flags", 0) & _LLMHF_INJECTED_ANY):
+            return True
+        if self._held_up and (msg == _WM_LBUTTONDOWN or time.monotonic() - self._held_at > HOLD_MAX_S):
+            log.warning("drop: letting go of the held button (%s)",
+                        "clicked again" if msg == _WM_LBUTTONDOWN else "waited too long")
+            self.release_held()
+        if msg == _WM_LBUTTONUP and not self._grabbed and self.hold_left_up():
+            self._held_up = True
+            self._held_at = time.monotonic()
+            if self._handler is not None:
+                self._handler.on_button("left", False)  # the drop: suppressed events skip the callbacks
+            listener = self._mouse_listener
+            if listener is not None:
+                listener.suppress_event()  # raises: pynput's hook swallows the event
+        return True
 
     def _escape_pressed(self) -> bool:
         """Escape three times within ESCAPE_WINDOW_S?"""
@@ -530,15 +557,18 @@ class PynputCapture:
         if injected or self._handler is None:
             return
         name = key_to_name(key)
-        if not self._mac and self._grabbed:
+        if not self._mac and (self._grabbed or self._held_up):
             # The same safety nets as the Mac's event tap (_mac_key_tap), on
             # the listener's own thread: Escape three times quickly always
             # brings input home, and so does a stuck loop. (Before 0.4.72
             # they were only on macOS, so a Windows host had no way back.)
             if pressed and name == "esc" and self._escape_pressed():
+                if self._held_up and not self._grabbed:
+                    log.warning("drop: letting go of the held button (Escape pressed three times)")
+                    self.release_held()
                 self._take_back_soon("Escape pressed three times")
                 return
-            if not self.loop_alive():
+            if self._grabbed and not self.loop_alive():
                 self._take_back_soon("Curslink stopped forwarding input")
                 return
         if name and self._mac:
@@ -748,6 +778,40 @@ def _mac_warp(x: float, y: float) -> None:
         log.debug("couldn't warp the cursor", exc_info=True)
 
 
+def _mac_post_move(x: int, y: int, held: set[str], last: tuple[int, int] | None) -> bool:
+    """Move the cursor to (x, y) with a real mouse event, as a mouse would:
+    mouse-dragged while a button is held (so a window being dragged moves,
+    and a drag of files begins and moves), mouse-moved otherwise (so what's
+    under it hovers). False if it couldn't be posted."""
+    try:
+        import Quartz
+
+        # What the window server thinks is held: the host's button-ups don't
+        # all come through button() (a drag sent to the host ends here with
+        # Escape and a posted button-up), and a stale "held" would turn
+        # every move after it into a drag.
+        state = Quartz.kCGEventSourceStateCombinedSessionState
+        held = {name for name, number in (("left", 0), ("right", 1), ("middle", 2))
+                if Quartz.CGEventSourceButtonState(state, number)} or (held & {"x1", "x2"})
+        if "left" in held:
+            kind, button = Quartz.kCGEventLeftMouseDragged, Quartz.kCGMouseButtonLeft
+        elif "right" in held:
+            kind, button = Quartz.kCGEventRightMouseDragged, Quartz.kCGMouseButtonRight
+        elif held:
+            kind, button = Quartz.kCGEventOtherMouseDragged, Quartz.kCGMouseButtonCenter
+        else:
+            kind, button = Quartz.kCGEventMouseMoved, Quartz.kCGMouseButtonLeft
+        ev = Quartz.CGEventCreateMouseEvent(None, kind, (float(x), float(y)), button)
+        if last is not None:  # some apps (and games) read how far it moved
+            Quartz.CGEventSetIntegerValueField(ev, _MAC_DELTA_X, int(x - last[0]))
+            Quartz.CGEventSetIntegerValueField(ev, _MAC_DELTA_Y, int(y - last[1]))
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
+        return True
+    except Exception:  # pragma: no cover - macOS only
+        log.debug("couldn't post the mouse move", exc_info=True)
+        return False
+
+
 def _mac_sets_cursor_in_background(cg, cf) -> None:
     cg._CGSDefaultConnection.restype = ctypes.c_int
     cid = cg._CGSDefaultConnection()
@@ -904,9 +968,21 @@ def _mac_no_event_suppression() -> None:
 class PynputSink:
     """Injects input into this machine's OS."""
 
-    def __init__(self, modifier_map: dict[str, str] | None = None):
+    post_moves = False
+    _posted_at: tuple[int, int] | None = None
+
+    def __init__(self, modifier_map: dict[str, str] | None = None, post_moves: bool = False):
+        """``post_moves``: this computer is being driven from another one (an
+        agent). On a Mac every move is then posted as a real mouse event,
+        mouse-dragged while a button is held, so windows follow a held drag,
+        Finder starts dragging files and the apps under the pointer see it
+        (0.4.75 and before warped it there with no event: a dragged window
+        stayed put until let go, and a file drag never began)."""
         from pynput import keyboard, mouse
 
+        self.post_moves = post_moves
+        self._down: set[str] = set()  # buttons held, as this sink pressed them
+        self._posted_at: tuple[int, int] | None = None
         self._mouse = mouse.Controller()
         self._keyboard = keyboard.Controller()
         self.modifier_map = modifier_map or {}
@@ -918,6 +994,10 @@ class PynputSink:
     def move_to(self, x: int, y: int) -> None:
         if sys.platform == "win32" and _win_move(x, y):
             return
+        if sys.platform == "darwin" and self.post_moves:
+            if _mac_post_move(x, y, self.__dict__.get("_down", set()), self._posted_at):
+                self._posted_at = (x, y)
+                return
         if sys.platform == "darwin":
             # Input coming home: put the cursor where it crossed the edge by
             # warping it (what Synergy does), then tie it back to the mouse,
@@ -926,8 +1006,18 @@ class PynputSink:
             # the parked position and leave the cursor mid-screen.
             _mac_warp(x, y)
             _mac_attach_cursor(True)
+            self._posted_at = None
             return
         self._mouse.position = (x, y)
+
+    def park(self, x: int, y: int) -> None:
+        """Put the cursor out of the way (input went to another device):
+        on a Mac a warp, so nothing under the park point hovers."""
+        if sys.platform == "darwin":
+            _mac_warp(x, y)
+            self._posted_at = None
+            return
+        self.move_to(x, y)
 
     def button(self, button: str, pressed: bool) -> None:
         from pynput import mouse
@@ -937,6 +1027,8 @@ class PynputSink:
         if target is None:
             log.debug("button %s not supported on this platform", button)
             return
+        down = self.__dict__.setdefault("_down", set())
+        (down.add if pressed else down.discard)(button)
         (self._mouse.press if pressed else self._mouse.release)(target)
 
     def scroll(self, dx: float, dy: float) -> None:
@@ -983,8 +1075,21 @@ def mac_cursor() -> tuple[float, float]:
 
 
 def press_left_here() -> None:
-    """macOS: post a left button-down where the cursor is (to start a real
-    drag from the overlay helper's window there)."""
+    """Post a left button-down where the cursor is (to start a real drag
+    from the overlay helper's window there).
+
+    Windows: the button is physically held too, but its down was kept from
+    Windows while input was on the other computer, so Windows thinks it's
+    up; this down (injected, so the hooks let it by) makes it held, and
+    the helper's drag starts on it. The real button-up then ends the drag."""
+    if sys.platform == "win32":
+        try:
+            inp = _INPUT(type=0)
+            inp.mi = _MOUSEINPUT(0, 0, 0, _MOUSEEVENTF_LEFTDOWN, 0, 0)
+            ctypes.windll.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT))
+        except Exception:  # pragma: no cover - Windows only
+            log.warning("couldn't press the button to start the drag", exc_info=True)
+        return
     try:
         import Quartz
 
@@ -1089,7 +1194,9 @@ class _INPUT(ctypes.Structure):
 
 
 _MOUSEEVENTF_MOVE, _MOUSEEVENTF_ABSOLUTE, _MOUSEEVENTF_VIRTUALDESK = 0x0001, 0x8000, 0x4000
-_MOUSEEVENTF_LEFTUP = 0x0004
+_MOUSEEVENTF_LEFTDOWN, _MOUSEEVENTF_LEFTUP = 0x0002, 0x0004
+_WM_LBUTTONDOWN, _WM_LBUTTONUP = 0x0201, 0x0202
+_LLMHF_INJECTED_ANY = 0x00000001 | 0x00000002  # LLMHF_INJECTED | LLMHF_LOWER_IL_INJECTED
 _MOUSEEVENTF_WHEEL, _MOUSEEVENTF_HWHEEL, _WHEEL_DELTA = 0x0800, 0x1000, 120
 def win_absolute(x: float, y: float, vx: int, vy: int, vw: int, vh: int) -> tuple[int, int]:
     """A virtual-desktop pixel -> SendInput's 0..65535 absolute coordinates."""
