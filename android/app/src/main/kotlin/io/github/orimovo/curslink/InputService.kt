@@ -56,6 +56,7 @@ class InputService : AccessibilityService() {
     private var active = false
     // "Keep the screen on" while linked (see holdScreen).
     private var holding = false
+    private var screenWake: PowerManager.WakeLock? = null
     private var lastInput = 0L
     private val mods = mutableSetOf<Keys.Mod>()
     private var pointer = PointF()
@@ -84,6 +85,7 @@ class InputService : AccessibilityService() {
 
     override fun onDestroy() {
         instance = null
+        screenLock(false)
         view?.let { runCatching { wm.removeView(it) } }
         mirrorView?.let { runCatching { wm.removeView(it) } }
         touchWatch?.let { runCatching { wm.removeView(it) } }
@@ -270,10 +272,32 @@ class InputService : AccessibilityService() {
         if (holding == on) return@post
         holding = on
         AppLog.i(TAG, if (on) "keeping the screen on while linked" else "the screen can sleep again")
+        screenLock(on)
         when {
             on -> keepScreenOn(true)
             SystemClock.uptimeMillis() - lastInput < KEEP_ON_MS -> keepScreenOn(true)  // the usual 2 minutes after use
             else -> keepScreenOn(false)
+        }
+    }
+
+    /** The overlay's FLAG_KEEP_SCREEN_ON alone isn't honoured everywhere (an
+     *  overlay that draws nothing, or one the system dropped), so a screen
+     *  wake lock holds it too while "Keep the screen on" is in force. */
+    @Suppress("DEPRECATION")
+    private fun screenLock(on: Boolean) {
+        val held = screenWake
+        if (on) {
+            if (held?.isHeld == true) return
+            val pm = getSystemService(POWER_SERVICE) as PowerManager
+            screenWake = runCatching {
+                pm.newWakeLock(PowerManager.SCREEN_BRIGHT_WAKE_LOCK, "curslink:keep-screen-on").apply {
+                    setReferenceCounted(false)
+                    acquire()
+                }
+            }.onFailure { AppLog.w(TAG, "couldn't hold a screen wake lock", it) }.getOrNull()
+        } else {
+            runCatching { if (held?.isHeld == true) held.release() }
+            screenWake = null
         }
     }
 
