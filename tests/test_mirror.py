@@ -393,6 +393,10 @@ def test_windows_captures_copy_the_screen_themselves_at_most_win_shot_fps(qapp, 
     def no_qt_grab(*_a):
         raise AssertionError("Qt's grab copies with CAPTUREBLT")
 
+    import types
+
+    # As on Windows: past the macOS capture paths too, on a Mac runner.
+    monkeypatch.setattr(helper, "sys", types.SimpleNamespace(platform="win32"))
     monkeypatch.setattr(helper, "win_copies", lambda: True)
     monkeypatch.setattr(helper, "win_grab", fake_grab)
     screen = QGuiApplication.primaryScreen()
