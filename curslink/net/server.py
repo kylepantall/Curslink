@@ -92,6 +92,9 @@ class HostServer:
         self.ssl_context = ssl_context
         self.on_connect = on_connect
         self.on_disconnect = on_disconnect
+        # (connection): an agent's monitors changed (a screens frame); its
+        # .screens and .screen_mm are the new ones.
+        self.on_screens: Callable[[AgentConnection], None] = lambda conn: None
         # (device_id, facing): an agent's own camera sees the user facing it or not.
         self.on_facing: Callable[[str, bool], None] = lambda device_id, facing: None
         # (device_id, file_result frame data): an agent saved dropped files, or couldn't.
@@ -299,7 +302,7 @@ class HostServer:
                 name=str(hello.get("name", device_id)),
                 platform=str(hello.get("platform", "?")),
                 writer=writer,
-                screens=list(hello.get("screens", []) or []),
+                screens=[s for s in (hello.get("screens") or []) if isinstance(s, dict)][:16],
                 screen_mm=[m for m in (hello.get("screen_mm") or []) if isinstance(m, dict)][:16],
                 last_seen=loop.time(),
                 camera=hello.get("camera") is True,
@@ -382,6 +385,12 @@ class HostServer:
         elif msg.t == "netstats":
             conn.netstats = dict(msg.data)
             conn.netstats_at = time.monotonic()
+        elif msg.t == "screens":
+            conn.screens = [x for x in msg.data["screens"] if isinstance(x, dict)][:16]
+            if isinstance(msg.get("screen_mm"), list):
+                conn.screen_mm = [m for m in msg.data["screen_mm"] if isinstance(m, dict)][:16]
+            log.info("agent %s now has %d screen(s)", conn.device_id, len(conn.screens))
+            self.on_screens(conn)
         elif msg.t == "facing":
             conn.facing = msg.data["facing"]
             self.on_facing(conn.device_id, conn.facing)

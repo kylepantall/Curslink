@@ -331,8 +331,14 @@ async def run_host(cfg: HostConfig) -> None:
         router.on_disconnect(device_id)
         events.emit("agent", device_id=device_id, connected=False, paused=device_id in server.paused)
 
+    def agent_screens(conn) -> None:
+        # Its monitors changed: the app updates the layout to match.
+        events.emit("agent", device_id=conn.device_id, name=conn.name, platform=conn.platform,
+                    connected=True, screens=conn.screens)
+
     server.on_connect = agent_connected
     server.on_disconnect = agent_disconnected
+    server.on_screens = agent_screens
     router.listeners.append(lambda e: events.emit(
         "switch", **{"from": e.from_device, "to": e.to_device, "screen": e.screen.id, "reason": e.reason}))
     remember_positions(router)
@@ -702,6 +708,14 @@ def start_mirror(cfg: HostConfig, router: Router, server: HostServer, overlay, l
         host.refresh()
 
     server.on_connect, server.on_disconnect = on_connect, on_disconnect
+    screens_changed = server.on_screens
+
+    def on_screens(conn) -> None:
+        screens_changed(conn)
+        if cfg.layout.set_physical(conn.device_id, getattr(conn, "screen_mm", [])):
+            log_sizes(cfg.layout, conn.device_id)
+
+    server.on_screens = on_screens
     from curslink.screensize import physical_sizes
 
     if cfg.layout.set_physical(router.local_id, physical_sizes()):

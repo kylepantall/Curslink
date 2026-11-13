@@ -174,7 +174,7 @@ def add_to_layout(app, device_id: str, name: str, paired_screens=None) -> bool:
     agent = app.status.agents.get(device_id)
     reported = (agent.screens if agent else []) or paired_screens or []
     screens = [
-        {"id": s.get("name") or f"screen{i + 1}", "x": s["x"], "y": s["y"],
+        {"id": s.get("id") or s.get("name") or f"screen{i + 1}", "x": s["x"], "y": s["y"],
          "width": s["width"], "height": s["height"]}
         for i, s in enumerate(reported)
         if isinstance(s, dict) and all(isinstance(s.get(k), (int, float)) and not isinstance(s.get(k), bool)

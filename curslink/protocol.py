@@ -104,6 +104,10 @@ Agent -> host
     mirror_tune {id, mx, my} | {id, grow, ax, ay}
                                        the mirror being adjusted was dragged or zoomed
     mirror_ack   {id}                  a frame of a mirror it shows was shown
+    screens      {screens, screen_mm?}  its monitors changed (one plugged in, taken
+                                       away or moved): all of them, as in hello;
+                                       only to a host whose welcome.features has
+                                       "screens"
     netstats     {udp, loss_pct, rtt_ms, jitter_ms}
                                        how the link looks from the agent (every few
                                        seconds; only to a host whose welcome.features
@@ -164,6 +168,7 @@ MESSAGE_TYPES = frozenset(
         "mirror_pointer",
         "mirror_ack",
         "netstats",
+        "screens",
         "mirror_tune",
         "edge",
         "clip",
@@ -189,7 +194,7 @@ MESSAGE_TYPES = frozenset(
 BUTTONS = frozenset({"left", "right", "middle", "x1", "x2"})
 EFFECTS = frozenset({"pop", "blink", "none"})
 # What this host understands beyond the base protocol, sent in welcome.features.
-HOST_FEATURES = ("facing", "popups", "mirror", "netstats")
+HOST_FEATURES = ("facing", "popups", "mirror", "netstats", "screens")
 # What this agent understands beyond the base protocol, sent in hello.features.
 # An agent without "look" would reject a look frame as unknown and drop the
 # connection, so the host only sends one to agents that list it.
@@ -235,6 +240,9 @@ MIRROR_TILES_FEATURE = "mirror_tiles"
 # takes a move sent twice on a lossy link (MOVE2 datagrams, see
 # curslink.net.udp); a host that lists it takes netstats frames.
 NETSTATS_FEATURE = "netstats"
+# A host that takes a screens frame: an agent's monitors changed while it
+# was connected, so the layout can show the one just plugged in.
+SCREENS_FEATURE = "screens"
 # Clipboard sync (clip, clip_data; see curslink.clipboard). Listed by a host
 # in welcome.features and an agent in hello.features when it's turned on
 # there; clips only go between two that both list it.
@@ -344,6 +352,10 @@ def _validate(msg: Message) -> None:
             for key in ("a", "b", "at", "near"):
                 if not _is_number(d.get(key)):
                     raise ProtocolError(f"edge.{key} must be a number")
+    elif t == "screens":
+        screens = msg.data.get("screens")
+        if not isinstance(screens, list) or not all(isinstance(s, dict) for s in screens):
+            raise ProtocolError("screens.screens must be a list of objects")
     elif t == "netstats":
         if not isinstance(msg.data.get("udp"), bool):
             raise ProtocolError("netstats.udp must be a boolean")
