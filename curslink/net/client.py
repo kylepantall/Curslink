@@ -54,6 +54,9 @@ class AgentSession:
         self.on_look: Callable[[dict], None] = lambda data: None
         # The host's Layout page marking where screens overlap on ours.
         self.on_hint: Callable[[dict], None] = lambda data: None
+        # "Detect my screens" on the host: a number and name on each of our
+        # monitors for a few seconds (see curslink.gui.identify).
+        self.on_identify: Callable[[dict], None] = lambda data: None
         # The edge indicator (see curslink.edgehint); None = we don't draw it,
         # so hello doesn't offer the "edge" feature.
         self.on_edge: Callable[[dict], None] | None = None
@@ -168,6 +171,8 @@ class AgentSession:
             self.on_look(dict(msg.data))
         elif t == "hint":
             self.on_hint(dict(msg.data))
+        elif t == "identify":
+            self.on_identify(dict(msg.data))
         elif t == "edge":
             if self.on_edge is not None:
                 self.on_edge(dict(msg.data))

@@ -408,6 +408,8 @@ async def run_host(cfg: HostConfig) -> None:
             look_command(server, line[5:])
         elif line.startswith("hint "):
             hint_command(server, line[5:])
+        elif line.startswith("identify "):
+            identify_command(server, line[9:])
         elif line.startswith("fit "):
             fit_command(mirror, line[4:])
         elif line == "pick on":
@@ -971,6 +973,31 @@ def hint_command(server: HostServer, payload: str) -> None:
             server.send(device_id, "hint", hide=True)
 
 
+def identify_command(server: HostServer, payload: str) -> None:
+    """``identify {"devices": {device_id: {"screens": [...], "seconds": 4}}}``:
+    "Detect my screens" putting a number and name on each paired computer's
+    monitors (see curslink.gui.identify). Agents not listed get nothing."""
+    import json
+
+    try:
+        data = json.loads(payload)
+        devices = data.get("devices", {}) if isinstance(data, dict) else None
+        if not isinstance(devices, dict):
+            raise ValueError("no devices")
+    except ValueError as exc:
+        log.debug("bad identify command %r: %s", payload, exc)
+        return
+    for device_id in list(server.connections):
+        entry = devices.get(device_id)
+        if not isinstance(entry, dict) or not isinstance(entry.get("screens"), list) or not entry["screens"]:
+            continue
+        if not server.supports(device_id, "identify"):
+            log.info("%s's Curslink is too old to show which monitor is which", device_id)
+            continue
+        extra = {"seconds": entry["seconds"]} if isinstance(entry.get("seconds"), (int, float)) else {}
+        server.send(device_id, "identify", screens=entry["screens"], **extra)
+
+
 def start_gaze(cfg: HostConfig, arbiter: GazeArbiter, loop: asyncio.AbstractEventLoop):
     """This computer's camera. Calibrated, it tells which screen you look
     at; not calibrated, it still tells whether you face this computer, the
@@ -1213,6 +1240,7 @@ async def run_agent(cfg: AgentConfig) -> None:
     if native is not None:
         send_files_home(cfg, session, client, overlay, native, asyncio.get_running_loop())
     session.on_hint = lambda data: events.emit("hint", **data)
+    session.on_identify = lambda data: events.emit("identify", **data)
     mirror = None
     if mirror_on and overlay is not None:
         from curslink.mirror import CursorPark, LatestWriter, MirrorPeer
