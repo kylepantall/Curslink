@@ -978,3 +978,30 @@ def test_the_safety_nets_put_the_cursor_back_in_the_middle_of_this_screen(monkey
         capture._on_key("esc", True, False)
     assert not capture._grabbed and capture.took_back
     assert controller.position == (7, 8)
+
+
+def test_the_windows_host_and_agent_work_in_physical_pixels(monkeypatch):
+    # 0.4.74: the layout and the input hooks were in physical pixels but the
+    # process wasn't DPI aware, so the cursor was read and set in logical ones
+    # (1646x926 for Kyle's 2880x1620 at 175%): every delta while input was
+    # on the Mac carried about (+1080, +607) and the pointer shot into a corner.
+    import curslink.cli as cli
+
+    calls = []
+
+    class Call:
+        def __call__(self, ctx):
+            calls.append(ctx.value)
+            return 1
+
+    class User32:
+        SetProcessDpiAwarenessContext = Call()
+
+    monkeypatch.setattr(cli.sys, "platform", "win32")
+    monkeypatch.setattr(cli.ctypes, "WinDLL", lambda name, **kw: User32(), raising=False)
+    cli.windows_dpi_aware()
+    per_monitor_v2 = cli.ctypes.c_void_p(-4).value
+    assert calls == [per_monitor_v2]
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    cli.windows_dpi_aware()
+    assert calls == [per_monitor_v2]

@@ -1106,13 +1106,15 @@ _win_user32 = None
 
 
 def _win_cursor_pos() -> tuple[int, int] | None:
-    """Windows: GetCursorPos, quickly (called for every grabbed mouse report)."""
+    """Windows: where the cursor is in physical pixels, as the input hooks
+    report it whether or not this process is DPI aware, quickly (called for
+    every grabbed mouse report)."""
     global _win_user32
     try:
         if _win_user32 is None:
             _win_user32 = ctypes.WinDLL("user32", use_last_error=True)
         pt = _POINT()
-        if _win_user32.GetCursorPos(ctypes.byref(pt)):
+        if _win_user32.GetPhysicalCursorPos(ctypes.byref(pt)):
             return pt.x, pt.y
     except Exception:
         log.debug("GetCursorPos failed", exc_info=True)
@@ -1120,14 +1122,11 @@ def _win_cursor_pos() -> tuple[int, int] | None:
 
 
 def _win_move(x: int, y: int) -> bool:
-    # Deliberately not DPI aware: the layout gives a Windows screen in the
-    # coordinates Windows shows apps that aren't (logical pixels, e.g. a 4K
-    # screen at 200% is 1920x1080), which is also what SetCursorPos used
-    # before 0.4.9. Absolute SendInput coordinates are a fraction of the
-    # virtual desktop, so a logical position over the logical desktop lands
-    # in the right physical place. 0.4.9-0.4.11 made the process DPI aware,
-    # which read the same numbers as physical pixels: the pointer was boxed
-    # into the top-left part of a scaled screen and moved too slowly.
+    # In this process's pixels: physical ones, as the layout has them (the
+    # host and agent are DPI aware since 0.4.75, see cli.windows_dpi_aware;
+    # 0.4.9-0.4.11 tried it while layouts were still in logical pixels).
+    # Absolute SendInput coordinates are a fraction of the virtual desktop
+    # as this process sees it, so they land in the right place either way.
     try:
         user32 = ctypes.WinDLL("user32", use_last_error=True)
         vx, vy = user32.GetSystemMetrics(76), user32.GetSystemMetrics(77)
