@@ -944,3 +944,37 @@ def test_windows_puts_dropped_hooks_back_and_gives_up_if_they_keep_going(monkeyp
     capture._watch_hooks()
     assert capture.hooks_lost >= 1 and restarts
     assert not capture._grabbed and capture.took_back  # gave up after HOOK_LOST_MAX
+
+
+def test_windows_takes_deltas_from_where_the_held_cursor_really_is(monkeypatch):
+    # Kyle's PC held the cursor at (1442, 815) for a park point of (1440, 810):
+    # every mouse report carried (2, 5) extra and the pointer on the Mac crept
+    # into the bottom-right corner, where moving the mouse couldn't get it out.
+    pb, capture, moves, _ = _pc_capture(monkeypatch)
+    capture.park_at = (1440, 810)
+    monkeypatch.setattr(pb.sys, "platform", "win32")
+    monkeypatch.setattr(pb, "_win_cursor_pos", lambda: (1442, 815))
+    capture.set_grab(True)
+    capture._on_move(1442, 815)              # a report that didn't move
+    capture._on_move(1432, 815)              # 10 to the left
+    assert moves == [("motion", -10, 0)]
+    monkeypatch.setattr(pb, "_win_cursor_pos", lambda: None)  # can't tell: the park point
+    capture._on_move(1441, 810)
+    assert moves[-1] == ("motion", 1, 0)
+
+
+def test_the_safety_nets_put_the_cursor_back_in_the_middle_of_this_screen(monkeypatch):
+    # 0.4.73: Escape three times gave input back, but the cursor stayed where
+    # it was (hidden at the edge it left by). Now it comes back in the middle.
+    pb, capture, _, _ = _pc_capture(monkeypatch)
+
+    class Controller:
+        position = (0, 0)
+
+    controller = capture._controller = Controller()
+    capture.set_grab(True)
+    controller.position = (300, 1)
+    for _ in range(3):
+        capture._on_key("esc", True, False)
+    assert not capture._grabbed and capture.took_back
+    assert controller.position == (7, 8)

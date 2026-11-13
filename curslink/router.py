@@ -432,8 +432,12 @@ class Router:
             self._remote_buttons.clear()
             self.go_home("disconnect")
 
-    def go_home(self, reason: str) -> None:
-        x, y = self._last_pos.get(self.local_id, self.screen_for_home().center)
+    def go_home(self, reason: str, middle: bool = False) -> None:
+        """Input back to this computer, where it left it (or with ``middle``,
+        in the middle of its main screen: the safety nets, so the pointer
+        is easy to find)."""
+        home = self.screen_for_home().center
+        x, y = home if middle else self._last_pos.get(self.local_id, home)
         screen = self.layout.screen_at(x, y, self.local_id) or self.screen_for_home()
         self.switch_to(screen, x, y, reason)
 

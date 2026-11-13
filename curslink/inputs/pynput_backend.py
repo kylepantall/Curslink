@@ -308,13 +308,47 @@ class PynputCapture:
 
     def take_back(self, why: str) -> None:
         """Give this computer its own mouse and keyboard back, from any
-        thread, without the event loop (see loop_alive)."""
+        thread, without the event loop (see loop_alive): with the cursor in
+        the middle of this computer's main screen (the park point), showing,
+        so it's easy to find (the router brings input home there too)."""
         log.warning("input: %s; giving the mouse and keyboard back to this computer", why)
         self.took_back = True
         if self._held_up:
             self.release_held()
         if self._grabbed:
             self.set_grab(False)
+        try:
+            if self._mac:
+                _mac_warp(*self.park_at)
+                _mac_attach_cursor(True)
+                _mac_cursor_visible(True)
+            elif self._controller is not None:
+                self._controller.position = self.park_at
+            if self._hider is not None:
+                self._hider.show()
+            if sys.platform == "win32":
+                from curslink.cursorhide import restore_windows
+
+                restore_windows()
+        except Exception:
+            log.warning("input: couldn't put the cursor back in the middle", exc_info=True)
+
+    def _held_at_now(self) -> tuple[float, float]:
+        """Windows: where the cursor sits while grabbed, for the deltas.
+
+        Suppressing the hooks' moves holds the cursor wherever it was, which
+        isn't always quite the park point: Kyle's PC held it at (1442, 815)
+        for a park point of (1440, 810), and taking deltas from the park
+        point added (2, 5) to every mouse report. The pointer on the other
+        computer crept right and down at every report, slid along the bottom
+        and into a corner, and moving the mouse couldn't get it out. Asked
+        from within the hook, before the move happens, the cursor's own
+        position is exact (and stays right if the move does go through)."""
+        if sys.platform == "win32":
+            at = _win_cursor_pos()
+            if at is not None:
+                return at
+        return self.park_at
 
     def _take_back_soon(self, why: str) -> None:
         """take_back() from a listener's callback: on a thread of its own,
@@ -464,7 +498,7 @@ class PynputCapture:
         if not self.loop_alive():
             self._take_back_soon("Curslink stopped forwarding input")
             return
-        px, py = self.park_at
+        px, py = self._held_at_now()
         dx, dy = x - px, y - py
         if dx or dy:
             self._handler.on_motion(dx, dy)
@@ -1062,6 +1096,27 @@ def win_absolute(x: float, y: float, vx: int, vy: int, vw: int, vh: int) -> tupl
     nx = round((x - vx) * 65535 / max(1, vw - 1))
     ny = round((y - vy) * 65535 / max(1, vh - 1))
     return min(max(nx, 0), 65535), min(max(ny, 0), 65535)
+
+
+class _POINT(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+
+_win_user32 = None
+
+
+def _win_cursor_pos() -> tuple[int, int] | None:
+    """Windows: GetCursorPos, quickly (called for every grabbed mouse report)."""
+    global _win_user32
+    try:
+        if _win_user32 is None:
+            _win_user32 = ctypes.WinDLL("user32", use_last_error=True)
+        pt = _POINT()
+        if _win_user32.GetCursorPos(ctypes.byref(pt)):
+            return pt.x, pt.y
+    except Exception:
+        log.debug("GetCursorPos failed", exc_info=True)
+    return None
 
 
 def _win_move(x: int, y: int) -> bool:

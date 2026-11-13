@@ -273,7 +273,7 @@ def watch_input_loop(capture, router) -> asyncio.Task:
                 capture.took_back = False
                 if not router.is_local:
                     log.info("input: back on this computer after the safety net took it")
-                    router.go_home("hotkey")
+                    router.go_home("hotkey", middle=True)
             await asyncio.sleep(LOOP_BEAT_S)
 
     return asyncio.get_running_loop().create_task(run())

@@ -424,3 +424,14 @@ def test_leaving_parks_the_idle_cursor_off_buttons(parts, layout):
     laptop = next(iter(layout.screens("laptop")))
     leave = transport.of_type("leave")[-1][2]
     assert leave["park"] == list(laptop.to_os(laptop.right - 1, laptop.y + laptop.height / 2))
+
+
+def test_the_safety_nets_bring_input_home_to_the_middle_of_the_main_screen(parts):
+    router, _, sink, _, _ = parts
+    router.on_pointer(3839, 500)
+    assert not router.is_local
+    router.go_home("hotkey", middle=True)
+    assert router.is_local
+    home = router.screen_for_home()
+    assert (router.x, router.y) == home.center
+    assert sink.calls[-1][0] == "move"
