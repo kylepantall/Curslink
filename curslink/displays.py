@@ -8,7 +8,8 @@ monitor attached to the agent, not just its first screen.
 :func:`os_screens` gives ``{"id", "name", "x", "y", "width", "height"}`` in
 this process's OS coordinates, the same ones the host's ``move`` frames use
 (macOS: points from the top left of the main display; Windows: pixels as
-this process sees them, as ``SetCursorPos`` takes them). ``id`` is stable
+this process sees them, as ``SetCursorPos`` takes them: physical, as
+the agent is DPI aware since 0.4.75). ``id`` is stable
 while the same monitors are attached: "main" for the primary one, then
 "screenN" (on Windows, N is its DISPLAYn number). ``name`` repeats it:
 hosts before 0.4.69 used that as the screen's id.

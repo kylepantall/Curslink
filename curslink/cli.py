@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import ctypes
 import logging
 import sys
 from pathlib import Path
@@ -536,6 +537,38 @@ def _keep_matplotlib_cache() -> None:
         pass
 
 
+def windows_dpi_aware() -> None:
+    """Windows: work in physical pixels, per monitor, like everything else.
+
+    The layout has a Windows screen in physical pixels ("Detect my screens"
+    reads Qt's geometry times the scale), and the input hooks always report
+    the cursor in physical pixels. But this process wasn't DPI aware, so
+    Windows scaled what it read and set the cursor to: on Kyle's 2880x1620
+    screen at 175%, GetCursorPos said 1646x926. While input was on the Mac,
+    every mouse report's delta was the physical position less the logical
+    park point, about (+1080, +607): the pointer shot into the bottom-right
+    corner of the MacBook's screen at once, where it stayed. Coming home put
+    the cursor 1.75 times too far right and down too."""
+    if sys.platform != "win32":
+        return
+    try:
+        user32 = ctypes.WinDLL("user32")
+        user32.SetProcessDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+        if user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):  # PER_MONITOR_AWARE_V2
+            return
+    except (AttributeError, OSError):
+        pass
+    try:
+        if ctypes.WinDLL("shcore").SetProcessDpiAwareness(2) == 0:  # PROCESS_PER_MONITOR_DPI_AWARE
+            return
+    except (AttributeError, OSError):
+        pass
+    try:
+        ctypes.WinDLL("user32").SetProcessDPIAware()
+    except (AttributeError, OSError):
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     _keep_matplotlib_cache()
@@ -579,6 +612,8 @@ def main(argv: list[str] | None = None) -> int:
     from curslink import diagnostics
 
     process = args.command if args.command in ("host", "agent", "relay") else "cli"
+    if args.command in ("host", "agent", "winhelper"):
+        windows_dpi_aware()
     if args.command in ("host", "agent"):
         # The linking service: the app has the Dock icon (see macdock).
         from curslink import macdock
