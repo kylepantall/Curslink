@@ -1867,3 +1867,57 @@ def test_the_windows_cursor_look_is_read_without_ctypes_errors(qapp, monkeypatch
     assert look is None or (look["png"] and look["w"] > 0)
     cursorshape.current(1.0)
     assert cursorshape._failed == 0.0
+
+
+def test_off_the_back_screen_where_only_real_sizes_disagree_the_pointer_still_crosses():
+    """Kyle (0.4.71): PC laptop in front of a Mac's ultrawide, never lined
+    up. By their real sizes the laptop covers less of the ultrawide than the
+    layout draws, so going down off the ultrawide's bottom edge above the
+    laid-out PC went nowhere, and the pointer had no way back to the PC."""
+    devices = [
+        Device("pc", "Kyles_PC", (Screen("main", "pc", -436, -719, 2880, 1620, z=1),)),
+        Device("mac", "WKS82261", (Screen("screen2", "mac", 752, -1681, 3440, 1440, os_x=-3440, os_y=-461),
+                                   Screen("main", "mac", 4192, -1222, 1512, 982))),
+    ]
+    lay = Layout.from_devices(devices, allow_overlap=True, pointer_through=True, mirror=True)
+    lay.physical.update({("pc", "main"): (344, 194), ("mac", "screen2"): (787, 330), ("mac", "main"): (301, 196)})
+    s2 = lay.screen("mac", "screen2")
+    assert lay.sized_fit(s2, lay.screen("pc", "main")) is not None  # the real sizes make a fit
+    c = lay.find_crossing("mac", 2100, -242, 0, 20)
+    assert c is not None and c.screen.device_id == "pc" and c.screen.contains(c.x, c.y)
+    # The router: down through the ultrawide, onto the PC.
+    transport = Transport({"mac"}, {"mac"})
+    router = Router(lay, "pc", FakeCapture(), FakeSink(), transport, FakeOverlay())
+    now = [10.0]
+    router.clock = lambda: now[0]
+    router.switch_to(s2, 2340, -720, "edge")
+    now[0] += 5
+    for _ in range(60):
+        router.on_motion(-10, 20)
+        if router.is_local:
+            break
+    assert router.is_local
+    # Lined up by hand, though, the line-up alone decides (see the test above).
+    from curslink.layout import Fit
+
+    lay.fits = (Fit(("mac", "screen2"), ("pc", "main"), 0, 1300, 0.5),)
+    assert lay.find_crossing("mac", 2300, -242, 0, 20) is None  # laid out there, lined up elsewhere
+
+
+def test_a_diagnostics_bundle_has_every_setting_and_screen_but_no_secret(tmp_path):
+    """Kyle: the layout should be in the logs, not need a screenshot."""
+    from curslink.diagnostics import REDACTED, config_text
+
+    cfg = tmp_path / "curslink.toml"
+    cfg.write_text('secret = "hush"\n[pairing]\nstore = "x"\n[host]\nport = 24850\nreturn_hotkey = "ctrl+alt+home"\n'
+                   '[host.relay]\nkey = "shh"\nauth_token = "t0k"\n[layout]\nmirror = true\n'
+                   '[[devices]]\nid = "mac"\nname = "WKS82261"\n'
+                   '[[devices.screens]]\nid = "screen2"\nx = 752\ny = -1681\nwidth = 3440\nheight = 1440\n')
+    (tmp_path / "curslink.host.toml").write_text('[layout]\nallow_overlap = true\nsecret = "also hush"\n')
+    text = config_text(cfg)
+    for secret in ("hush", "shh", "t0k"):
+        assert secret not in text
+    assert REDACTED in text
+    assert "port = 24850" in text and 'return_hotkey = "ctrl+alt+home"' in text
+    assert "x = 752" in text and "width = 3440" in text and "allow_overlap = true" in text
+    assert "# curslink.host.toml" in text
