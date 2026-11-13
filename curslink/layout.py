@@ -557,14 +557,23 @@ class Layout:
         length = max(abs(dx), abs(dy))
         ux, uy = (dx / length, dy / length) if length else (0.0, 0.0)
         here = self.screen_at(x, y, from_device)
+        # Lined up screens (a Fit, or their real sizes) are crossed to where
+        # the fit says they really stand. Where only their real sizes say so
+        # (never lined up: the Layout page says "By layout") and the layout
+        # has one but the sizes don't, the pointer still goes there rather
+        # than nowhere: it stopped dead on that edge with no way back
+        # (0.4.71, a PC in front of an ultrawide, narrower by its real size
+        # than drawn). A pair lined up by hand goes only by its line-up.
+        laid: tuple[Screen, float, float] | None = None
         for step in range(gap_tolerance + 1):
             px, py = nx + ux * step, ny + uy * step
             target = self._fitted_at(here, px, py) if here is not None else None
             if target is None:
                 target = self.screen_at(px, py)
                 if target is not None and here is not None and self.pair_fit(here, target) is not None:
-                    # Lined up (a Fit): it isn't really there, wherever the
-                    # layout has it, but where the fit says (looked at above).
+                    if (laid is None and target.device_id != from_device and (target.device_id, target.id) not in skip
+                            and self.fit(here, target) is None and self.fit(target, here) is None):
+                        laid = (target, px + ux * entry_inset, py + uy * entry_inset)
                     target = None
             if target is not None and target.device_id != from_device and (target.device_id, target.id) not in skip:
                 ex, ey = px + ux * entry_inset, py + uy * entry_inset
@@ -575,6 +584,9 @@ class Layout:
                 return Crossing(target, ex, ey)
             if step and (ux, uy) == (0.0, 0.0):
                 break
+        if laid is not None:
+            target, ex, ey = laid
+            return Crossing(target, *target.clamp(ex, ey))
         return None
 
     def _fitted_at(self, here: Screen, x: float, y: float) -> Screen | None:

@@ -30,6 +30,7 @@ import logging
 import logging.handlers
 import os
 import platform
+import re
 import sys
 import threading
 import time
@@ -353,7 +354,8 @@ def crash_reports() -> list[Path]:
 
 
 def write_bundle(dest: Path) -> Path:
-    """Zip the logs and crash reports (no pairing keys) into ``dest``."""
+    """Zip the logs, crash reports and settings (no pairing keys or other
+    secrets) into ``dest``."""
     folder = _state.get("folder") or log_dir()
     dest = Path(dest)
     with zipfile.ZipFile(dest, "w", compression=zipfile.ZIP_DEFLATED) as z:
@@ -365,7 +367,59 @@ def write_bundle(dest: Path) -> Path:
         layout = layout_text()
         if layout:
             z.writestr("layout.toml", layout)
+        config = config_text()
+        if config:
+            # Every setting and every screen (the [[devices]] and where they
+            # sit), so a bundle says what the layout is without a screenshot.
+            z.writestr("config.toml", config)
     return dest
+
+
+# A setting with a name like these is left out of a bundle's config.toml:
+# pairing secrets, relay keys, tokens. ("key" only as a whole word: a
+# hotkey or a key mapping says nothing secret and helps.)
+_SECRET_NAME = re.compile(r"secret|token|passw|psk|credential|(^|_)(key|auth)$", re.IGNORECASE)
+REDACTED = "<left out>"
+
+
+def _redact(value, name: str = ""):
+    if _SECRET_NAME.search(name) and not isinstance(value, (dict, list)):
+        return REDACTED
+    if isinstance(value, dict):
+        return {k: _redact(v, str(k)) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact(v, name) for v in value]
+    return value
+
+
+def config_text(path: Path | None = None) -> str:
+    """The whole config (and the role's side file, if there is one), with
+    anything secret left out (:data:`_SECRET_NAME`), for a diagnostics bundle."""
+    try:
+        import tomllib
+
+        if path is None:
+            from curslink.configedit import default_config_path
+
+            path = default_config_path()
+        path = Path(path)
+    except Exception:
+        return ""
+    files = [path] + sorted(path.parent.glob(path.stem + ".*" + path.suffix))
+    parts = []
+    for f in files:
+        try:
+            raw = tomllib.loads(f.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        try:
+            import tomlkit
+
+            text = tomlkit.dumps(_redact(raw))
+        except Exception:
+            text = repr(_redact(raw))
+        parts.append(f"# {f.name}\n{text}")
+    return "\n".join(parts)
 
 
 def layout_text(path: Path | None = None) -> str:
