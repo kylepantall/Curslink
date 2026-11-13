@@ -75,6 +75,38 @@ def _colours(home: bool, selected: bool) -> tuple[QColor, QPen, QColor]:
     return fill, pen, theme.qcolor(t["ink"])
 
 
+IDENTIFY_S = 4  # how long "Detect my screens" shows which monitor is which
+
+
+def number_screens(items) -> None:
+    """Number the screens 1, 2, ... left to right (then top to bottom), as
+    the canvas shows them and "Detect my screens" puts them on the monitors."""
+    order = sorted(items, key=lambda i: (i.layout_rect()[0], i.layout_rect()[1], i.device_id, i.screen["id"]))
+    for n, item in enumerate(order, 1):
+        item.number = n
+        item.update()
+
+
+def saved_screens(cfg, device_id: str) -> list[dict]:
+    for d in cfg.devices():
+        if d.get("id") == device_id:
+            return list(d.get("screens", []))
+    return []
+
+
+def same_screens(saved: list[dict], found: list[dict]) -> bool:
+    """Whether the screens just detected are the ones already in the layout."""
+    keys = ("id", "x", "y", "width", "height", "os_x", "os_y")
+
+    def norm(screens):
+        return sorted(tuple(str(s.get(k, 0)) if k == "id" else int(s.get(k, 0)) for k in keys) for s in screens)
+
+    try:
+        return bool(saved) and norm(saved) == norm(found)
+    except (TypeError, ValueError):
+        return False
+
+
 def detect_screens() -> list[dict]:
     """This computer's monitors in its OS coordinates, as Curslink uses them.
 
@@ -106,6 +138,7 @@ class ScreenItem(QGraphicsRectItem):
                       | QGraphicsItem.GraphicsItemFlag.ItemIsSelectable
                       | QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges)
         self.setCursor(Qt.CursorShape.OpenHandCursor)
+        self.number = 0  # as "Detect my screens" shows it on the monitor (number_screens)
         self.text = QGraphicsSimpleTextItem(self)
         # Constant on-screen size, however the view is zoomed.
         self.text.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations)
@@ -139,6 +172,20 @@ class ScreenItem(QGraphicsRectItem):
 
         option.state &= ~QStyle.StateFlag.State_Selected
         super().paint(painter, option, widget)
+        if self.number:
+            # The number "Detect my screens" puts on the real monitor, big
+            # and faint in the middle, like Windows' display settings.
+            r = self.rect()
+            font = QFont()
+            font.setPixelSize(max(1, round(min(r.width(), r.height()) * 0.42)))
+            font.setWeight(QFont.Weight.Bold)
+            ink = theme.qcolor(theme.current().tokens["ink"])
+            ink.setAlphaF(0.22)
+            painter.save()
+            painter.setFont(font)
+            painter.setPen(ink)
+            painter.drawText(r.adjusted(0, r.height() * 0.12, 0, 0), Qt.AlignmentFlag.AlignCenter, str(self.number))
+            painter.restore()
         # Stripe what this screen shares with others: red where that isn't
         # allowed, grey where another screen stands in front of this one.
         mine = self.layout_rect()
@@ -458,6 +505,7 @@ class LayoutPage(Page):
                 item = ScreenItem(self, d.get("id"), d.get("name", d.get("id")), screen, d.get("id") == me)
                 self.scene.addItem(item)
                 self.items.append(item)
+        number_screens(self.items)
         if self.items:
             self.items[0].setSelected(True)
         self.tag = CoverTag()
@@ -983,6 +1031,10 @@ class LayoutPage(Page):
         min_x, min_y = min(s["x"] for s in found), min(s["y"] for s in found)
         screens = [{"id": s["id"], "x": s["x"] - min_x + left, "y": s["y"] - min_y + top,
                     "width": s["width"], "height": s["height"], "os_x": s["x"], "os_y": s["y"]} for s in found]
+        if same_screens(saved_screens(cfg, me), screens):
+            # Nothing changed: no save and restart, just show which is which.
+            self.identify()
+            return
         cfg.replace_screens(me, screens)
         from curslink.config import ConfigError, parse_layout
 
@@ -1000,8 +1052,41 @@ class LayoutPage(Page):
             return
         cfg.save()
         self.set_dirty(False)
-        self.app.config_saved()
         self.load()
+        # Before the restart config_saved does: the host passes it on to the
+        # paired computers while they're still connected.
+        self.identify()
+        self.app.config_saved()
+
+    def identify_payload(self) -> tuple[dict, dict[str, dict]]:
+        """For "Detect my screens": the cards for this computer's monitors and
+        for each paired computer's (see curslink.gui.identify)."""
+        try:
+            me = self.app.config().get("host", "device_id")
+        except Exception:
+            me = None
+        local: list[dict] = []
+        remote: dict[str, dict] = {}
+        for item in self.items:
+            s = item.screen
+            entry = {"screen": s["id"], "os": [int(s.get("os_x", 0)), int(s.get("os_y", 0)),
+                                               int(s["width"]), int(s["height"])],
+                     "number": item.number, "title": item.device_name,
+                     "detail": f"{s['id']} · {s['width']}×{s['height']}"}
+            if item.device_id == me:
+                local.append(entry)
+            else:
+                remote.setdefault(item.device_id, {"screens": [], "seconds": IDENTIFY_S})["screens"].append(entry)
+        return {"screens": local, "seconds": IDENTIFY_S}, remote
+
+    def identify(self) -> None:
+        """A big number and name on every monitor, here and on connected
+        paired computers, matching the numbers on the canvas."""
+        local, remote = self.identify_payload()
+        if local["screens"]:
+            self.app.identify(local)
+        if remote:
+            self.app.service.send("identify " + json.dumps({"devices": remote}, separators=(",", ":")))
 
     def refresh_edges(self) -> None:
         from curslink.gui.widgets import clear_layout, pill

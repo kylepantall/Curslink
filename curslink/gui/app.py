@@ -55,12 +55,14 @@ class Curslink(QObject):
         self.service.state_changed.connect(self._on_service_state)
         self.service.event.connect(self._on_look)
         self.service.event.connect(self._on_hint)
+        self.service.event.connect(self._on_identify)
         self.calibrating = False  # host: the service gave the camera to calibration
         self.service.event.connect(self._on_calibrating)
         self.service.event.connect(self._on_paired)
         self.service.event.connect(self._on_agent_screens)
         self._look = None
         self._hint = None
+        self._identify = None
         self.release: update.Release | None = None
         self.quitting = False
         self.app_filters: list = []  # app-wide event filters, removed before quitting
@@ -296,6 +298,21 @@ class Curslink(QObject):
 
             self._hint = OverlapHint()
         self._hint.show(event)
+
+    def identify(self, payload: dict) -> int:
+        """A number and name on this computer's monitors for a few seconds
+        (see curslink.gui.identify); how many monitors got one."""
+        if self._identify is None:
+            from curslink.gui.identify import Identify
+
+            self._identify = Identify()
+        return self._identify.show(payload)
+
+    def _on_identify(self, event: dict) -> None:
+        """Agent: "Detect my screens" on the host shows which monitor is which here too."""
+        if event.get("event") != "identify":
+            return
+        self.identify({k: v for k, v in event.items() if k != "event"})
 
     def _on_calibrating(self, event: dict) -> None:
         if event.get("event") == "calibrating":

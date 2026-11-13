@@ -817,3 +817,49 @@ def test_a_held_button_up_goes_at_the_next_click_or_after_a_while(monkeypatch):
     now[0] += pb.HOLD_MAX_S + 1
     capture._mac_mouse_tap(5, object())                                 # any move, much later
     assert released == [(5, 6), (5, 6)] and not capture._held_up
+
+
+def test_identify_command_shows_which_monitor_is_which_on_agents_listed():
+    from curslink.app import identify_command
+    from curslink.protocol import ProtocolError, decode, encode
+
+    class Server:
+        def __init__(self):
+            self.connections = {"lap": object(), "old": object(), "tab": object()}
+            self.sent = []
+
+        def supports(self, device_id, feature):
+            return device_id != "old" and feature == "identify"
+
+        def send(self, device_id, t, **data):
+            self.sent.append((device_id, t, data))
+
+    server = Server()
+    screens = [{"screen": "main", "os": [0, 0, 1920, 1080], "number": 2, "title": "Work laptop",
+                "detail": "main · 1920×1080"}]
+    identify_command(server, json.dumps({"devices": {"lap": {"screens": screens, "seconds": 4},
+                                                      "old": {"screens": screens}}}))
+    # only the agent listed that can draw it; the others get nothing (no hide)
+    assert server.sent == [("lap", "identify", {"screens": screens, "seconds": 4})]
+    server.sent.clear()
+    identify_command(server, "not json")
+    assert server.sent == []
+    assert decode(encode("identify", screens=screens)).data["screens"] == screens
+    with pytest.raises(ProtocolError):
+        decode(encode("identify"))
+
+
+def test_agent_passes_identify_on_to_the_app():
+    from curslink.net.client import AgentSession
+    from curslink.protocol import AGENT_FEATURES, Message
+
+    assert "identify" in AGENT_FEATURES
+
+    class Sink:
+        pass
+
+    session = AgentSession(Sink(), lambda *a, **k: None)
+    got = []
+    session.on_identify = got.append
+    session.handle(Message("identify", {"screens": [{"screen": "main", "number": 1}]}))
+    assert got == [{"screens": [{"screen": "main", "number": 1}]}]

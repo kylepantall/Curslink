@@ -163,6 +163,7 @@ MESSAGE_TYPES = frozenset(
         "facing",
         "look",
         "hint",
+        "identify",
         "mirror",
         "mirror_frame",
         "mirror_pointer",
@@ -198,7 +199,7 @@ HOST_FEATURES = ("facing", "popups", "mirror", "netstats", "screens")
 # What this agent understands beyond the base protocol, sent in hello.features.
 # An agent without "look" would reject a look frame as unknown and drop the
 # connection, so the host only sends one to agents that list it.
-AGENT_FEATURES = ("look", "hint")
+AGENT_FEATURES = ("look", "hint", "identify")
 # Added to hello.features by an agent that draws the edge indicator (edge frames).
 EDGE_FEATURE = "edge"
 # Added to hello.features by an agent that takes dragged files (drag and
@@ -333,6 +334,9 @@ def _validate(msg: Message) -> None:
     elif t == "hint":
         if msg.data.get("hide") is not True and not isinstance(msg.data.get("screens"), list):
             raise ProtocolError("hint needs screens, or hide")
+    elif t == "identify":
+        if msg.data.get("hide") is not True and not isinstance(msg.data.get("screens"), list):
+            raise ProtocolError("identify needs screens, or hide")
     elif t == "mirror":
         if not isinstance(msg.data.get("captures"), list) or not isinstance(msg.data.get("shows"), list):
             raise ProtocolError("mirror needs captures and shows")

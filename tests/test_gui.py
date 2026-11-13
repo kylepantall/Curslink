@@ -1279,3 +1279,58 @@ def test_a_connected_agent_gets_every_monitor_it_reported_on_the_layout(desktop,
     # Connecting again with the same monitors changes nothing (no restart loop).
     desktop._on_agent_screens({"event": "agent", "device_id": "laptop", "connected": True, "screens": reported})
     assert restarts == [True]
+
+
+def test_detect_my_screens_shows_which_monitor_is_which(desktop, qapp, monkeypatch):
+    from curslink.gui.identify import Identify
+    from curslink.gui.pages import layout as layout_mod
+
+    page, home, laptop = _host_with_laptop(desktop)
+    sent = []
+    desktop.service.send = sent.append
+    restarts = []
+    monkeypatch.setattr(desktop, "config_saved", lambda restart=True: restarts.append(restart))
+    # numbered left to right, the same on the canvas and on the monitors
+    assert (home.number, laptop.number) == (1, 2)
+    shown = []
+    monkeypatch.setattr(desktop, "identify", lambda payload: shown.append(payload) or 1)
+    # the same screens as already saved: no save and restart, just the cards
+    me = desktop.config().get("host", "device_id")
+    saved = layout_mod.saved_screens(desktop.config(), me)
+    monkeypatch.setattr(layout_mod, "detect_screens", lambda: [
+        {"id": s["id"], "x": int(s.get("os_x", 0)), "y": int(s.get("os_y", 0)),
+         "width": int(s["width"]), "height": int(s["height"])} for s in saved])
+    page.detect()
+    assert restarts == []
+    (local,) = shown
+    (card,) = local["screens"]
+    assert card["number"] == 1 and card["title"] == home.device_name and card["screen"] == home.screen["id"]
+    (command,) = sent
+    assert command.startswith("identify ")
+    remote = json.loads(command[len("identify "):])["devices"]
+    assert remote["laptop"]["screens"][0]["number"] == 2
+    assert remote["laptop"]["screens"][0]["title"] == "Work laptop"
+    # new screens: saved, then the cards go out before the service restarts
+    shown.clear()
+    sent.clear()
+    monkeypatch.setattr(layout_mod, "detect_screens", lambda: [
+        {"id": "main", "x": 0, "y": 0, "width": 640, "height": 480}])
+    page.detect()
+    assert restarts == [True], page.overlap_note.text()
+    assert len(shown) == 1 and sent and sent[0].startswith("identify ")
+    assert shown[0]["screens"][0]["detail"] == "main · 640×480"
+
+    # the cards themselves: one window per monitor, gone after a while
+    ident = Identify()
+    assert ident.show({"screens": [{"screen": "main", "number": 1, "title": "Mac", "detail": "main"}],
+                       "seconds": 0.5}) == 1
+    assert ident.showing
+    ident.windows[0].grab()  # paints without error
+    ident.show({"hide": True})
+    assert not ident.showing
+
+
+def test_agent_shows_identify_cards_from_the_host(desktop, qapp):
+    desktop._on_identify({"event": "identify", "screens": [{"screen": "main", "number": 3, "title": "Host"}]})
+    assert desktop._identify is not None and desktop._identify.showing
+    desktop._identify.hide()
