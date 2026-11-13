@@ -227,6 +227,110 @@ mac_grab_has_cursor = False
 _said_cursor: bool | None = None
 
 
+# Windows: screen copies a second at most. Each is a copy of the screen out
+# of the compositor; 120 a second of a big screen kept it busy.
+WIN_SHOT_FPS = 60
+_gdi = None
+_said_win_grab = False
+
+
+def _win_gdi():  # pragma: no cover - Windows only
+    """user32 and gdi32 with argument types set (handles are 64-bit)."""
+    global _gdi
+    if _gdi is None:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
+        user32.GetDC.argtypes = [wintypes.HWND]
+        user32.GetDC.restype = wintypes.HDC
+        user32.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]
+        user32.ReleaseDC.restype = ctypes.c_int
+        gdi32.CreateCompatibleDC.argtypes = [wintypes.HDC]
+        gdi32.CreateCompatibleDC.restype = wintypes.HDC
+        gdi32.CreateDIBSection.argtypes = [wintypes.HDC, ctypes.c_void_p, wintypes.UINT,
+                                           ctypes.POINTER(ctypes.c_void_p), wintypes.HANDLE, wintypes.DWORD]
+        gdi32.CreateDIBSection.restype = wintypes.HBITMAP
+        gdi32.SelectObject.argtypes = [wintypes.HDC, wintypes.HGDIOBJ]
+        gdi32.SelectObject.restype = wintypes.HGDIOBJ
+        gdi32.BitBlt.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                 wintypes.HDC, ctypes.c_int, ctypes.c_int, wintypes.DWORD]
+        gdi32.BitBlt.restype = wintypes.BOOL
+        gdi32.DeleteObject.argtypes = [wintypes.HGDIOBJ]
+        gdi32.DeleteObject.restype = wintypes.BOOL
+        gdi32.DeleteDC.argtypes = [wintypes.HDC]
+        gdi32.DeleteDC.restype = wintypes.BOOL
+        gdi32.GdiFlush.argtypes = []
+        gdi32.GdiFlush.restype = wintypes.BOOL
+        _gdi = (user32, gdi32)
+    return _gdi
+
+
+def win_copies() -> bool:
+    """Whether captures here copy the screen with :func:`win_grab`."""
+    return sys.platform == "win32" and QGuiApplication.platformName() == "windows"
+
+
+def win_grab(x: float, y: float, w: float, h: float) -> QImage | None:  # pragma: no cover - Windows only
+    """Windows: the screen's pixels at ``x, y, w, h`` (physical, on the
+    virtual desktop), or None. A plain SRCCOPY, never CAPTUREBLT (Qt's
+    grabWindow uses it): with it, Windows takes the cursor off the screen
+    for each copy, so at a capture's rate it all but vanished, and the
+    copies held the compositor up. With DWM composing the desktop, a plain
+    copy still has every window, layered ones too, and the windows marked
+    to stay out of captures (the mirrors, the guides) are still left out."""
+    global _said_win_grab
+    import ctypes
+    from ctypes import wintypes
+
+    class BITMAPINFOHEADER(ctypes.Structure):
+        _fields_ = [("biSize", wintypes.DWORD), ("biWidth", wintypes.LONG), ("biHeight", wintypes.LONG),
+                    ("biPlanes", wintypes.WORD), ("biBitCount", wintypes.WORD),
+                    ("biCompression", wintypes.DWORD), ("biSizeImage", wintypes.DWORD),
+                    ("biXPelsPerMeter", wintypes.LONG), ("biYPelsPerMeter", wintypes.LONG),
+                    ("biClrUsed", wintypes.DWORD), ("biClrImportant", wintypes.DWORD)]
+
+    x, y, w, h = round(x), round(y), max(1, round(w)), max(1, round(h))
+    try:
+        user32, gdi32 = _win_gdi()
+    except Exception:
+        return None
+    screen = user32.GetDC(None)
+    if not screen:
+        return None
+    mem = bitmap = old = None
+    try:
+        mem = gdi32.CreateCompatibleDC(screen)
+        info = BITMAPINFOHEADER()
+        info.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+        info.biWidth, info.biHeight = w, -h  # top-down rows
+        info.biPlanes, info.biBitCount, info.biCompression = 1, 32, 0  # BI_RGB
+        bits = ctypes.c_void_p()
+        bitmap = gdi32.CreateDIBSection(mem, ctypes.byref(info), 0, ctypes.byref(bits), None, 0)
+        if not mem or not bitmap or not bits.value:
+            return None
+        old = gdi32.SelectObject(mem, bitmap)
+        SRCCOPY = 0x00CC0020
+        if not gdi32.BitBlt(mem, 0, 0, w, h, screen, x, y, SRCCOPY):
+            if not _said_win_grab:
+                _said_win_grab = True
+                log.warning("mirror: couldn't copy the screen (%d)", ctypes.get_last_error())
+            return None
+        gdi32.GdiFlush()
+        data = ctypes.string_at(bits.value, w * h * 4)
+        # BGRA bytes are Qt's RGB32 on little-endian; copy() owns the pixels.
+        return QImage(data, w, h, w * 4, QImage.Format.Format_RGB32).copy()
+    finally:
+        if mem and old:
+            gdi32.SelectObject(mem, old)
+        if bitmap:
+            gdi32.DeleteObject(bitmap)
+        if mem:
+            gdi32.DeleteDC(mem)
+        user32.ReleaseDC(None, screen)
+
+
 def mac_cursor_windows(quartz, infos) -> list[int]:
     """The ids of the windows in ``infos`` that are the cursor itself."""
     level = None
@@ -553,6 +657,22 @@ class Capture:
                 return img
         qscreen = QGuiApplication.screens()[index]
         g = qscreen.geometry()
+        if win_copies():
+            # Qt's own grab copies with CAPTUREBLT, which hides the cursor
+            # for every copy (it vanished while the mirror ran) and makes
+            # the compositor stall (the screen froze). Our own copy leaves
+            # it out, and goes no more than WIN_SHOT_FPS a second.
+            now = time.monotonic()
+            if now - self.shot_at < 1 / WIN_SHOT_FPS - 0.004 and self.last_sent:
+                self.skip = True
+                return None
+            self.shot_at = now
+            dpr = qscreen.devicePixelRatio() or 1.0
+            img = win_grab(g.x() + (lx - g.x()) * dpr, g.y() + (ly - g.y()) * dpr, lw * dpr, lh * dpr)
+            if img is not None:
+                return img
+            self.why = "the screen copy failed"
+            return None
         # Relative to the screen, in Qt's logical pixels; the pixmap comes
         # back at the screen's real resolution.
         pix = qscreen.grabWindow(0, round(lx - g.x()), round(ly - g.y()), max(1, round(lw)), max(1, round(lh)))

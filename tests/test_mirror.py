@@ -374,6 +374,46 @@ def test_helper_captures_and_shows_a_mirror(qapp):
     assert not helper.captures and not helper.windows
 
 
+def test_windows_captures_copy_the_screen_themselves_at_most_win_shot_fps(qapp, monkeypatch):
+    """Qt's grab copies with CAPTUREBLT, which hid the Windows cursor on
+    every copy and stalled the screen: Windows goes through win_grab, in
+    physical pixels, never more than WIN_SHOT_FPS a second."""
+    from PySide6.QtGui import QColor, QGuiApplication, QImage
+
+    from curslink.mirror import helper
+
+    calls = []
+
+    def fake_grab(x, y, w, h):
+        calls.append((x, y, w, h))
+        img = QImage(round(w), round(h), QImage.Format.Format_RGB32)
+        img.fill(QColor("teal"))
+        return img
+
+    def no_qt_grab(*_a):
+        raise AssertionError("Qt's grab copies with CAPTUREBLT")
+
+    monkeypatch.setattr(helper, "win_copies", lambda: True)
+    monkeypatch.setattr(helper, "win_grab", fake_grab)
+    screen = QGuiApplication.primaryScreen()
+    monkeypatch.setattr(type(screen), "grabWindow", no_qt_grab)
+    out = []
+    cap = helper.Capture({"id": "c", "screen": "main", "os": [10, 10, 120, 80], "fps": 120}, out.append)
+    cap.timer.stop()
+    cap.grab()
+    g, k = screen.geometry(), screen.devicePixelRatio() or 1.0
+    assert len(calls) == 1 and out
+    x, y, w, h = calls[0]
+    assert (round(w), round(h)) == (round(120 / k * k), round(80 / k * k))
+    assert (round(x), round(y)) == (round(g.x() + (10 - g.x())), round(g.y() + (10 - g.y())))
+    cap.grab()  # straight after: too soon for another copy
+    assert len(calls) == 1
+    cap.shot_at -= 1 / helper.WIN_SHOT_FPS
+    cap.grab()
+    assert len(calls) == 2
+    cap.stop()
+
+
 def test_no_drawn_pointer_for_a_phone_whose_capture_shows_its_own():
     lay = Layout.from_devices([
         Device("pc", "PC", (Screen("main", "pc", 0, 0, 1000, 600, z=1),)),
