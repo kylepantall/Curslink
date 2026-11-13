@@ -15,7 +15,7 @@ from curslink.net import quality
 from curslink.net.framing import STREAM_LIMIT, read_message
 from curslink.net.relay import RelayError, RelayTarget, agent_connect
 from curslink.net.udp import AgentUdp
-from curslink.protocol import (AGENT_FEATURES, CLIPBOARD_FEATURE, EDGE_FEATURE, FILES_FEATURE, FILES_OUT_FEATURE, DROP_FEATURE, FILE_ACK_FEATURE, MIRROR_CURSOR_FEATURE, MIRROR_FEATURE, MIRROR_TILES_FEATURE, NETSTATS_FEATURE, POPUPS_FEATURE, PREPARE_FEATURE, PROTOCOL_VERSION, UDP_FEATURE, Message, ProtocolError,
+from curslink.protocol import (AGENT_FEATURES, CLIPBOARD_FEATURE, EDGE_FEATURE, FILES_FEATURE, FILES_OUT_FEATURE, DROP_FEATURE, FILE_ACK_FEATURE, MIRROR_CURSOR_FEATURE, MIRROR_FEATURE, MIRROR_TILES_FEATURE, NETSTATS_FEATURE, POPUPS_FEATURE, PREPARE_FEATURE, PROTOCOL_VERSION, SCREENS_FEATURE, UDP_FEATURE, Message, ProtocolError,
                                encode)
 from curslink.security import channel_binding, hello_auth
 from curslink.tally import Tally
@@ -254,14 +254,15 @@ class AgentSession:
 
 
 def detect_screens() -> list[dict]:
-    try:
-        from screeninfo import get_monitors  # optional
-    except ImportError:
-        return []
-    return [
-        {"x": m.x, "y": m.y, "width": m.width, "height": m.height, "name": m.name}
-        for m in get_monitors()
-    ]
+    """This device's monitors, as hello.screens has them (see curslink.displays)."""
+    from curslink.displays import os_screens
+
+    return os_screens()
+
+
+# How often a connected agent looks for monitors plugged in, taken away or
+# moved, and tells a host that takes them (a screens frame).
+SCREENS_EVERY_S = 3.0
 
 
 @dataclass
@@ -323,6 +324,7 @@ class AgentClient:
         self.facing_source: Callable[[], bool] | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._host_takes_facing = False
+        self._screens_sent: list[dict] = []  # what the host was last told (hello or screens)
         self.host_features: frozenset[str] = frozenset()
 
     def report_facing(self, facing: bool) -> None:
@@ -403,6 +405,29 @@ class AgentClient:
             self.send("netstats", udp=udp.heard_lately(), loss_pct=udp.loss.stats()["loss_pct"],
                       rtt_ms=rtt["p50_ms"], jitter_ms=rtt["jitter_ms"])
 
+    async def _watch_screens(self) -> None:
+        """Tell the host when this device's monitors change (one plugged in,
+        taken away, rearranged or rescaled), so its layout can follow."""
+        loop = asyncio.get_running_loop()
+        while True:
+            await asyncio.sleep(SCREENS_EVERY_S)
+            try:
+                screens = await loop.run_in_executor(None, detect_screens)
+            except Exception:  # noqa: BLE001 - try again next time
+                log.debug("couldn't list the monitors", exc_info=True)
+                continue
+            if not screens or screens == self._screens_sent:
+                continue
+            log.info("this device's monitors changed: %s", ", ".join(
+                f"{s['id']} {s['width']}x{s['height']} at {s['x']},{s['y']}" for s in screens))
+            self._screens_sent = screens
+            frame = {"screens": screens}
+            if self.session.mirror is not None:
+                from curslink.screensize import physical_sizes
+
+                frame["screen_mm"] = await loop.run_in_executor(None, physical_sizes)
+            self.send("screens", **frame)
+
     async def _refresh_facing(self) -> None:
         while True:
             if self.facing_source is not None:
@@ -471,6 +496,7 @@ class AgentClient:
                 from curslink.screensize import physical_sizes
 
                 hello["screen_mm"] = physical_sizes()
+            self._screens_sent = hello["screens"]
             if self.facing_source is not None:
                 hello["camera"] = True
             if self.auth_key is not None:
@@ -500,6 +526,8 @@ class AgentClient:
                 refresher = asyncio.create_task(self._refresh_facing())
             reporter = (asyncio.create_task(self._report_netstats())
                         if NETSTATS_FEATURE in self.host_features else None)
+            watcher = (asyncio.create_task(self._watch_screens())
+                       if SCREENS_FEATURE in self.host_features else None)
             try:
                 while True:
                     msg = await read_message(reader)
@@ -515,6 +543,8 @@ class AgentClient:
                     refresher.cancel()
                 if reporter is not None:
                     reporter.cancel()
+                if watcher is not None:
+                    watcher.cancel()
         finally:
             if self.udp is not None:
                 self.udp.close()

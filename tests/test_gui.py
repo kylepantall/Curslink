@@ -1265,6 +1265,22 @@ def test_a_phone_that_pairs_again_from_its_side_replaces_the_old_one(desktop, qa
     assert restarts == [True]  # one restart
 
 
+def test_a_connected_agent_gets_every_monitor_it_reported_on_the_layout(desktop, qapp, monkeypatch):
+    page, home, laptop = _host_with_laptop(desktop)
+    restarts = []
+    monkeypatch.setattr(desktop, "config_saved", lambda restart=True: restarts.append(restart))
+    reported = [{"id": "main", "name": "main", "x": 0, "y": 0, "width": 1920, "height": 1080},
+                {"id": "screen2", "name": "screen2", "x": 1920, "y": 0, "width": 2560, "height": 1440}]
+    desktop._on_agent_screens({"event": "agent", "device_id": "laptop", "name": "Work laptop",
+                               "connected": True, "screens": reported})
+    laid = next(d for d in desktop.config().devices() if d["id"] == "laptop")["screens"]
+    assert [s["id"] for s in laid] == ["main", "screen2"] and restarts == [True]
+    assert any("added screen2" in message for _t, _level, message in desktop.status.log)
+    # Connecting again with the same monitors changes nothing (no restart loop).
+    desktop._on_agent_screens({"event": "agent", "device_id": "laptop", "connected": True, "screens": reported})
+    assert restarts == [True]
+
+
 def test_detect_my_screens_shows_which_monitor_is_which(desktop, qapp, monkeypatch):
     from curslink.gui.identify import Identify
     from curslink.gui.pages import layout as layout_mod
