@@ -162,7 +162,7 @@ class AgentSession:
             if isinstance(park, list) and len(park) == 2 and not (
                     self.drag_out is not None and getattr(self.drag_out, "busy", False)):
                 try:
-                    self.sink.move_to(int(park[0]), int(park[1]))
+                    getattr(self.sink, "park", self.sink.move_to)(int(park[0]), int(park[1]))
                 except Exception:
                     log.debug("couldn't move the cursor aside", exc_info=True)
             if self.cursor is not None:
