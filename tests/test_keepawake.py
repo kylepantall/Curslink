@@ -87,7 +87,7 @@ def test_backends_per_platform():
 
 
 def test_linux_process_backend_runs_and_stops(tmp_path):
-    impl = keepawake._Linux("test", ["sleep", "30"], None)
+    impl = keepawake._Process("test", ["sleep", "30"])
     assert impl.hold()
     proc = impl.proc
     assert proc is not None and proc.poll() is None
@@ -103,3 +103,34 @@ def test_config_reads_keep_screen_on():
     assert host_config(host).keep_screen_on is True
     agent = {"agent": {"device_id": "b", "host": "1.2.3.4", "keep_screen_on": True}}
     assert agent_config(agent).keep_screen_on is True
+
+
+def test_helper_that_ends_is_started_again():
+    impl = keepawake._Process("test", ["sleep", "30"])
+    assert impl.hold()
+    first = impl.proc
+    first.kill()
+    first.wait()
+    impl._poke()
+    assert impl.proc is not None and impl.proc is not first and impl.proc.poll() is None
+    impl.release()
+
+
+def test_mac_also_declares_user_activity():
+    mac = keepawake.backend("darwin", lambda _n: "/usr/bin/caffeinate", pid=1)
+    assert mac.poke == ["/usr/bin/caffeinate", "-u", "-t", "2"]
+
+
+def test_windows_pokes_while_held(monkeypatch):
+    calls = []
+    win = keepawake._Windows()
+    monkeypatch.setattr(win, "_set", lambda flags: calls.append(flags) or True)
+    monkeypatch.setattr(keepawake, "_zero_mouse_move", lambda: calls.append("move"))
+    started = []
+    monkeypatch.setattr(win._poker, "start", lambda: started.append(True))
+    assert win.hold()
+    assert started == [True]
+    win._poke()
+    assert calls[-1] == "move" and calls[-2] == keepawake.ES_DISPLAY_REQUIRED | keepawake.ES_SYSTEM_REQUIRED
+    win.release()
+    assert calls[-1] == keepawake.ES_CONTINUOUS
