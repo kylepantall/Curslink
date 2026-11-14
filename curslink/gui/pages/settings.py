@@ -274,6 +274,18 @@ class SettingsPage(Page):
             "a password manager stay where they are. Copies bigger than 25 MB aren't shared."), self.clipboard)
         self.add(self.clipboard_card)
 
+        # -- App mirror (both) -----------------------------------------------------
+        self.app_mirror_card = Card("App mirror", rows=True)
+        self.app_mirror = Toggle("Drag apps onto other devices")
+        self.app_mirror.clicked.connect(lambda on: self.set_config(*self._app_mirror_key(), on))
+        self.app_mirror_card.add_row(text_block(
+            "Drag apps onto other devices",
+            "Drag a window by its title bar over the edge to another computer and it opens there, live, "
+            "its own shape and size: use it with this mouse and keyboard as if it were there. Its title bar "
+            "moves it; drag it back to put it away. Files dragged into it go to the app. From a phone, drag "
+            "across with the button held to show its screen."), self.app_mirror)
+        self.add(self.app_mirror_card)
+
         # -- screen (both) ----------------------------------------------------------
         self.screen_card = Card("Screen", rows=True)
         self.keep_screen = Toggle("Keep my screen on")
@@ -442,6 +454,9 @@ class SettingsPage(Page):
             self.agent_camera_row.setVisible(self.agent_camera.isChecked())
             self.agent_camera_picker.set_current(int(agent_gaze.get("camera", 0) or 0),
                                                  str(agent_gaze.get("camera_name", "") or ""))
+            table, key = self._app_mirror_key()
+            am = raw.get(table, {})
+            self.app_mirror.setChecked(bool(am.get(key, True)) if isinstance(am, dict) else True)
             role_table = raw.get(self._role_table(), {})
             self.clipboard.setChecked(bool(role_table.get("clipboard", True)) if isinstance(role_table, dict) else True)
             self.keep_screen.setChecked(bool(role_table.get("keep_screen_on", False))
@@ -821,6 +836,11 @@ class SettingsPage(Page):
             return "agent" if self.app.config().role == "agent" else "host"
         except Exception:
             return "host"
+
+    def _app_mirror_key(self) -> tuple[str, str]:
+        """Where App mirror is turned on and off: [app_mirror] enabled on a
+        host, [agent] app_mirror on an agent."""
+        return ("agent", "app_mirror") if self._role_table() == "agent" else ("app_mirror", "enabled")
 
     def set_config(self, table: str, key: str, value, restart: bool = True) -> None:
         if self._loading:

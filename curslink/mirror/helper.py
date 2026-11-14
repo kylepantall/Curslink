@@ -1301,10 +1301,19 @@ class MirrorHelper:
             if sid not in captures:
                 self.captures.pop(sid).stop()
         for sid, spec in captures.items():
-            if sid in self.captures:
+            if sid in self.captures and isinstance(self.captures[sid], Capture) and (
+                    "window" in spec) == (type(self.captures[sid]).__name__ == "AppCapture"):
                 self.captures[sid].set(spec)
             else:
-                self.captures[sid] = Capture(spec, self.out)
+                if sid in self.captures:
+                    self.captures.pop(sid).stop()
+                if isinstance(spec.get("window"), dict):
+                    # App mirror: one app window's own picture (curslink.appmirror.helper).
+                    from curslink.appmirror.helper import AppCapture
+
+                    self.captures[sid] = AppCapture(spec, self.out)
+                else:
+                    self.captures[sid] = Capture(spec, self.out)
         for sid in list(self.windows):
             if sid not in shows:
                 self.windows.pop(sid).close_soon()
@@ -1317,6 +1326,17 @@ class MirrorHelper:
                 old = self.windows.pop(sid)
                 old.close_soon()
                 window = None
+            if window is None and spec.get("app"):
+                # App mirror: another computer's app, in a window of its own.
+                from curslink.appmirror.helper import AppWindow
+
+                window = AppWindow(spec, self.out)
+                if not window.ok:
+                    log.warning("app mirror: no screen here at %s", spec.get("os"))
+                    window.deleteLater()
+                    continue
+                self.windows[sid] = window
+                continue
             if window is None:
                 window = MirrorWindow(spec, self.out)
                 if not window.ok:
