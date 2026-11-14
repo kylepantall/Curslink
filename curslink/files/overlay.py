@@ -393,7 +393,9 @@ def make_drag_source(tid: str, paths: list[str], info: dict):
 
         def mousePressEvent(self, e) -> None:  # noqa: N802
             if e.button() == Qt.MouseButton.LeftButton:
-                self.start_drag()
+                # A Mac's QDrag from an injected press never got going (0.4.21);
+                # AppKit's own drag does, now with the press behind it.
+                self.start_appkit(True) if cocoa else self.start_drag()
 
         def start_drag(self) -> None:
             if self.dragging:
@@ -421,13 +423,15 @@ def make_drag_source(tid: str, paths: list[str], info: dict):
             _say(f"nativedrag-ended {tid} {op}")
             self.close()
 
-        def start_appkit(self) -> None:
-            """macOS, when no press came: an AppKit drag of its own."""
+        def start_appkit(self, pressed: bool = False) -> None:
+            """macOS: an AppKit drag of its own (``pressed``: the press
+            reached this window; otherwise none came in time)."""
             if self.dragging or not self.isVisible():
                 return
             self.dragging = True
             self.timer.stop()
-            _say("log no press reached the drag source; starting the drag without one")
+            if not pressed:
+                _say("log no press reached the drag source; starting the drag without one")
             try:
                 # Without the Mac's own mouse-down the drag image would sit
                 # still (mouse-dragged events go to whoever got the down), so
