@@ -114,6 +114,9 @@ class HostServer:
         # (device_id, frame type, frame data): mirror_frame and mirror_ack
         # from an agent taking part in mirror mode (see curslink.mirror).
         self.on_mirror: Callable[[str, str, dict], None] = lambda device_id, t, data: None
+        # (device_id, frame type, frame data): app_drag, app_window and
+        # app_view, App mirror's (see curslink.appmirror).
+        self.on_app: Callable[[str, str, dict], None] = lambda device_id, t, data: None
         # (device_id, frame type, frame data): clip and clip_data, something
         # copied on that agent (see curslink.clipboard).
         self.on_clip: Callable[[str, str, dict], None] = lambda device_id, t, data: None
@@ -408,6 +411,8 @@ class HostServer:
             self.on_popup_result(conn.device_id, dict(msg.data))
         elif msg.t in ("mirror_frame", "mirror_ack", "mirror_tune"):
             self.on_mirror(conn.device_id, msg.t, dict(msg.data))
+        elif msg.t in ("app_drag", "app_window", "app_view"):
+            self.on_app(conn.device_id, msg.t, dict(msg.data))
         elif msg.t in ("clip", "clip_data"):
             self.on_clip(conn.device_id, msg.t, dict(msg.data))
         elif msg.t.startswith("file_"):

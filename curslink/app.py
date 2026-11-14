@@ -356,7 +356,7 @@ async def run_host(cfg: HostConfig) -> None:
         log.info("waiting for agents via relay %s", cfg.relay.address)
     handoff = start_file_drags(cfg, router, server, overlay, capture, loop) if cfg.files else None
     isolink = start_popups(router, server, capture) if cfg.isolink else None
-    mirror = start_mirror(cfg, router, server, overlay, loop)
+    mirror = start_mirror(cfg, router, server, overlay, loop, capture)
     clipboard = start_host_clipboard(cfg, server, overlay, loop) if cfg.clipboard else None
     bridge = LoopBridge(loop, router, handoff)
     watch_input_loop(capture, router)
@@ -676,9 +676,30 @@ def start_host_clipboard(cfg: HostConfig, server: HostServer, overlay, loop: asy
     return sync
 
 
-def start_mirror(cfg: HostConfig, router: Router, server: HostServer, overlay, loop: asyncio.AbstractEventLoop):
-    """Mirror mode (see curslink.mirror), when the layout has it on."""
-    if not cfg.layout.mirror:
+def off_loop(loop: asyncio.AbstractEventLoop):
+    """``submit(fn, done)``: run ``fn`` on a worker thread, then ``done(its
+    answer)`` back on the loop (nothing if it raised)."""
+    def submit(fn, done) -> None:
+        fut = loop.run_in_executor(None, fn)
+
+        def finished(f) -> None:
+            if f.cancelled() or f.exception() is not None:
+                if not f.cancelled():
+                    log.debug("off the loop: %r", f.exception())
+                return
+            done(f.result())
+
+        fut.add_done_callback(finished)
+
+    return submit
+
+
+def start_mirror(cfg: HostConfig, router: Router, server: HostServer, overlay, loop: asyncio.AbstractEventLoop,
+                 capture=None):
+    """Mirror mode (see curslink.mirror), when the layout has it on, and App
+    mirror (curslink.appmirror) unless it's turned off: their pictures go
+    the same way."""
+    if not cfg.layout.mirror and not cfg.app_mirror:
         return None
     from curslink.mirror import LatestWriter, MirrorHost, MirrorPeer
 
@@ -701,6 +722,7 @@ def start_mirror(cfg: HostConfig, router: Router, server: HostServer, overlay, l
     server.on_tuning = on_tuning
     server.on_mirror = host.on_message
     router.on_moved = host.update
+    apps = start_app_mirror(cfg, router, server, overlay, loop, host, local, capture) if cfg.app_mirror else None
     connected, disconnected = server.on_connect, server.on_disconnect
 
     def on_connect(conn) -> None:
@@ -711,6 +733,8 @@ def start_mirror(cfg: HostConfig, router: Router, server: HostServer, overlay, l
 
     def on_disconnect(device_id: str) -> None:
         disconnected(device_id)
+        if apps is not None:
+            apps.on_disconnect(device_id)
         host.refresh()
 
     server.on_connect, server.on_disconnect = on_connect, on_disconnect
@@ -727,8 +751,46 @@ def start_mirror(cfg: HostConfig, router: Router, server: HostServer, overlay, l
     if cfg.layout.set_physical(router.local_id, physical_sizes()):
         log_sizes(cfg.layout, router.local_id)
     host.refresh()
-    log.info("mirror mode on (%d fps, %s quality)", host.fps, host.quality)
+    if cfg.layout.mirror:
+        log.info("mirror mode on (%d fps, %s quality)", host.fps, host.quality)
     return host
+
+
+def start_app_mirror(cfg: HostConfig, router: Router, server: HostServer, overlay, loop: asyncio.AbstractEventLoop,
+                     host, local, capture):
+    """App mirror (see curslink.appmirror) on the host."""
+    from curslink.appmirror import AppMirrorDevice, AppMirrorHost
+    from curslink.protocol import APP_MIRROR_FEATURE
+
+    submit = off_loop(loop)
+    device = None
+    if local is not None:
+        device = AppMirrorDevice(lambda t, **data: apps.on_message(router.local_id, t, data), submit, loop.call_later,
+                                 skip=lambda: {p for p in (overlay.pid,) if p})
+        local.on_captures = device.on_captures
+        chain_helper_lines(overlay, loop, device, ("app_view ",))
+
+    def release_local() -> None:
+        if capture is not None and hasattr(capture, "inject_drag_end"):
+            loop.run_in_executor(None, capture.inject_drag_end, "release")
+
+    apps = AppMirrorHost(cfg.layout, router, server, device, changed=host.refresh, release_local=release_local,
+                         can_show_local=local is not None)
+    host.apps = apps
+    router.portal = apps
+    router.on_any_button = apps.on_button
+    router.listeners.append(apps.on_switch)
+    moved = router.on_moved
+
+    def on_moved() -> None:
+        apps.moved()
+        moved()
+
+    router.on_moved = on_moved
+    server.on_app = apps.on_message
+    server.features.append(APP_MIRROR_FEATURE)
+    log.info("app mirror on: drag a window by its title bar onto another device")
+    return apps
 
 
 def log_sizes(layout, device_id: str) -> None:
@@ -1218,7 +1280,7 @@ async def run_agent(cfg: AgentConfig) -> None:
 
     # The helper draws the switch animation and, for dropped files, the
     # placeholder that follows the pointer and the "Receiving..." popup.
-    mirror_on = cfg.mirror and qt_available()
+    mirror_on = (cfg.mirror or cfg.app_mirror) and qt_available()
     clipboard_on = cfg.clipboard and qt_available()
     if cfg.clipboard and not clipboard_on:
         log.warning("clipboard sync needs Qt (PySide6) on this computer")
@@ -1265,9 +1327,18 @@ async def run_agent(cfg: AgentConfig) -> None:
 
         writer = LatestWriter(overlay.command)
         park = CursorPark(session, asyncio.get_running_loop().call_later)
-        mirror = MirrorPeer(overlay.command, client.send, writer.put, park.shows)
+        mirror = MirrorPeer(overlay.command, client.send, writer.put, park.shows, only_apps=not cfg.mirror)
         session.mirror = mirror
         chain_helper_lines(overlay, asyncio.get_running_loop(), mirror)
+        if cfg.app_mirror:
+            from curslink.appmirror import AppMirrorDevice
+
+            loop = asyncio.get_running_loop()
+            apps = AppMirrorDevice(client.send, off_loop(loop), loop.call_later,
+                                   skip=lambda: {p for p in (overlay.pid,) if p})
+            session.app_mirror = apps
+            mirror.on_captures = apps.on_captures
+            chain_helper_lines(overlay, loop, apps, ("app_view ",))
     clipboard = None
     if clipboard_on and overlay is not None:
         clipboard = start_clipboard(overlay, asyncio.get_running_loop(), cfg.clipboard_max_mb,

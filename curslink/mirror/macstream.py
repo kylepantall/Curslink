@@ -349,3 +349,100 @@ def reap(now: float | None = None) -> None:
     for s in list(_streams.values()):
         if s.users == 0 and s.released_at is not None and now - s.released_at >= LINGER_S:
             s.stop()
+    _reap_windows(now)
+
+
+# ---------------------------------------------------------------- App mirror
+_window_streams: dict[int, "MacWindowStream"] = {}
+_broken_windows: set[int] = set()
+
+
+class MacWindowStream(MacStream):
+    """A stream of one window, wherever it is and whatever is over it
+    (ScreenCaptureKit's desktop-independent window filter), for App mirror.
+    ``configure``'s rect is (0, 0, width, height) of the window, in points."""
+
+    def __init__(self, window_id: int):
+        super().__init__(-int(window_id), (0.0, 0.0, 0.0, 0.0))
+        self.window_id = int(window_id)
+
+    def _apply(self) -> None:
+        if self.busy or self.dead or self.want is None or self.want == self.applied:
+            return
+        fw = _frameworks()
+        if fw is None:
+            self._fail("no ScreenCaptureKit")
+            return
+        sck, cm, quartz, objc = fw
+        want = self.want
+        self.busy = True
+
+        def got_content(content, error):
+            try:
+                if content is None:
+                    self._fail(f"couldn't list the windows ({error})")
+                    return
+                win = next((w for w in content.windows() if int(w.windowID()) == self.window_id), None)
+                if win is None:
+                    self._fail("the window isn't there to capture")
+                    return
+                flt = sck.SCContentFilter.alloc().initWithDesktopIndependentWindow_(win)
+                (_x, _y, w, h), scale, fps, cursor, _unseen = want
+                cfg = sck.SCStreamConfiguration.alloc().init()
+                cfg.setWidth_(max(2, round(w * scale)))
+                cfg.setHeight_(max(2, round(h * scale)))
+                cfg.setMinimumFrameInterval_(cm.CMTimeMake(1, max(1, min(120, fps))))
+                cfg.setPixelFormat_(_KCV_BGRA)
+                cfg.setShowsCursor_(cursor)
+                cfg.setQueueDepth_(3)
+                if self.stream is None:
+                    self._start(sck, flt, cfg, want)
+                else:
+                    self._update(flt, cfg, want)
+            except Exception as exc:  # pragma: no cover - macOS only
+                log.debug("app mirror: window stream setup failed", exc_info=True)
+                self._fail(str(exc))
+
+        try:
+            sck.SCShareableContent.getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler_(
+                True, False, got_content)
+        except Exception as exc:  # pragma: no cover - macOS only
+            self._fail(str(exc))
+
+    def _fail(self, why: str) -> None:
+        if not self.dead:
+            log.warning("app mirror: ScreenCaptureKit stream of window %d failed: %s; capturing by pictures",
+                        self.window_id, why)
+        self.dead = True
+        self.busy = False
+        _broken_windows.add(self.window_id)
+        self.stop()
+
+    def stop(self) -> None:
+        stream, self.stream = self.stream, None
+        if self.output is not None:
+            self.output.owner = None
+        if stream is not None:
+            try:
+                stream.stopCaptureWithCompletionHandler_(lambda _e: None)
+            except Exception:  # pragma: no cover - macOS only
+                log.debug("app mirror: couldn't stop a stream", exc_info=True)
+        if _window_streams.get(self.window_id) is self:
+            del _window_streams[self.window_id]
+
+
+def window_stream_for(window_id: int) -> MacWindowStream | None:
+    """The stream of one window (made if need be), or None to take pictures."""
+    if _frameworks() is None or int(window_id) in _broken_windows:
+        return None
+    s = _window_streams.get(int(window_id))
+    if s is None or s.dead:
+        s = _window_streams[int(window_id)] = MacWindowStream(window_id)
+    return s
+
+
+def _reap_windows(now: float | None = None) -> None:
+    now = time.monotonic() if now is None else now
+    for s in list(_window_streams.values()):
+        if s.users == 0 and s.released_at is not None and now - s.released_at >= LINGER_S:
+            s.stop()

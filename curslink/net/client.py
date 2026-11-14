@@ -15,7 +15,7 @@ from curslink.net import quality
 from curslink.net.framing import STREAM_LIMIT, read_message
 from curslink.net.relay import RelayError, RelayTarget, agent_connect
 from curslink.net.udp import AgentUdp
-from curslink.protocol import (AGENT_FEATURES, CLIPBOARD_FEATURE, EDGE_FEATURE, FILES_FEATURE, FILES_OUT_FEATURE, DROP_FEATURE, FILE_ACK_FEATURE, MIRROR_CURSOR_FEATURE, MIRROR_FEATURE, MIRROR_TILES_FEATURE, NETSTATS_FEATURE, POPUPS_FEATURE, PREPARE_FEATURE, PROTOCOL_VERSION, SCREENS_FEATURE, UDP_FEATURE, Message, ProtocolError,
+from curslink.protocol import (AGENT_FEATURES, APP_MIRROR_FEATURE, CLIPBOARD_FEATURE, EDGE_FEATURE, FILES_FEATURE, FILES_OUT_FEATURE, DROP_FEATURE, FILE_ACK_FEATURE, MIRROR_CURSOR_FEATURE, MIRROR_FEATURE, MIRROR_TILES_FEATURE, NETSTATS_FEATURE, POPUPS_FEATURE, PREPARE_FEATURE, PROTOCOL_VERSION, SCREENS_FEATURE, UDP_FEATURE, Message, ProtocolError,
                                encode)
 from curslink.security import channel_binding, hello_auth
 from curslink.tally import Tally
@@ -76,6 +76,10 @@ class AgentSession:
         # covered areas (mirror, mirror_frame, mirror_pointer, mirror_ack);
         # without one the agent doesn't offer the "mirror" feature.
         self.mirror = None
+        # A curslink.appmirror.AppMirrorDevice casts this computer's app
+        # windows (app_do, and the left button for title bar drags); without
+        # one the agent doesn't offer the "app_mirror" feature.
+        self.app_mirror = None
         # A curslink.clipboard.sync.ClipboardSync shares the clipboard with
         # the host (clip, clip_data); without one the agent doesn't offer
         # the "clipboard" feature.
@@ -189,6 +193,9 @@ class AgentSession:
         elif t in ("mirror", "mirror_frame", "mirror_pointer", "mirror_ack"):
             if self.mirror is not None:
                 self.mirror.handle(t, dict(msg.data))
+        elif t == "app_do":
+            if self.app_mirror is not None:
+                self.app_mirror.handle(dict(msg.data))
         elif t in ("clip", "clip_data"):
             if self.clipboard is not None:
                 self.clipboard.handle("host", t, dict(msg.data))
@@ -206,6 +213,8 @@ class AgentSession:
                 return None
             (self.buttons.add if pressed else self.buttons.discard)(name)
             self.sink.button(name, pressed)
+            if self.app_mirror is not None:
+                self.app_mirror.on_button(name, pressed)
             if self.drag_out is not None:
                 self.drag_out.on_button(name, pressed)
         elif t == "scroll":
@@ -481,6 +490,8 @@ class AgentClient:
                 features.append(UDP_FEATURE)
             if self.session.mirror is not None:
                 features += [MIRROR_FEATURE, MIRROR_CURSOR_FEATURE, MIRROR_TILES_FEATURE]
+            if self.session.app_mirror is not None and self.session.mirror is not None:
+                features.append(APP_MIRROR_FEATURE)
             features.append(NETSTATS_FEATURE)
             if self.session.clipboard is not None:
                 features.append(CLIPBOARD_FEATURE)

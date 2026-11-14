@@ -410,8 +410,10 @@ class MirrorPeer:
     helper's lines with :meth:`helper_line` from there."""
 
     def __init__(self, helper: Callable[[str], None], send: Callable[..., None], images: Callable[[str, str], None] | None = None,
-                 on_shows: Callable[[list[dict]], None] | None = None):
+                 on_shows: Callable[[list[dict]], None] | None = None, only_apps: bool = False):
         self.helper = helper
+        # Mirror mode is off here ([agent] mirror = false): only App mirror's.
+        self.only_apps = only_apps
         self.on_shows = on_shows  # an agent's CursorPark.shows
         self.send = send
         # (stream id, line): frames to show, off the loop (see LatestWriter).
@@ -419,17 +421,24 @@ class MirrorPeer:
         self.source = MirrorSource(send)
         self.state = EMPTY
         self.showing: set[str] = set()
+        # Told each state's captures (App mirror watches the windows it casts).
+        self.on_captures: Callable[[list[dict]], None] | None = None
 
     def handle(self, t: str, data: dict) -> None:
         if t == "mirror":
             captures = [c for c in data.get("captures", []) if isinstance(c, dict) and isinstance(c.get("id"), str)]
             shows = [s for s in data.get("shows", []) if isinstance(s, dict) and isinstance(s.get("id"), str)]
+            if self.only_apps:
+                captures = [c for c in captures if c["id"].startswith("app:")]
+                shows = [s for s in shows if s["id"].startswith("app:")]
             self.state = {"captures": captures, "shows": shows}
             self.source.reset(c["id"] for c in captures)
             self.showing = {s["id"] for s in shows}
             self.helper(_command("mirror", self.state))
             if self.on_shows is not None:
                 self.on_shows(shows)
+            if self.on_captures is not None:
+                self.on_captures(captures)
         elif t == "mirror_frame":
             sid = data.get("id")
             if sid in self.showing:
@@ -570,6 +579,9 @@ class MirrorHost:
         self.tuning: tuple[str, str] | None = None
         self._through = layout.pointer_through
         self._anchors: dict = {}  # where its guides are (see device_states)
+        # App mirror (curslink.appmirror.AppMirrorHost): its captures and
+        # shows go in the same mirror states, its frames the same way.
+        self.apps = None
 
     def can(self, device_id: str) -> bool:
         if device_id == self.local_id:
@@ -674,6 +686,13 @@ class MirrorHost:
                                cast=lambda s: self.router.screen == s.source and self._captures_cursor(s.source.device_id),
                                tiles=lambda s: self._takes_tiles(s.target.device_id), quality=self.stream_quality,
                                keys=self.keys)
+        if self.apps is not None:
+            extra = self.apps.states(lambda a, b: self.pair_fps(a, b), lambda a, b: self.pair_quality(a, b),
+                                     self._takes_tiles)
+            for device, more in extra.items():
+                state = states.setdefault(device, {"captures": [], "shows": []})
+                state["captures"] = state["captures"] + more["captures"]
+                state["shows"] = state["shows"] + more["shows"]
         for device in set(self.sent) | set(states):
             state = states.get(device, EMPTY)
             if self.sent.get(device, EMPTY) == state:
@@ -702,8 +721,18 @@ class MirrorHost:
         return AUTO_FPS[self._level(s)]
 
     def _level(self, s: Stream) -> str:
-        levels = {self.link_level(s.source.device_id), self.link_level(s.target.device_id)}
+        return self._pair_level(s.source.device_id, s.target.device_id)
+
+    def _pair_level(self, a: str, b: str) -> str:
+        levels = {self.link_level(a), self.link_level(b)}
         return next((lv for lv in ("poor", "fair") if lv in levels), "good")
+
+    def pair_fps(self, a: str, b: str) -> int:
+        """Frames a second for a picture going from device ``a`` to ``b``."""
+        return self.fps if self.fps != AUTO else AUTO_FPS[self._pair_level(a, b)]
+
+    def pair_quality(self, a: str, b: str) -> str:
+        return AUTO_QUALITY[self._pair_level(a, b)] if self.quality == "auto" else self.quality
 
     def stream_quality(self, s: Stream) -> str:
         """A stream's picture quality: the setting, or on auto by its links."""
@@ -719,6 +748,15 @@ class MirrorHost:
     # -- frames and answers ----------------------------------------------------
     def on_frame(self, device_id: str, frame: dict) -> None:
         """A captured frame, from ``device_id`` (an agent, or this computer)."""
+        route = self._app_route(frame.get("id"))
+        if route is not None:
+            if route[0] != device_id:
+                if device_id != self.local_id:
+                    self.server.send(device_id, "mirror_ack", id=frame.get("id"))
+                return
+            data = {k: frame[k] for k in ("id", "jpg", "w", "h", "cursor", "tile") if k in frame}
+            self._to(route[1], "mirror_frame", **data)
+            return
         stream = self.streams.get(frame.get("id"))
         if stream is None or stream.source.device_id != device_id:
             if device_id != self.local_id:
@@ -729,10 +767,20 @@ class MirrorHost:
 
     def on_ack(self, device_id: str, sid) -> None:
         """The device showing a stream showed (or dropped) one of its frames."""
+        route = self._app_route(sid)
+        if route is not None:
+            if route[1] == device_id:
+                self._to(route[0], "mirror_ack", id=sid)
+            return
         stream = self.streams.get(sid)
         if stream is None or stream.target.device_id != device_id:
             return
         self._to(stream.source.device_id, "mirror_ack", id=sid)
+
+    def _app_route(self, sid) -> tuple[str, str] | None:
+        if self.apps is None or not (isinstance(sid, str) and sid.startswith("app:")):
+            return None
+        return self.apps.route(sid) or ("", "")
 
     def on_message(self, device_id: str, t: str, data: dict) -> None:
         """HostServer.on_mirror."""

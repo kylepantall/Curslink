@@ -70,6 +70,16 @@ Host -> agent
                                        where the pointer is in a mirror it shows
                                        (0..1 across and down), or none
     mirror_ack   {id}                  a frame it captured was shown: send another
+    app_do       {id, do, os?}         App mirror (see curslink.appmirror), on the
+                                       device an app window is cast from: do "raise"
+                                       (bring it to the front: the pointer went into
+                                       its mirror), "restore" (put it back at os, where
+                                       it was before it was dragged off), "stop" (no
+                                       longer cast). Its picture goes in the mirror
+                                       state (a capture with "window") and its mirror
+                                       on the other device too (a show with "app");
+                                       only to an agent whose hello.features has
+                                       "app_mirror"
     edge         {role, rect, side, a, b, at, near, name?, kind?} | {hide} | {flash}
                                        the edge indicator: an edge of this device
                                        leads to another (role "from") or the
@@ -106,6 +116,14 @@ Agent -> host
     mirror_tune {id, mx, my} | {id, grow, ax, ay}
                                        the mirror being adjusted was dragged or zoomed
     mirror_ack   {id}                  a frame of a mirror it shows was shown
+    app_drag     {window} | {none}     App mirror: a window here is being dragged by
+                                       its title bar (left held): {wid, pid, app,
+                                       title, os, start, grab}; none when it's let go
+    app_window   {id, os} | {id, gone} a cast window moved or changed size (OS
+                                       pixels), or closed
+    app_view     {id, os} | {id, closed}
+                                       a mirrored app window here was resized or
+                                       moved (OS pixels), or closed with its x
     screens      {screens, screen_mm?}  its monitors changed (one plugged in, taken
                                        away or moved): all of them, as in hello;
                                        only to a host whose welcome.features has
@@ -173,6 +191,10 @@ MESSAGE_TYPES = frozenset(
         "netstats",
         "screens",
         "mirror_tune",
+        "app_do",
+        "app_drag",
+        "app_window",
+        "app_view",
         "edge",
         "clip",
         "clip_data",
@@ -198,6 +220,9 @@ BUTTONS = frozenset({"left", "right", "middle", "x1", "x2"})
 EFFECTS = frozenset({"pop", "blink", "none"})
 # What this host understands beyond the base protocol, sent in welcome.features.
 HOST_FEATURES = ("facing", "popups", "mirror", "netstats", "screens")
+# App mirror (see curslink.appmirror): a host that takes app_drag, app_window
+# and app_view, and an agent that takes app_do and casts and shows app windows.
+APP_MIRROR_FEATURE = "app_mirror"
 # What this agent understands beyond the base protocol, sent in hello.features.
 # An agent without "look" would reject a look frame as unknown and drop the
 # connection, so the host only sends one to agents that list it.
@@ -347,6 +372,17 @@ def _validate(msg: Message) -> None:
             raise ProtocolError(f"{t}.id must be a non-empty string")
         if t == "mirror_frame" and not isinstance(msg.data.get("jpg"), str):
             raise ProtocolError("mirror_frame.jpg must be a string")
+    elif t in ("app_do", "app_window", "app_view"):
+        if not isinstance(msg.data.get("id"), str) or not msg.data["id"]:
+            raise ProtocolError(f"{t}.id must be a non-empty string")
+        if t == "app_do" and msg.data.get("do") not in ("raise", "restore", "stop"):
+            raise ProtocolError("app_do.do must be raise, restore or stop")
+        rect = msg.data.get("os")
+        if rect is not None and not (isinstance(rect, list) and len(rect) == 4 and all(_is_number(v) for v in rect)):
+            raise ProtocolError(f"{t}.os must be [x, y, width, height]")
+    elif t == "app_drag":
+        if msg.data.get("none") is not True and not isinstance(msg.data.get("window"), dict):
+            raise ProtocolError("app_drag needs a window, or none")
     elif t == "edge":
         d = msg.data
         if d.get("hide") is not True and d.get("flash") is not True:
