@@ -86,9 +86,11 @@ Host -> agent
     clip_data    {id, data, end?}      the next bytes of a clip (base64)
 
 Agent -> host
-    hello        {v, device_id, name, platform, screens, auth, camera, ping_s}
+    hello        {v, device_id, name, platform, screens, auth, camera, ping_s, pointer?}
                                        ping_s (optional): ping this agent only this
-                                       often (s, up to 15); a phone saves battery
+                                       often (s, up to 15); a phone saves battery;
+                                       pointer (optional): {os, speed, accel}, how
+                                       its own mouse is set up (curslink.pointerfeel)
     pong         {n, ts}               ts: the ping's, echoed (times the round trip)
     facing       {facing}              the agent's own camera sees the user
                                        facing it (true) or not (false)

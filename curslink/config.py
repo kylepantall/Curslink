@@ -21,6 +21,7 @@ from curslink.net.relay import (
     parse_address,
     room_id,
 )
+from curslink.pointerfeel import PointerSettings, pointer_settings
 from curslink.protocol import DEFAULT_PORT
 from curslink.router import RouterSettings
 from curslink.security import WeakSecretError, derive_key
@@ -100,6 +101,8 @@ class HostConfig:
     keep_screen_on: bool = False
     # How keys change on their way to each device (see curslink.inputs.keys.KeyMaps).
     keymaps: KeyMaps = field(default_factory=KeyMaps)
+    # How fast the pointer moves on each other device ([pointer]; see curslink.pointerfeel).
+    pointer: PointerSettings = field(default_factory=PointerSettings)
 
     @property
     def name(self) -> str:
@@ -543,6 +546,7 @@ def host_config(raw: dict[str, Any], base_dir: Path = Path(".")) -> HostConfig:
         clipboard_max_mb=_clipboard_max_mb(host, "[host]"),
         hide_cursor=bool(host.get("hide_cursor", True)),
         keep_screen_on=bool(host.get("keep_screen_on", False)),
+        pointer=pointer_settings(raw),
     )
 
 
