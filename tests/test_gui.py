@@ -32,6 +32,7 @@ def desktop(qapp, tmp_path, monkeypatch):
     app.window = MainWindow(app)
     app.tray = Tray(app)
     yield app
+    app.debug_feed.close()
     app.window.close()
     app.window.deleteLater()
 
@@ -1362,3 +1363,29 @@ def test_agent_shows_identify_cards_from_the_host(desktop, qapp):
     desktop._on_identify({"event": "identify", "screens": [{"screen": "main", "number": 3, "title": "Host"}]})
     assert desktop._identify is not None and desktop._identify.showing
     desktop._identify.hide()
+
+
+def test_debug_console_shows_json_lines_live_and_filters(desktop, qapp):
+    import logging
+
+    desktop.service.event.emit({"event": "switch", "from": "desk", "to": "laptop", "reason": "gaze"})
+    desktop.service.event.emit({"event": "network", "links": []})  # every 2 s: hidden unless asked for
+    desktop.service.event.emit({"event": "log", "level": "warning", "logger": "curslink.net.udp", "message": "quiet",
+                                "rec": {"type": "log", "ts": "2999-01-01T00:00:00.000Z", "proc": "host",
+                                        "lvl": "warning", "sub": "net.udp", "msg": "quiet"}})
+    desktop.show_console()
+    console = desktop.console
+    logging.getLogger("curslink.gui.test").warning("from the app")  # (the root logger is at WARNING here)
+    qapp.processEvents()
+    lines = [json.loads(x) for x in console.view.toPlainText().splitlines()]  # every line parses
+    assert any(r.get("event") == "switch" and r["fields"]["to"] == "laptop" for r in lines)
+    assert any(r.get("sub") == "net.udp" and r["msg"] == "quiet" for r in lines)
+    assert any(r.get("msg") == "from the app" and r["proc"] for r in lines)
+    assert not any(r.get("event") == "network" for r in lines)
+    console.noisy.setChecked(True)
+    assert any(json.loads(x).get("event") == "network" for x in console.view.toPlainText().splitlines())
+    console.filter.setText("sub=net -switch")
+    assert [json.loads(x)["msg"] for x in console.view.toPlainText().splitlines()] == ["quiet"]
+    console.level.setCurrentIndex(2)  # warnings and errors
+    assert "quiet" in console.view.toPlainText()
+    console.close()

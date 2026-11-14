@@ -49,7 +49,12 @@ class Curslink(QObject):
         super().__init__()
         self.prefs = prefs
         self.status = Status(self)
+        from curslink.gui.console import DebugFeed
+
+        self.debug_feed = DebugFeed(self)
+        self.console = None
         self.service = Service(self)
+        self.service.event.connect(lambda event: self.debug_feed.service_event(event, self.service.role))
         self.service.event.connect(self.status.apply)
         self.service.output.connect(lambda line: self.status.add_log("output", line))
         self.service.state_changed.connect(self._on_service_state)
@@ -68,8 +73,23 @@ class Curslink(QObject):
         self.app_filters: list = []  # app-wide event filters, removed before quitting
         self.window = None
         self.tray = None
+        self.config_changed.connect(self._name_logs)
+        self._name_logs()
         diagnostics.on_crash(lambda path: call_on_main(
             lambda: self.status.add_log("error", f"Something went wrong; a report was saved to {path}")))
+
+    def _name_logs(self) -> None:
+        diagnostics.set_identity(self.device_name() or None, self.role)
+
+    def show_console(self) -> None:
+        """Open (or bring forward) the debug console."""
+        if self.console is None:
+            from curslink.gui.console import DebugConsole
+
+            self.console = DebugConsole(self.debug_feed, save_bundle=diagnostics.write_bundle)
+        self.console.show()
+        self.console.raise_()
+        self.console.activateWindow()
 
     # -- the config file ----------------------------------------------------
     @property
@@ -546,6 +566,9 @@ class Curslink(QObject):
             # a second quit inside the first.
             return
         self.quitting = True
+        self.debug_feed.close()
+        if self.console is not None:
+            self.console.close()
         self.service.stop()
         if self.tray is not None:
             self.tray.hide()

@@ -148,8 +148,9 @@ class SettingsPage(Page):
             detail = ("Automatic. On Windows and Linux, Cmd works as Ctrl, so Cmd+C copies and Cmd+V pastes the way "
                       "they do here. On a Mac every key works as usual.")
         else:
-            detail = ("Automatic. On a Mac, Ctrl works as Cmd, so Ctrl+C copies and Ctrl+V pastes the way they do "
-                      "here. On Windows and Linux every key works as usual.")
+            detail = ("Automatic. On a Mac, the keys work where a Mac keyboard has them: Alt beside the space bar "
+                      "is Cmd, so Alt+C copies, Alt+V pastes and Alt+Tab switches apps, and the Windows key is "
+                      "Option. On Windows and Linux every key works as usual.")
         self.keyboard_card.add_row(text_block(title, detail), self.swap_keys)
         self.pair_maps_button = button("Customise…", None, self.edit_pair_maps)
         self.pair_maps_text = text_block("Change a single key", "Only needed if a key does the wrong thing.")
@@ -333,10 +334,12 @@ class SettingsPage(Page):
         row = QHBoxLayout()
         row.addWidget(button("Open the logs folder", None, self.open_logs))
         row.addWidget(button("Save a diagnostics file…", None, self.save_bundle))
+        row.addWidget(button("Open the debug console", None, app.show_console))
         row.addStretch(1)
         diag.body.addLayout(row)
-        diag.body.addWidget(label("Send the diagnostics file with a bug report. It has the logs and crash reports, "
-                                  "not your pairing keys.", "small", wrap=True))
+        diag.body.addWidget(label("Send the diagnostics file with a bug report. It's one file, a JSON object per "
+                                  "line, with the logs, settings and crash reports, not your pairing keys. The "
+                                  "debug console shows the same lines live (Ctrl+Shift+D, or Cmd+Shift+D on a Mac).", "small", wrap=True))
         self.add(diag)
         self.finish()
 
@@ -880,7 +883,7 @@ class SettingsPage(Page):
 
     def save_bundle(self) -> None:
         start = str(Path.home() / "Desktop" / diagnostics.bundle_name())
-        path, _ = QFileDialog.getSaveFileName(self, "Save diagnostics", start, "Zip files (*.zip)")
+        path, _ = QFileDialog.getSaveFileName(self, "Save diagnostics", start, "JSON lines (*.jsonl)")
         if not path:
             return
         try:
