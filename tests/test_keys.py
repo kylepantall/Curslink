@@ -130,7 +130,8 @@ def test_key_mapper_uses_the_pair_of_the_agent():
                                           "mac": SimpleNamespace(platform="Darwin 24.1")})
     key_for = key_mapper(server, KeyMaps({"linux>windows": {"alt": "cmd"}}), "linux")
     assert key_for("win", "alt_l") == "cmd_l"
-    assert key_for("mac", "ctrl") == "cmd"   # preset for linux -> mac
+    assert key_for("mac", "alt_l") == "cmd_l"   # preset for linux -> mac
+    assert key_for("mac", "ctrl") == "ctrl"
     assert key_for("gone", "alt") == "alt"
 
 
@@ -159,3 +160,42 @@ def test_agent_learn_mode_reports_keys_instead_of_typing():
     assert sink.calls[-1] == ("key", "a", True)
     agent_command(session, stop, "stop")
     assert stop.is_set()
+
+
+def test_a_pc_keyboard_on_a_mac_has_the_keys_where_a_mac_keyboard_does():
+    """Alt beside the space bar is Cmd (Alt+C copies, Alt+Tab switches
+    apps), the Windows key is Option, Ctrl stays Control and AltGr stays
+    Option so it types the same extra characters."""
+    from curslink.inputs.keys import KeyMaps
+
+    maps = KeyMaps()
+    got = {k: maps.key("win32", "Darwin 25.6.0", k) for k in
+           ("alt", "alt_l", "alt_gr", "cmd", "cmd_l", "cmd_r", "ctrl_l", "ctrl_r", "tab", "c")}
+    assert got == {"alt": "cmd", "alt_l": "cmd_l", "alt_gr": "alt_r", "cmd": "alt", "cmd_l": "alt_l",
+                   "cmd_r": "alt_r", "ctrl_l": "ctrl_l", "ctrl_r": "ctrl_r", "tab": "tab", "c": "c"}
+    assert maps.key("linux", "Darwin 25.6.0", "alt_l") == "cmd_l"
+    # A Mac keyboard on a PC still trades Cmd and Ctrl.
+    assert maps.key("darwin", "Windows 11", "cmd_l") == "ctrl_l"
+    assert maps.key("darwin", "Windows 11", "alt_l") == "alt_l"
+
+
+def test_altgr_made_up_ctrl_is_recognised():
+    from curslink.inputs.pynput_backend import is_altgr_ctrl
+
+    assert is_altgr_ctrl(0xA2, 0x21D)
+    assert not is_altgr_ctrl(0xA2, 0x1D)   # a real left Ctrl
+    assert not is_altgr_ctrl(0xA5, 0x38)
+
+
+def test_mac_keycode_for_shifted_characters_and_capitals():
+    from curslink.inputs.pynput_backend import mac_keycode_for
+
+    base = {"a": 0, "z": 6, "2": 19, "'": 39}
+    shifted = {"A": 0, "Z": 6, "@": 19, '"': 39}
+    assert mac_keycode_for("z", False, base, shifted) == 6
+    assert mac_keycode_for("Z", True, base, shifted) == 6     # Cmd+Shift+Z, not keycode 0
+    assert mac_keycode_for('"', True, base, shifted) == 39
+    assert mac_keycode_for("Z", False, base, shifted) == 6    # a capital is its letter's key
+    assert mac_keycode_for('"', False, base, shifted) is None  # needs Shift: typed as text
+    assert mac_keycode_for("€", True, base, shifted) is None
+    assert mac_keycode_for("", False, base, shifted) is None

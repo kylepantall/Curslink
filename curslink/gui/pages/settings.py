@@ -148,8 +148,9 @@ class SettingsPage(Page):
             detail = ("Automatic. On Windows and Linux, Cmd works as Ctrl, so Cmd+C copies and Cmd+V pastes the way "
                       "they do here. On a Mac every key works as usual.")
         else:
-            detail = ("Automatic. On a Mac, Ctrl works as Cmd, so Ctrl+C copies and Ctrl+V pastes the way they do "
-                      "here. On Windows and Linux every key works as usual.")
+            detail = ("Automatic. On a Mac, the keys work where a Mac keyboard has them: Alt beside the space bar "
+                      "is Cmd, so Alt+C copies, Alt+V pastes and Alt+Tab switches apps, and the Windows key is "
+                      "Option. On Windows and Linux every key works as usual.")
         self.keyboard_card.add_row(text_block(title, detail), self.swap_keys)
         self.pair_maps_button = button("Customise…", None, self.edit_pair_maps)
         self.pair_maps_text = text_block("Change a single key", "Only needed if a key does the wrong thing.")
