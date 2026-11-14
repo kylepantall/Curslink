@@ -98,7 +98,7 @@ def preset_map(src: str, dst: str) -> dict[str, str]:
       Alt+Tab switches apps; the Windows key is Option and Ctrl stays
       Control. AltGr (the right Alt on a UK or European PC keyboard) stays
       Option, which types the same extra characters on a Mac. (Before
-      0.4.77 Ctrl was Cmd here, and Alt+Tab did nothing.)
+      0.4.78 Ctrl was Cmd here, and Alt+Tab did nothing.)
 
     Android takes Cmd and Ctrl both as Ctrl already, so it needs nothing."""
     pc = ("windows", "linux")
