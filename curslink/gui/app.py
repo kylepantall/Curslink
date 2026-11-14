@@ -56,6 +56,7 @@ class Curslink(QObject):
         self.service.event.connect(self._on_look)
         self.service.event.connect(self._on_hint)
         self.service.event.connect(self._on_identify)
+        self.service.event.connect(self._on_lineup)
         self.calibrating = False  # host: the service gave the camera to calibration
         self.service.event.connect(self._on_calibrating)
         self.service.event.connect(self._on_paired)
@@ -63,6 +64,7 @@ class Curslink(QObject):
         self._look = None
         self._hint = None
         self._identify = None
+        self._lineup = None
         self.release: update.Release | None = None
         self.quitting = False
         self.app_filters: list = []  # app-wide event filters, removed before quitting
@@ -313,6 +315,19 @@ class Curslink(QObject):
         if event.get("event") != "identify":
             return
         self.identify({k: v for k, v in event.items() if k != "event"})
+
+    def _on_lineup(self, event: dict) -> None:
+        """Agent: an auto line-up on the host puts its patterns on our monitors
+        (see curslink.gui.lineup)."""
+        if event.get("event") != "lineup":
+            return
+        if self._lineup is None:
+            if event.get("hide"):
+                return
+            from curslink.gui.lineup import Markers
+
+            self._lineup = Markers()
+        self._lineup.show({k: v for k, v in event.items() if k != "event"})
 
     def _on_calibrating(self, event: dict) -> None:
         if event.get("event") == "calibrating":

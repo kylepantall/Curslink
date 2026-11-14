@@ -84,6 +84,15 @@ Host -> agent
                                        list "clipboard" in their features (or an
                                        agent's "clipboard_text": text only)
     clip_data    {id, data, end?}      the next bytes of a clip (base64)
+    lineup       {screens, seconds} | {hide}
+                                       auto line-up (see curslink.lineup): show
+                                       these patterns on these monitors until
+                                       hidden (screens: [{screen, os, markers,
+                                       number, title}]); only to an agent whose
+                                       hello.features has "lineup"
+    lineup_camera {id} | {id, cancel}  take a photo of the desk for that line-up
+                                       (or don't any more); only to an agent whose
+                                       hello.features has "lineup_camera" (a phone)
 
 Agent -> host
     hello        {v, device_id, name, platform, screens, auth, camera, ping_s, pointer?}
@@ -117,6 +126,14 @@ Agent -> host
                                        the share of the host's datagrams lost on the
                                        way, and the UDP round trip (see
                                        curslink.net.quality). Numbers may be null
+    lineup_photo {id, size} | {id, cancel}
+                                       the photo for a lineup_camera (its JPEG
+                                       bytes follow in lineup_data frames), or
+                                       none (the person backed out)
+    lineup_data  {id, data, end?}      the next bytes of it (base64)
+    lineup_request {}                  the person asked for a line-up on the
+                                       phone: start one (only to a host whose
+                                       welcome.features has "lineup")
 
 ``hello.camera`` is true when the agent runs its own camera to confirm
 gaze switches (see :mod:`curslink.gaze.confirm`). An agent only sends
@@ -176,6 +193,11 @@ MESSAGE_TYPES = frozenset(
         "edge",
         "clip",
         "clip_data",
+        "lineup",
+        "lineup_camera",
+        "lineup_photo",
+        "lineup_data",
+        "lineup_request",
         "bye",
         "drag",
         "drag_out",
@@ -197,11 +219,16 @@ MESSAGE_TYPES = frozenset(
 BUTTONS = frozenset({"left", "right", "middle", "x1", "x2"})
 EFFECTS = frozenset({"pop", "blink", "none"})
 # What this host understands beyond the base protocol, sent in welcome.features.
-HOST_FEATURES = ("facing", "popups", "mirror", "netstats", "screens")
+HOST_FEATURES = ("facing", "popups", "mirror", "netstats", "screens", "lineup")
 # What this agent understands beyond the base protocol, sent in hello.features.
 # An agent without "look" would reject a look frame as unknown and drop the
 # connection, so the host only sends one to agents that list it.
-AGENT_FEATURES = ("look", "hint", "identify")
+AGENT_FEATURES = ("look", "hint", "identify", "lineup")
+# A phone that takes the photo for an auto line-up (lineup_camera, then
+# lineup_photo and lineup_data back; see curslink.lineup).
+LINEUP_CAMERA_FEATURE = "lineup_camera"
+# Up to this many bytes of photo are taken.
+LINEUP_PHOTO_MAX = 16 * 1024 * 1024
 # Added to hello.features by an agent that draws the edge indicator (edge frames).
 EDGE_FEATURE = "edge"
 # Added to hello.features by an agent that takes dragged files (drag and
@@ -339,6 +366,14 @@ def _validate(msg: Message) -> None:
     elif t == "identify":
         if msg.data.get("hide") is not True and not isinstance(msg.data.get("screens"), list):
             raise ProtocolError("identify needs screens, or hide")
+    elif t == "lineup":
+        if msg.data.get("hide") is not True and not isinstance(msg.data.get("screens"), list):
+            raise ProtocolError("lineup needs screens, or hide")
+    elif t in ("lineup_camera", "lineup_photo", "lineup_data"):
+        if not isinstance(msg.data.get("id"), str) or not msg.data["id"]:
+            raise ProtocolError(f"{t}.id must be a non-empty string")
+        if t == "lineup_data" and not isinstance(msg.data.get("data"), str):
+            raise ProtocolError("lineup_data.data must be a string")
     elif t == "mirror":
         if not isinstance(msg.data.get("captures"), list) or not isinstance(msg.data.get("shows"), list):
             raise ProtocolError("mirror needs captures and shows")
