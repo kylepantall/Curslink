@@ -237,7 +237,10 @@ class PairMapDialog(QDialog):
         elif custom is not None:
             self.note.setText("You changed keys for this pair.")
         elif mapping:
-            self.note.setText("Automatic: Cmd and Ctrl trade places, so shortcuts work the way each computer "
+            src = str(self.src.currentData())
+            self.note.setText("Automatic: Alt works as Cmd and the Windows key as Option, where a Mac keyboard "
+                              "has them." if src != "mac" else
+                              "Automatic: Cmd and Ctrl trade places, so shortcuts work the way each computer "
                               "expects.")
         else:
             self.note.setText("Automatic: every key works as usual for this pair.")
