@@ -291,8 +291,8 @@ front of it shows the part it covers, live (`curslink.mirror`).
   OS pixels, and the agent places the landing effect as a fraction of it,
   not by its own screen list (which Windows scaling can put in other
   pixels: the effect played off where the pointer landed).
-- Diagnostics bundles carry the config's `[layout]` (screens, fits) as
-  `layout.toml`, and nothing else of it.
+- Diagnostics files carry every settings file (secrets left out) as
+  `config` records, so the layout (screens, fits) is in them.
 - Crossings between lined-up screens go by the fit: `Layout.find_crossing`
   looks for the screen in front where the line-up put it
   (`Layout.placed`), not where the layout's rectangle has it, so the whole
@@ -532,6 +532,39 @@ host logs mouse report rate, loop wait, event tap time and ping round trip;
 the agent logs arrival rate, lateness, longest gap, playback delay and
 injection time. That's the first thing to read in a diagnostics bundle
 when the pointer feels laggy.
+
+### Logs, the debug console and diagnostics files
+
+Every process writes `<process>.log` (text) and `<process>.jsonl` beside it:
+one JSON object per line, flat and the same everywhere:
+
+```json
+{"type":"log","ts":"2026-11-14T21:50:14.123Z","device":"Desk","role":"host","proc":"host","pid":812,
+ "thread":"MainThread","lvl":"info","sub":"net.udp","msg":"UDP went quiet","event":"udp_quiet","fields":{"gap_ms":900}}
+```
+
+`ts` is UTC so lines from several computers sort as text. `sub` is the
+logger name without `curslink.`. `event` and `fields` appear when the code
+logs with `diagnostics.event(log, "name", "text", key=value)`; plain
+`log.info(...)` lines just have `msg`.
+
+- The service forwards each record to the app inside its `log` event
+  (`rec`), so the **debug console** (Settings > Diagnostics, or
+  Ctrl/Cmd+Shift+D; `curslink/gui/console.py`) shows the app's and the
+  service's lines live, plus every status event as
+  `{"type":"event","event":"switch","fields":{...}}`. Its filter takes
+  words, `key=value` (`sub=net`, `fields.to=laptop`) and `-word`; network
+  samples are hidden unless ticked. "Copy shown" copies JSON lines.
+- **Save a diagnostics file** writes one `.jsonl` (no zip): a `meta` line
+  (version, platform, modules), a `config` line per settings file with
+  secrets left out, a `crash` line per crash report, a `stacks` line, then
+  every process's `log` lines merged in time order. A process with only a
+  text log (the Windows helper, an older version) is parsed into the same
+  shape (`"src":"text"`).
+- Query one with `jq` (`jq -c 'select(.lvl=="error")' file.jsonl`) or
+  `curslink diag show -f file.jsonl -l warning proc=host sub=net`
+  (`--json` for raw lines, `-n 50` for the last 50, `-- -word` to exclude);
+  without `-f` it reads this computer's logs. `curslink diag save` writes one.
 
 ### Nearby pairing
 

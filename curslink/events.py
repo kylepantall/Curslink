@@ -105,11 +105,14 @@ class _LogForwarder(logging.Handler):
         super().__init__(logging.INFO)
 
     def emit(self, record: logging.LogRecord) -> None:
+        from curslink.diagnostics import record_dict
+
         try:
-            message = record.getMessage()
-        except Exception:  # pragma: no cover - a broken format string
+            rec = record_dict(record)
+        except Exception:  # pragma: no cover - a log line mustn't break the service
             return
-        channel.emit("log", level=record.levelname.lower(), logger=record.name, message=message)
+        # level/logger/message for the activity log; rec is the debug console's line.
+        channel.emit("log", level=rec["lvl"], logger=record.name, message=rec["msg"], rec=rec)
 
 
 def read_commands(loop: asyncio.AbstractEventLoop, handle: Callable[[str], None],

@@ -334,10 +334,12 @@ class SettingsPage(Page):
         row = QHBoxLayout()
         row.addWidget(button("Open the logs folder", None, self.open_logs))
         row.addWidget(button("Save a diagnostics file…", None, self.save_bundle))
+        row.addWidget(button("Open the debug console", None, app.show_console))
         row.addStretch(1)
         diag.body.addLayout(row)
-        diag.body.addWidget(label("Send the diagnostics file with a bug report. It has the logs and crash reports, "
-                                  "not your pairing keys.", "small", wrap=True))
+        diag.body.addWidget(label("Send the diagnostics file with a bug report. It's one file, a JSON object per "
+                                  "line, with the logs, settings and crash reports, not your pairing keys. The "
+                                  "debug console shows the same lines live (Ctrl+Shift+D, or Cmd+Shift+D on a Mac).", "small", wrap=True))
         self.add(diag)
         self.finish()
 
@@ -881,7 +883,7 @@ class SettingsPage(Page):
 
     def save_bundle(self) -> None:
         start = str(Path.home() / "Desktop" / diagnostics.bundle_name())
-        path, _ = QFileDialog.getSaveFileName(self, "Save diagnostics", start, "Zip files (*.zip)")
+        path, _ = QFileDialog.getSaveFileName(self, "Save diagnostics", start, "JSON lines (*.jsonl)")
         if not path:
             return
         try:

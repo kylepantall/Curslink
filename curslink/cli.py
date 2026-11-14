@@ -63,7 +63,10 @@ def _events(args) -> None:
 def cmd_host(args) -> int:
     from curslink.app import run_host
 
+    from curslink import diagnostics
+
     cfg = _host_cfg(args.config)
+    diagnostics.set_identity(cfg.name, "host")
     _events(args)
     _updates(args.config, args.argv)
     asyncio.run(run_host(cfg))
@@ -78,7 +81,11 @@ def cmd_agent(args) -> int:
     raw = load_raw(args.config)
     if args.host:
         raw.setdefault("agent", {})["host"] = args.host
-    asyncio.run(run_agent(agent_config(raw, base_dir=Path(args.config).parent)))
+    cfg = agent_config(raw, base_dir=Path(args.config).parent)
+    from curslink import diagnostics
+
+    diagnostics.set_identity(cfg.name or cfg.device_id, "agent")
+    asyncio.run(run_agent(cfg))
     return 0
 
 
@@ -442,6 +449,30 @@ def _selftest() -> int:
     return 0
 
 
+def cmd_diag_save(args) -> int:
+    from curslink import diagnostics
+
+    path = Path(args.path or diagnostics.bundle_name())
+    diagnostics.write_bundle(path)
+    print(path)
+    return 0
+
+
+def cmd_diag_show(args) -> int:
+    from curslink import diagnostics
+
+    terms = list(args.terms)
+    records = diagnostics.read_records(Path(args.file)) if args.file else diagnostics.bundle_records()
+    types = set(args.type.split(",")) if args.type else None
+    hits = [r for r in records if (types is None or r.get("type", "log") in types)
+            and diagnostics.matches(r, terms, args.level)]
+    if args.tail:
+        hits = hits[-args.tail:]
+    for r in hits:
+        print(diagnostics.dumps(r) if args.json else diagnostics.short_line(r))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="curslink", description=__doc__)
     parser.add_argument("--version", action="version", version=__version__)
@@ -504,6 +535,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--yes", "-y", action="store_true", help="install without asking")
     p.add_argument("--pre", action="store_true", help="include pre-releases")
     p.set_defaults(func=cmd_update)
+
+    p = sub.add_parser("diag", help="save or read a diagnostics file (one JSON object per line)")
+    dsub = p.add_subparsers(dest="diag_command", required=True)
+    d = dsub.add_parser("save", help="write this computer's logs, settings and crash reports to one file")
+    d.add_argument("path", nargs="?", help="where (default: curslink-diagnostics-<when>.jsonl here)")
+    d.set_defaults(func=cmd_diag_save)
+    d = dsub.add_parser("show", help="filter a diagnostics file or log: terms, key=value, -term to exclude")
+    d.add_argument("terms", nargs="*", help="e.g. proc=host sub=net (put -- before a -term that excludes)")
+    d.add_argument("-f", "--file", help="a diagnostics .jsonl or a log (default: this computer's logs)")
+    d.add_argument("-l", "--level", choices=["debug", "info", "warning", "error", "critical"],
+                   help="only log lines at this level or above")
+    d.add_argument("-t", "--type", help="only these record types (log, event, meta, config, crash, stacks)")
+    d.add_argument("-n", "--tail", type=int, help="only the last N matches")
+    d.add_argument("--json", action="store_true", help="print the matching records as JSON lines")
+    d.set_defaults(func=cmd_diag_show)
 
     p = sub.add_parser("winhelper", help="Windows: control admin apps and UAC prompts (needs admin)")
     p.add_argument("action", choices=["install", "uninstall", "status"])
