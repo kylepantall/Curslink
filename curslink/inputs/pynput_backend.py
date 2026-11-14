@@ -238,10 +238,12 @@ class PynputCapture:
                     suppress=suppress,
                     **extra,
                 )
+                keys_extra = {"win32_event_filter": _win_key_filter} if sys.platform == "win32" else {}
                 self._key_listener = keyboard.Listener(
                     on_press=lambda k, injected=False: self._on_key(k, True, injected),
                     on_release=lambda k, injected=False: self._on_key(k, False, injected),
                     suppress=suppress,
+                    **keys_extra,
                 )
             self._mouse_listener.start()
             self._key_listener.start()
@@ -615,6 +617,45 @@ class PynputCapture:
             return ""
         text = SYMBOLS.get(vk, "")
         return text.upper() if shift else text
+
+
+# ---------------------------------------------------------------- Windows bits
+_WIN_LCONTROL = 0xA2
+_WIN_ALTGR_CTRL_SCAN = 0x21D  # the left Ctrl Windows makes up for AltGr
+
+
+def is_altgr_ctrl(vk: int, scan: int) -> bool:
+    """On a UK or European layout, Windows sends AltGr as a made-up left
+    Ctrl followed by right Alt. That Ctrl isn't a key anyone pressed: sent
+    on, a Mac would see Control+Option, and AltGr+4 wouldn't type "€"."""
+    return vk == _WIN_LCONTROL and scan == _WIN_ALTGR_CTRL_SCAN
+
+
+def _win_key_filter(msg, data) -> bool:
+    """pynput's keyboard filter: ``False`` keeps a key from our callbacks
+    (it is still held back from Windows while input is grabbed)."""
+    return not is_altgr_ctrl(data.vkCode, data.scanCode)
+
+
+def mac_keycode_for(char: str, shift: bool, base: dict[str, int], shifted: dict[str, int]) -> int | None:
+    """The Mac keycode to press for ``char`` with the modifiers already held.
+
+    ``base`` is what each key types alone on this Mac's layout and
+    ``shifted`` what it types with Shift. pynput only knows ``base``: any
+    other character (a capital, "!") went out as keycode 0, which is the A
+    key, with the character attached. Text came out right, but Cmd+Shift+Z
+    was Cmd+Shift+A to the app. Shortcuts go by keycode, so look the key up
+    on the Shift layer when Shift is held, and use the letter's key for a
+    capital. ``None``: let pynput type the character as text."""
+    if not char or len(char) != 1:
+        return None
+    if char in base:
+        return base[char]
+    if shift and char in shifted:
+        return shifted[char]
+    if char.lower() != char and char.lower() in base:
+        return base[char.lower()]
+    return None
 
 
 # ------------------------------------------------------------------ macOS bits
@@ -1048,11 +1089,46 @@ class PynputSink:
         self._mouse.scroll(dx, dy)
 
     def key(self, key: str, pressed: bool) -> None:
-        target = name_to_key(self.modifier_map.get(key, key))
+        name = self.modifier_map.get(key, key)
+        target = self._mac_key(name) if sys.platform == "darwin" and len(name) == 1 else None
+        if target is None:
+            target = name_to_key(name)
         if target is None:
             log.debug("key %s not supported on this platform", key)
             return
         (self._keyboard.press if pressed else self._keyboard.release)(target)
+
+
+    def _mac_key(self, char: str):
+        """A character as the Mac key that types it (see mac_keycode_for)."""
+        from pynput import keyboard
+
+        layers = self.__dict__.get("_mac_layers")
+        if layers is None:
+            layers = self._mac_layers = _mac_layers(getattr(self._keyboard, "_mapping", {}) or {})
+        with self._keyboard.modifiers as held:
+            shift = keyboard.Key.shift in held
+        vk = mac_keycode_for(char, shift, *layers)
+        return None if vk is None else keyboard.KeyCode.from_vk(vk)
+
+
+def _mac_layers(base: dict[str, int]) -> tuple[dict[str, int], dict[str, int]]:
+    """What each key types on this Mac's layout, alone and with Shift.
+    The first key wins, so digits are the top row's, not the keypad's."""
+    fallback = {c: vk for c, vk in base.items() if c and len(c) == 1}
+    base, shifted = {}, {}
+    try:
+        from pynput._util.darwin import keycode_context, keycode_to_string
+
+        with keycode_context() as ctx:
+            for vk in range(128):
+                for layer, state in ((base, 0), (shifted, 0x02)):  # shiftKey >> 8
+                    text = keycode_to_string(ctx, vk, state)
+                    if text and len(text) == 1 and text.isprintable():
+                        layer.setdefault(text, vk)
+    except Exception:  # pragma: no cover - macOS only
+        log.debug("couldn't read the keyboard layout", exc_info=True)
+    return base or fallback, shifted
 
 
 def drag_nudge(x: int, y: int, release: bool = False) -> None:

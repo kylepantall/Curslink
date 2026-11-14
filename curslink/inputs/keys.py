@@ -89,11 +89,23 @@ def pair_key(src: str, dst: str) -> str:
 
 def preset_map(src: str, dst: str) -> dict[str, str]:
     """The built-in mapping for typing on a ``src`` keyboard into a ``dst``
-    computer: Cmd and Ctrl trade places between a Mac and Windows or Linux.
+    computer.
+
+    * A Mac keyboard on Windows or Linux: Cmd and Ctrl trade places, so
+      Cmd+C (under the thumb) copies there as Ctrl+C does.
+    * A PC keyboard on a Mac: the keys sit where a Mac keyboard has them.
+      Alt, beside the space bar, is Cmd, so Alt+C copies, Alt+V pastes and
+      Alt+Tab switches apps; the Windows key is Option and Ctrl stays
+      Control. AltGr (the right Alt on a UK or European PC keyboard) stays
+      Option, which types the same extra characters on a Mac. (Before
+      0.4.77 Ctrl was Cmd here, and Alt+Tab did nothing.)
+
     Android takes Cmd and Ctrl both as Ctrl already, so it needs nothing."""
     pc = ("windows", "linux")
-    if (src == "mac" and dst in pc) or (src in pc and dst == "mac"):
+    if src == "mac" and dst in pc:
         return {"cmd": "ctrl", "ctrl": "cmd"}
+    if src in pc and dst == "mac":
+        return {"alt": "cmd", "cmd": "alt", "alt_gr": "alt_r"}
     return {}
 
 
