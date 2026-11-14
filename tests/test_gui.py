@@ -390,6 +390,34 @@ def test_settings_keep_mirroring_a_screen_while_on_ones_joined_to_it(desktop, qa
     assert "mirror_joined" not in desktop.config().raw()["layout"]
 
 
+def test_settings_set_pointer_speed_and_native_feel_per_device(desktop, qapp):
+    from curslink.config import host_config
+    from curslink.gui.pages.settings import POINTER_SPEEDS
+    from curslink.pointerfeel import DeviceFeel
+
+    desktop.window.pages["setup"].create()
+    cfg = desktop.config()
+    cfg.add_device("laptop", "Work laptop")
+    cfg.save()
+    desktop.config_saved(restart=False)
+    page = desktop.window.pages["settings"]
+    page.load()
+    assert page.pointer_card.isVisibleTo(page) and list(page.pointer_widgets) == ["laptop"]
+    feel, slider, speed_label = page.pointer_widgets["laptop"]
+    assert feel.value() == "here" and POINTER_SPEEDS[slider.value()] == 1.0
+    feel.buttons["native"].click()
+    assert desktop.config().raw()["pointer"]["device"]["laptop"] == {"feel": "native", "speed": 1.0}
+    slider.setValue(POINTER_SPEEDS.index(1.5))
+    page.set_pointer("laptop", speed=POINTER_SPEEDS[slider.value()])
+    assert host_config(desktop.config().raw()).pointer.for_device("laptop") == DeviceFeel("native", 1.5)
+    page.load()
+    assert speed_label.text() == "Speed 1.5\u00d7"
+    feel.buttons["here"].click()
+    page.set_pointer("laptop", speed=1.0)
+    assert "pointer" not in desktop.config().raw()  # back to the defaults
+    assert desktop.config().forget_device("laptop") is not None
+
+
 def test_a_screen_the_camera_couldnt_see_is_tried_again_not_skipped(desktop, qapp):
     desktop.window.pages["setup"].create()
     cfg = desktop.config()

@@ -21,6 +21,7 @@ from curslink.gaze.zones import Target
 from curslink.inputs.base import InputCapture, InputSink
 from curslink.inputs.keys import Hotkey
 from curslink.layout import Layout, Screen
+from curslink.pointerfeel import PointerFeel
 from curslink.tally import Tally
 
 log = logging.getLogger(__name__)
@@ -149,6 +150,9 @@ class Router:
         self._arrived: tuple[float, str] | None = None  # (when, from which device)
         self._moved_at = -1e9  # when the mouse last moved (self.clock())
         self._scrolls = Tally("scroll sent to the other computer")
+        # How far the pointer goes on another device for the host's mouse
+        # motion ([pointer]): its speed, or the feel of that device's own mouse.
+        self.feel = PointerFeel()
 
         first = next(iter(layout.screens(local_device_id)), None)
         if first is None:
@@ -263,6 +267,7 @@ class Router:
             return
         if dx or dy:
             self._moved_at = self.clock()
+            dx, dy = self.feel.scale(self.active_device, dx, dy, self.clock() if ts is None else ts)
         nx, ny = self.x + dx, self.y + dy
         here = self.layout.screen_at(nx, ny, self.active_device, prefer=self.screen)
         if here is None and self.settings.edge_switching:

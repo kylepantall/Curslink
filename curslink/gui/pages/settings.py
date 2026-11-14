@@ -18,6 +18,10 @@ from curslink.gui.netpanel import NetworkCard
 from curslink.gui.widgets import Card, Page, Segmented, Toggle, seg_track, button, label, spot, text_block
 
 
+# The pointer speeds the slider steps through (multipliers).
+POINTER_SPEEDS = (0.25, 0.33, 0.5, 0.67, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 4.0)
+
+
 class SettingsPage(Page):
     def __init__(self, app):
         super().__init__("Settings")
@@ -151,6 +155,19 @@ class SettingsPage(Page):
         self.pair_maps_text = text_block("Change a single key", "Only needed if a key does the wrong thing.")
         self.keyboard_card.add_row(self.pair_maps_text, self.pair_maps_button)
         self.add(self.keyboard_card)
+
+        # -- pointer speed on other devices (host) ---------------------------------
+        self.pointer_card = Card("Pointer on other devices", rows=True)
+        self.pointer_card.add_row(text_block(
+            "How fast the pointer moves there",
+            "Like this mouse: it moves as far as it would here. Like its own mouse: at that device's own "
+            "pointer speed and acceleration, as if the mouse were plugged into it (computers only; a phone "
+            "moves like this mouse). Either way, Speed makes it faster or slower."))
+        self.pointer_rows: list = []
+        self.pointer_widgets: dict[str, tuple] = {}
+        self.pointer_note = label("Pair another device to set its pointer speed.", "small", wrap=True)
+        self.pointer_card.body.addWidget(self.pointer_note)
+        self.add(self.pointer_card)
 
         # -- overlapping screens (host) -------------------------------------------
         self.mirror_card = Card("Overlapping screens", rows=True)
@@ -374,6 +391,9 @@ class SettingsPage(Page):
             self.jump_card.setVisible(role == "host")
             self.keyboard_card.setVisible(role == "host")
             self.mirror_card.setVisible(role == "host")
+            self.pointer_card.setVisible(role == "host")
+            if role == "host":
+                self.load_pointer(raw)
             layout_raw = raw.get("layout", {}) if isinstance(raw.get("layout", {}), dict) else {}
             overlap = bool(layout_raw.get("allow_overlap", False))
             self.mirror.setChecked(bool(layout_raw.get("mirror", False)))
@@ -523,6 +543,85 @@ class SettingsPage(Page):
         else:
             table[behind] = "all" if now == set(keys) else [k for k in keys if k in now]
         cfg.set_mirror_joined(table)
+        cfg.save()
+        self.app.config_saved()
+
+    # -- pointer speed per device -----------------------------------------------
+    @staticmethod
+    def pointer_devices(raw: dict) -> list[tuple[str, str]]:
+        """The devices besides this one: ``(id, name)``."""
+        me = raw.get("host", {}).get("device_id")
+        return [(str(d.get("id")), str(d.get("name") or d.get("id"))) for d in raw.get("devices", [])
+                if isinstance(d, dict) and d.get("id") and d.get("id") != me]
+
+    @staticmethod
+    def pointer_feel_of(raw: dict, device_id: str) -> tuple[str, float]:
+        table = raw.get("pointer", {}) if isinstance(raw.get("pointer", {}), dict) else {}
+        feel, speed = table.get("feel", "here"), table.get("speed", 1.0)
+        per = table.get("device", {}) if isinstance(table.get("device", {}), dict) else {}
+        mine = per.get(device_id, {}) if isinstance(per.get(device_id, {}), dict) else {}
+        feel, speed = mine.get("feel", feel), mine.get("speed", speed)
+        feel = feel if feel in ("here", "native") else "here"
+        speed = float(speed) if isinstance(speed, (int, float)) and not isinstance(speed, bool) else 1.0
+        return feel, speed
+
+    @staticmethod
+    def speed_step(speed: float) -> int:
+        return min(range(len(POINTER_SPEEDS)), key=lambda i: abs(POINTER_SPEEDS[i] - speed))
+
+    def load_pointer(self, raw: dict) -> None:
+        devices = self.pointer_devices(raw)
+        if [d for d, _ in devices] != list(self.pointer_widgets):
+            for row in self.pointer_rows:
+                row.setParent(None)
+                row.deleteLater()
+            self.pointer_rows, self.pointer_widgets = [], {}
+            for device_id, name in devices:
+                feel = Segmented([("here", "Like this mouse"), ("native", "Like its own mouse")])
+                feel.picked.connect(lambda value, d=device_id: self.set_pointer(d, feel=value))
+                speed_label = label("", "small")
+                speed_label.setMinimumWidth(80)
+                slider = QSlider(Qt.Orientation.Horizontal)
+                slider.setRange(0, len(POINTER_SPEEDS) - 1)
+                slider.setPageStep(1)
+                slider.setFixedWidth(160)
+                slider.setAccessibleName(f"Pointer speed on {name}")
+                slider.valueChanged.connect(
+                    lambda i, lab=speed_label: lab.setText(f"Speed {POINTER_SPEEDS[i]:g}\u00d7"))
+                slider.sliderReleased.connect(
+                    lambda d=device_id, sl=slider: self.set_pointer(d, speed=POINTER_SPEEDS[sl.value()]))
+                slider.actionTriggered.connect(
+                    lambda _a, d=device_id, sl=slider: None if sl.isSliderDown() else
+                    self.set_pointer_later(d, sl))
+                self.pointer_rows.append(self.pointer_card.add_row(label(name), feel, speed_label, slider))
+                self.pointer_widgets[device_id] = (feel, slider, speed_label)
+        self.pointer_note.setVisible(not devices)
+        for device_id, (feel, slider, speed_label) in self.pointer_widgets.items():
+            how, speed = self.pointer_feel_of(raw, device_id)
+            feel.set_value(how)
+            slider.blockSignals(True)
+            slider.setValue(self.speed_step(speed))
+            slider.blockSignals(False)
+            speed_label.setText(f"Speed {speed:g}\u00d7")
+
+    def set_pointer_later(self, device_id: str, slider) -> None:
+        """Keyboard or a click on the track: save once the value has changed."""
+        from PySide6.QtCore import QTimer
+
+        QTimer.singleShot(0, lambda: self.set_pointer(device_id, speed=POINTER_SPEEDS[slider.value()]))
+
+    def set_pointer(self, device_id: str, feel: str | None = None, speed: float | None = None) -> None:
+        if self._loading:
+            return
+        cfg = self.app.config()
+        raw = cfg.raw()
+        now_feel, now_speed = self.pointer_feel_of(raw, device_id)
+        new = (feel or now_feel, now_speed if speed is None else speed)
+        if new == (now_feel, now_speed):
+            return
+        top = raw.get("pointer", {}) if isinstance(raw.get("pointer", {}), dict) else {}
+        default = self.pointer_feel_of({"pointer": {k: v for k, v in top.items() if k != "device"}}, "")
+        cfg.set_pointer_feel(device_id, None if new == default else {"feel": new[0], "speed": new[1]})
         cfg.save()
         self.app.config_saved()
 

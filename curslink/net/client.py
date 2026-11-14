@@ -496,6 +496,11 @@ class AgentClient:
                 from curslink.screensize import physical_sizes
 
                 hello["screen_mm"] = physical_sizes()
+            # How this computer's own mouse is set up, so the host can move
+            # the pointer here at this computer's speed (curslink.pointerfeel).
+            profile = await asyncio.get_running_loop().run_in_executor(None, _pointer_profile)
+            if profile is not None:
+                hello["pointer"] = profile.to_wire()
             self._screens_sent = hello["screens"]
             if self.facing_source is not None:
                 hello["camera"] = True
@@ -599,3 +604,15 @@ class AgentClient:
                 self.on_state("waiting", f"host unavailable: {exc}")
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, self.max_backoff_s)
+
+
+_POINTER_PROFILE: list = []
+
+
+def _pointer_profile():
+    """This computer's pointer settings, read once (the first connection)."""
+    if not _POINTER_PROFILE:
+        from curslink.pointerfeel import local_profile
+
+        _POINTER_PROFILE.append(local_profile())
+    return _POINTER_PROFILE[0]
