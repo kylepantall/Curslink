@@ -41,6 +41,49 @@ edge, so a cursor resting on an outer edge pixel counts as a push. While a
 remote device is active, the host's cursor is parked and suppressed, and
 relative motion moves a virtual cursor across the remote screens.
 
+### Lining the layout up with a camera
+
+Arranging screens by hand gets them roughly right; where a turned-in side
+monitor's edge really meets the main one, or how much of a monitor a laptop
+in front of it covers, is hard to judge by eye. "Line up with camera…" on
+the Layout page measures it (`curslink/lineup.py`, `lineup_scene.py`,
+`gui/lineup.py`; `LineupLiveActivity` on the phone).
+
+- **Patterns.** Every screen shows eight ArUco markers (4x4 bits: the
+  coarsest, so they survive distance and a moving phone) at its corners and
+  edge middles, each one's id saying which screen and which spot. Their bits
+  go in the `lineup` frame, so agents draw them without OpenCV.
+- **Many views.** The phone streams grey JPEG frames (about 1600 px, one in
+  flight at a time: `lineup_photo` with a `seq`, answered by `lineup_live`)
+  while it's moved in a figure of 8. Each frame's marker corners are found
+  to a fraction of a pixel; per screen, the patterns must agree on one
+  homography (a misread or reflected one is dropped). Frames that add a new
+  viewpoint are kept (up to 40).
+- **The desk in 3D.** Each screen is a rectangle in space: rotation, place
+  and pixel size (7 unknowns; the reference screen is the world). The camera
+  is a pinhole with focal length, principal point and two distortion terms,
+  somewhere else in each view. A bundle adjustment (Levenberg-Marquardt,
+  Huber loss, numpy only) finds all of them at once from every corner in
+  every view. First guesses come from the homographies (Zhang's constraints
+  for the focal length, plane poses, and the parallax between views for
+  each screen's size). One view can't tell near-and-small from
+  far-and-big; moving the camera can, which is why the scan is live. A
+  monitor's own stated size (EDID, `curslink.screensize`) goes in as a
+  measurement with a 3% error bar, and the phone's stated focal length
+  likewise.
+- **Knowing when it's done.** The covariance of each screen's place comes
+  out of the same equations, scaled by the noise actually seen. A screen is
+  "locked" when its corners are known to 0.25% of the reference's height
+  (under a millimetre on a 27" monitor) from at least 8 views; the scan
+  ends when all are and three solves in a row agree.
+- **From 3D to the layout.** The pointer should cross where edges *look*
+  as if they meet, so each pair of screens is projected, from the eye,
+  onto the plane of one of them, and measured at the edges that touch. The
+  eye is where the scan began: the phone held in front of the face. That
+  gives positions, `[[layout.links]]` spans and `[[layout.fit]]`s.
+- One photo from any camera still works (the same solve with one view):
+  sizes from EDID give depth, else the screens are taken to be in one plane.
+
 ### Gaze from head pose, with per-user calibration
 
 MediaPipe Face Landmarker gives a face transformation matrix per frame.
