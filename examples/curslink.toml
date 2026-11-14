@@ -168,6 +168,18 @@ confirm_with_agents = true   # agents running their own camera ([agent.gaze])
 # "mac>windows" = { cmd = "ctrl", ctrl = "cmd", alt = "alt" }
 # "device:laptop" = { cmd = "alt" }
 
+# How fast the pointer moves on other devices (Settings > Pointer on other
+# devices). feel = "here": as far as it would move on this computer;
+# "native": at that device's own pointer speed and acceleration, as if the
+# mouse were plugged into it (it tells the host how its mouse is set up).
+# speed (0.25 to 4) multiplies either. [pointer] sets every device,
+# [pointer.device] one of them.
+# [pointer]
+# feel = "here"
+# speed = 1.0
+# [pointer.device]
+# laptop = { feel = "native", speed = 1.25 }
+
 [[devices]]
 id = "desktop"
 name = "Main PC"

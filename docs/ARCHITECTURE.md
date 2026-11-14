@@ -717,3 +717,18 @@ pairing; UDP moves; the relay), tested in CI against the real Python host
    event deltas instead of cursor parking.
 5. **Clipboard sharing** between devices.
 6. Optional eye-gaze refinement for choosing between close monitors.
+
+## Pointer speed on other devices
+
+`curslink/pointerfeel.py`, `[pointer]` / `[pointer.device."<id>"]` in the
+host's config (Settings > Pointer on other devices). The host's mouse motion
+comes already shaped by the host OS's pointer speed and acceleration, so by
+default (`feel = "here"`) another device's pointer moves as the host's would.
+`speed` (0.25-4) multiplies it. `feel = "native"` moves it the way the
+device's own mouse settings would: agents send `hello.pointer`
+(`{os, speed, accel}`: Windows speed 1-20 and Enhance pointer precision,
+macOS tracking speed, GNOME speed and accel profile), and the router's
+`PointerFeel` inverts the host's curve to estimate mouse counts from the
+pointer's speed, then applies the agent's curve to them. The curves are
+models (Windows' SmoothMouse curve, approximations for macOS and libinput),
+so `speed` is there to trim. Phones send no profile and move like the host.

@@ -14,6 +14,7 @@ from typing import Callable
 from curslink.net import quality
 from curslink.net.framing import STREAM_LIMIT, read_message
 from curslink.net.udp import HostPath, HostUdp, reply_address
+from curslink.pointerfeel import profile_from_wire
 from curslink.protocol import HOST_FEATURES, NETSTATS_FEATURE, UDP_FEATURE, Message, ProtocolError, encode
 
 log = logging.getLogger(__name__)
@@ -57,6 +58,8 @@ class AgentConnection:
     relay: bool = False           # reached us through the relay, not directly
     rtt: quality.RttWindow = field(default_factory=quality.RttWindow)  # ping round trips, last minute
     netstats: dict | None = None  # the agent's last netstats frame
+    # How its own mouse is set up (hello.pointer, see curslink.pointerfeel), or None.
+    pointer: object = None
     netstats_at: float = 0.0
     optimiser: quality.Optimiser = field(default_factory=lambda: quality.Optimiser(False))
     # The newest move held back to keep to tuning.move_interval_s, and when one last went.
@@ -309,6 +312,7 @@ class HostServer:
                 screen_mm=[m for m in (hello.get("screen_mm") or []) if isinstance(m, dict)][:16],
                 last_seen=loop.time(),
                 camera=hello.get("camera") is True,
+                pointer=profile_from_wire(hello.get("pointer")),
                 features=frozenset(f for f in (hello.get("features") or []) if isinstance(f, str)),
                 ping_s=_ping_interval(hello.get("ping_s")),
                 relay=relay,

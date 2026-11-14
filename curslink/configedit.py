@@ -218,6 +218,28 @@ class ConfigFile:
         inline.update(mapping)
         self.set("agent", "modifier_map", inline)
 
+    # -- pointer speed per device ---------------------------------------------
+    def pointer_feel(self, device_id: str) -> dict[str, Any] | None:
+        """``[pointer.device."<id>"]``: {feel, speed}, or None (the defaults)."""
+        t = self.get("pointer", "device", {})
+        v = t.get(device_id) if isinstance(t, dict) else None
+        return dict(v) if isinstance(v, dict) else None
+
+    def set_pointer_feel(self, device_id: str, value: dict[str, Any] | None) -> None:
+        """Set how the pointer moves on ``device_id``; None goes back to the defaults."""
+        if value is None:
+            t = self._table("pointer.device", create=False)
+            if t is not None and device_id in t:
+                del t[device_id]
+                if not len(t):
+                    del self.doc["pointer"]["device"]
+                    if not len(self.doc["pointer"]):
+                        del self.doc["pointer"]
+            return
+        inline = tomlkit.inline_table()
+        inline.update(value)
+        self._table("pointer.device", create=True)[device_id] = inline
+
     def set_mirror_joined(self, table: dict[str, Any]) -> None:
         """``[layout].mirror_joined``: ``"device/screen"`` behind -> ``"all"``
         or a list of the joined screens that keep it mirrored."""
@@ -589,6 +611,12 @@ class ConfigFile:
         jump = self.get("gaze", "jump_screens")
         if isinstance(jump, list) and any(mine(v) for v in jump):
             self.set("gaze", "jump_screens", [w for w in (rewrite(v) if mine(v) else v for v in jump) if w is not None])
+        feel = self.pointer_feel(device_id)
+        if feel is not None:
+            self.set_pointer_feel(device_id, None)
+            renamed = rewrite(prefix)
+            if renamed is not None:
+                self.set_pointer_feel(renamed[:-1], feel)
         mapping = self.keymap(f"device:{device_id}")
         if mapping is not None:
             self.set_keymap(f"device:{device_id}", None)
