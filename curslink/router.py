@@ -146,6 +146,10 @@ class Router:
         # the edge it left by; it has to leave that edge before an edge push
         # counts again, or the next pointer event bounces input straight back.
         self._edge_armed = True
+        # Carrying a held chat onto the screen in front (mirror mode) waits
+        # until the pointer has been ARM_PX clear of the part it covers, or
+        # is ARM_PX inside it: see _carried_to_front.
+        self._carry_armed = True
         self.clock: Callable[[], float] = time.monotonic
         self._arrived: tuple[float, str] | None = None  # (when, from which device)
         self._moved_at = -1e9  # when the mouse last moved (self.clock())
@@ -310,14 +314,32 @@ class Router:
         front, as when that part isn't mirrored: ``(screen, x, y)`` there."""
         if not self.layout.pointer_through:
             return None
-        for front, (bx, by, bw, bh), (tx, ty, tw, th) in self.layout.covered_parts(here):
-            if front.device_id == here.device_id or not (bx <= x < bx + bw and by <= y < by + bh):
+        parts = [p for p in self.layout.covered_parts(here) if p[0].device_id != here.device_id]
+        if not self._carry_armed:
+            # Just landed beside the covered part (crossing an edge of the
+            # screen in front lands a pixel or two from it): a wobble of the
+            # hand mustn't carry the chat straight back. Kyle, 0.4.76: chats
+            # dragged Windows -> Mac came back to the PC within 100 ms.
+            if all(_outside_by(x, y, rect) >= ARM_PX for _f, rect, _t in parts):
+                self._carry_armed = True
+        for front, (bx, by, bw, bh), (tx, ty, tw, th) in parts:
+            if not (bx <= x < bx + bw and by <= y < by + bh):
                 continue
+            if not self._carry_armed and _inside_by(x, y, (bx, by, bw, bh)) < ARM_PX:
+                return None
             if not (self.available(front.device_id) and self.carries_drag(here.device_id, front.device_id)):
                 return None
             fx, fy = tx + (x - bx) * tw / max(1, bw), ty + (y - by) * th / max(1, bh)
             return (front, *front.clamp(fx, fy))
         return None
+
+    def _near_covered(self, screen, x: float, y: float) -> bool:
+        """Is ``(x, y)`` on ``screen`` within ARM_PX of a part of it that
+        another device's screen covers (mirror mode)?"""
+        if not self.layout.pointer_through:
+            return False
+        return any(front.device_id != screen.device_id and _outside_by(x, y, rect) < ARM_PX
+                   for front, rect, _t in self.layout.covered_parts(screen))
 
     def _hands_drag_to(self, from_device: str, to_device: str) -> bool:
         """A file drag held on agent ``from_device`` goes on on ``to_device``
@@ -502,6 +524,7 @@ class Router:
         self.active_device, self.screen, self.x, self.y = new, screen, x, y
         if old != new:
             self._arrived = (self.clock(), old)
+        self._carry_armed = not self._near_covered(screen, x, y)
         ox, oy = screen.to_os(x, y)
         if new == self.local_id:
             if old != new:
@@ -544,3 +567,17 @@ class Router:
             except Exception:  # pragma: no cover - best effort
                 log.debug("could not release %s", key, exc_info=True)
         self._local_keys.clear()
+
+
+def _outside_by(x: float, y: float, rect: tuple[int, int, int, int]) -> float:
+    """How far ``(x, y)`` is outside ``rect`` (0 inside it)."""
+    bx, by, bw, bh = rect
+    dx = max(bx - x, 0.0, x - (bx + bw - 1))
+    dy = max(by - y, 0.0, y - (by + bh - 1))
+    return max(dx, dy)
+
+
+def _inside_by(x: float, y: float, rect: tuple[int, int, int, int]) -> float:
+    """How far ``(x, y)`` is inside ``rect`` from its nearest edge (0 outside)."""
+    bx, by, bw, bh = rect
+    return max(0.0, min(x - bx, bx + bw - 1 - x, y - by, by + bh - 1 - y))
