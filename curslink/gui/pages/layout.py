@@ -347,6 +347,11 @@ class LayoutPage(Page):
         self.dirty = False
         self.allow_overlap = False
         self.calibration = None  # EdgeCalibration, while calibrating an edge
+        self.lineup = None  # curslink.gui.lineup.LineupFlow, while lining up from a photo
+        # What the last line-up found beyond where the screens go (edges and
+        # overlaps), saved with the layout if the screens are still where it put them.
+        self.lineup_result = None
+        self.lineup_placed: dict[str, tuple[int, int]] = {}
         # Overlaps to line up once the layout is saved and the service is back:
         # [(behind key, front key)], see save().
         self.pending_lineups: list[tuple[str, str]] = []
@@ -368,13 +373,20 @@ class LayoutPage(Page):
         overlap_label.setBuddy(self.overlap_toggle)
         ob.addWidget(overlap_label)
         self.detect_button = button("Detect my screens", None, self.detect)
+        self.lineup_button = button("Line up with camera…", None, self.start_lineup)
+        self.lineup_button.setToolTip("Every screen shows a few patterns; take one photo of your desk with your "
+                                      "phone and Curslink arranges the layout to match it.")
         self.save_button = button("Save layout", "primary", self.save)
         self.header.addWidget(self.overlap_box)
         self.header.addWidget(self.detect_button)
+        self.header.addWidget(self.lineup_button)
         self.header.addWidget(self.save_button)
 
         self.agent_note = label("", "warn", wrap=True)
         self.add(self.agent_note)
+        self.lineup_note = label("", "small", wrap=True)
+        self.lineup_note.hide()
+        self.add(self.lineup_note)
 
         self.overlap_row = QWidget()
         orow = QHBoxLayout(self.overlap_row)
@@ -475,6 +487,7 @@ class LayoutPage(Page):
         # them, and selection_changed then mustn't reach the deleted tag.
         self.items = []
         self.tag = None
+        self.lineup_result = None
         self.scene.clear()
         if not self.app.has_config():
             return
@@ -483,6 +496,7 @@ class LayoutPage(Page):
         self.canvas.setVisible(is_host)
         self.inspector.parentWidget().setVisible(is_host)
         self.detect_button.setVisible(is_host)
+        self.lineup_button.setVisible(is_host)
         self.save_button.setVisible(is_host)
         self.overlap_box.setVisible(is_host)
         self.overlap_row.hide()
@@ -539,6 +553,7 @@ class LayoutPage(Page):
             # Keep the stacking order only where it matters.
             z = order[item.key] if self.allow_overlap and item.key in overlapping else None
             cfg.set_screen_z(item.device_id, item.screen["id"], z)
+        self.save_lineup(cfg)
         # A calibrated edge goes with the screens still meeting there.
         touching = {frozenset((a, b)) for a, _edge, b in touching_edges(self.current_devices())}
         for t in cfg.links():
@@ -922,6 +937,17 @@ class LayoutPage(Page):
         self.refresh_edges()
 
     def _on_service_event(self, event: dict) -> None:
+        kind = event.get("event")
+        if kind in ("lineup_camera", "lineup_photo"):
+            if self.lineup is not None:
+                self.lineup.on_event(event)
+            return
+        if kind == "lineup_request":
+            # Asked for on the phone: bring the Layout page up and start.
+            if self.lineup is None and self.app.role == "host":
+                self.app.show_window("layout")
+                self.start_lineup()
+            return
         if self.calibration is not None:
             self.calibration.on_event(event)
 
@@ -1014,6 +1040,119 @@ class LayoutPage(Page):
         self.selection_changed()
         self.refresh_edges()
         self.overlaps_changed()
+
+    # -- lining up from a photo (curslink.lineup) -------------------------------
+    def lineup_screens(self) -> list[dict]:
+        me = self.app.config().get("host", "device_id")
+        from curslink.edgehint import device_kind
+
+        out = []
+        for item in self.items:
+            x, y, w, h = item.layout_rect()
+            s = item.screen
+            agent = self.app.status.agents.get(item.device_id)
+            phone = agent is not None and device_kind(agent.platform) == "phone"
+            out.append({"key": item.key, "device": item.device_id, "screen": s["id"], "x": x, "y": y,
+                        "width": w, "height": h, "os": [int(s.get("os_x", 0)), int(s.get("os_y", 0)), w, h],
+                        "number": item.number, "title": item.device_name, "local": item.device_id == me,
+                        "phone": phone})
+        return out
+
+    def start_lineup(self) -> None:
+        from curslink.gui.lineup import LineupFlow
+        from curslink.gui.service import RUNNING
+
+        if self.lineup is not None or self.calibration is not None or not self.items:
+            return
+        try:
+            import cv2  # noqa: F401
+        except ImportError:
+            self._say_lineup("Lining up needs camera support, which this copy of Curslink doesn't have "
+                             "(install curslink[gaze]).", "warn")
+            return
+        if self.app.service.state != RUNNING:
+            self._say_lineup("Start linking first: the other computers show their patterns, and your phone "
+                             "takes the photo, through the link.", "warn")
+        me = self.app.config().get("host", "device_id")
+        local_main = next((i.key for i in self.items if i.device_id == me and i.screen["id"] == "main"), None)
+        flow = LineupFlow(self.lineup_screens(), self.app.service.send, local_main, self)
+        flow.finished.connect(self.lineup_finished)
+        self.lineup = flow
+        if not flow.start():
+            self.lineup = None
+
+    def _say_lineup(self, text: str, kind: str = "small") -> None:
+        self.lineup_note.setObjectName(kind)
+        self.lineup_note.setText(text)
+        self.lineup_note.setVisible(bool(text))
+        self._restyle(self.lineup_note)
+
+    def lineup_finished(self, result) -> None:
+        self.lineup = None
+        if result is None:
+            return
+        self.apply_lineup(result)
+
+    def apply_lineup(self, result) -> None:
+        """Put the screens where the photo says (unsaved, to check and save)."""
+        items = {i.key: i for i in self.items}
+        for key, (x, y) in result.positions.items():
+            item = items.get(key)
+            if item is not None:
+                item.setPos(QPointF(x * SCALE, y * SCALE))
+        top = max((i.zValue() for i in self.items), default=0)
+        for behind, front in result.fronts:
+            if behind in items and front in items:
+                top += 1
+                items[front].setZValue(top)
+        if result.fronts and not self.allow_overlap:
+            self.overlap_toggle.setChecked(True)  # overlap_toggled follows
+        # Where they really landed (as the page rounds them), for save_lineup.
+        self.lineup_placed = {k: tuple(items[k].layout_rect()[:2]) for k in result.positions if k in items}
+        self.lineup_result = result
+        for item in self.items:
+            item.refresh()
+        number_screens(self.items)
+        self.set_dirty(True)
+        self.view.fit()
+        self.refresh_edges()
+        self.overlaps_changed()
+        names = {i.key: f"{i.device_name} / {i.screen['id']}" for i in self.items}
+        text = f"Lined up {len(result.found)} screen{'s' if len(result.found) != 1 else ''} from the photo"
+        extra = []
+        if result.links:
+            extra.append(f"{len(result.links)} edge{'s' if len(result.links) != 1 else ''} calibrated")
+        if result.fronts:
+            extra.append(f"{len(result.fronts)} overlap{'s' if len(result.fronts) != 1 else ''}")
+        if extra:
+            text += " (" + ", ".join(extra) + ")"
+        text += ". Check it and press Save layout."
+        phones = {s["key"] for s in self.lineup_screens() if s["phone"]}  # they take the photo
+        missing = [k for k in result.missing if k not in phones]
+        if missing:
+            text += " Not in the photo, so left as they were: " + ", ".join(names.get(k, k) for k in missing) + "."
+        self._say_lineup(text, "warn" if missing else "small")
+
+    def save_lineup(self, cfg) -> None:
+        """With Save: the edges and overlaps the last line-up measured, for the
+        screens still exactly where it put them."""
+        result, self.lineup_result = self.lineup_result, None
+        if result is None:
+            return
+        items = {i.key: i for i in self.items}
+
+        def unmoved(key: str) -> bool:
+            item = items.get(key)
+            return item is not None and tuple(item.layout_rect()[:2]) == self.lineup_placed.get(key)
+
+        for link in result.links:
+            if unmoved(link["a"]) and unmoved(link["b"]):
+                cfg.set_link(link["a"], link["a_side"], link["a_span"], link["b"], link["b_side"], link["b_span"])
+        if self.allow_overlap:
+            for fit in result.fits:
+                if unmoved(fit["behind"]) and unmoved(fit["front"]):
+                    cfg.set_fit(fit["behind"], fit["front"], fit["x"], fit["y"], fit["scale"])
+        self._say_lineup("")
 
     def detect(self) -> None:
         """Replace this computer's screens with what the OS reports, keeping

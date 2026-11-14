@@ -406,6 +406,11 @@ async def run_host(cfg: HostConfig) -> None:
         await camera.pause(for_good=True)
         events.emit("calibrating", on=True)
 
+    from curslink.lineup import PhotoInbox
+
+    lineup_inbox = PhotoInbox(server, events.emit)
+    server.on_lineup = lineup_inbox.handle
+
     def command(line: str) -> None:
         if keeper.command(line):
             pass
@@ -417,6 +422,10 @@ async def run_host(cfg: HostConfig) -> None:
             hint_command(server, line[5:])
         elif line.startswith("identify "):
             identify_command(server, line[9:])
+        elif line.startswith("lineup "):
+            lineup_inbox.markers(line[7:])
+        elif line.startswith("lineup_camera "):
+            lineup_inbox.camera(line[14:])
         elif line.startswith("fit "):
             fit_command(mirror, line[4:])
         elif line == "pick on":
@@ -1259,6 +1268,7 @@ async def run_agent(cfg: AgentConfig) -> None:
         send_files_home(cfg, session, client, overlay, native, asyncio.get_running_loop())
     session.on_hint = lambda data: events.emit("hint", **data)
     session.on_identify = lambda data: events.emit("identify", **data)
+    session.on_lineup = lambda data: events.emit("lineup", **data)
     mirror = None
     if mirror_on and overlay is not None:
         from curslink.mirror import CursorPark, LatestWriter, MirrorPeer

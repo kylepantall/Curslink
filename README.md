@@ -87,6 +87,15 @@ host or an agent, then helps you pair devices, arrange screens and
 calibrate the camera. Close the window and it keeps running in the tray or
 menu bar.
 
+**Line up the screens with a photo:** on the host's Layout page, choose
+**Line up with camera…**. Every screen (on every linked computer) shows a
+few square patterns; take one photo of the desk with your phone and
+Curslink places the screens to match, calibrates where their edges meet and
+works out which screen stands in front of which. With the Curslink Android
+app the camera opens by itself (or tap **Line up screens with the camera**
+in the app); any other camera works too: choose the photo on the computer.
+Check the result and press **Save layout**.
+
 **From the command line:**
 
 1. Copy [`examples/curslink.toml`](examples/curslink.toml) to each device and

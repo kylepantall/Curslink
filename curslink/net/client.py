@@ -57,6 +57,9 @@ class AgentSession:
         # "Detect my screens" on the host: a number and name on each of our
         # monitors for a few seconds (see curslink.gui.identify).
         self.on_identify: Callable[[dict], None] = lambda data: None
+        # An auto line-up on the host: patterns on our monitors until it's
+        # done (see curslink.lineup and curslink.gui.lineup).
+        self.on_lineup: Callable[[dict], None] = lambda data: None
         # The edge indicator (see curslink.edgehint); None = we don't draw it,
         # so hello doesn't offer the "edge" feature.
         self.on_edge: Callable[[dict], None] | None = None
@@ -173,6 +176,8 @@ class AgentSession:
             self.on_hint(dict(msg.data))
         elif t == "identify":
             self.on_identify(dict(msg.data))
+        elif t == "lineup":
+            self.on_lineup(dict(msg.data))
         elif t == "edge":
             if self.on_edge is not None:
                 self.on_edge(dict(msg.data))

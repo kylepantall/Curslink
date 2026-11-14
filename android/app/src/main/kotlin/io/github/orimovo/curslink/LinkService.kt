@@ -128,6 +128,10 @@ class LinkService : Service() {
             mirror = Mirrors(),
             clipboard = ::copiedElsewhere,
             files = Drops.session(this),
+            lineup = { id, cancel ->
+                AppLog.i(TAG, if (cancel) "the computer doesn't need the line-up photo any more" else "the computer asks for a photo of the desk")
+                LineupActivity.ask(this, id, cancel)
+            },
             pairing = { prefs.pairing },
             hello = { Hello(prefs.name, platform(), screens(), screenMm()) },
             discover = ::candidates,
@@ -227,6 +231,19 @@ class LinkService : Service() {
         val session = link?.session?.clipboard ?: return
         Thread({ runCatching { session.copied(text) } }, "curslink-clip").start()
     }
+
+    /** Auto line-up: the photo for line-up [id]. Blocks (not on the main thread). */
+    fun lineupPhoto(id: String, jpeg: ByteArray) {
+        val session = link?.session?.lineup ?: error("not linked")
+        if (state.first != LinkState.CONNECTED) error("not linked to the computer")
+        session.photo(id, jpeg)
+    }
+
+    fun lineupCancel(id: String) { link?.session?.lineup?.cancel(id) }
+
+    /** Ask the computer to start a line-up (it shows the patterns and asks us for the photo). Blocks. */
+    fun lineupRequest(): Boolean =
+        state.first == LinkState.CONNECTED && link?.session?.lineup?.request() == true
 
     fun about() = jsonOf("screens" to screens(), "platform" to platform())
 
