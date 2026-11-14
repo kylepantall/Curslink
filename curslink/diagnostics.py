@@ -16,6 +16,14 @@ Where the files go:
 * Windows: ``%LOCALAPPDATA%\\Curslink\\Logs``
 * Linux: ``$XDG_STATE_HOME/curslink/logs`` (``~/.local/state/curslink/logs``)
 
+Next to each text log, ``<process>.jsonl`` holds the same records as one JSON
+object per line (see :func:`record_dict`): ``ts`` (UTC), ``device``, ``role``,
+``proc``, ``lvl``, ``sub`` (the subsystem: the logger's name without
+``curslink.``), ``msg``, and ``event``/``fields`` when the code logged them with
+:func:`event`. The app's debug console shows them live, and
+:func:`write_bundle` merges every process's records, the settings and the crash
+reports into one ``.jsonl`` file that ``jq`` or ``curslink diag show`` can query.
+
 ``CURSLINK_LOG_DIR`` overrides it (as does ``CURSLINK_HOME``, under ``logs``), and ``CURSLINK_DEBUG=1`` logs everything
 at debug level.
 """
@@ -26,16 +34,17 @@ import collections
 import datetime as _dt
 import faulthandler
 import io
+import json
 import logging
 import logging.handlers
 import os
 import platform
 import re
+import socket
 import sys
 import threading
 import time
 import traceback
-import zipfile
 from pathlib import Path
 from types import TracebackType
 from typing import Callable
@@ -53,6 +62,8 @@ RECENT_LINES = 400
 _state: dict = {}
 _lock = threading.Lock()
 _crash_listeners: list[Callable[[Path], None]] = []
+_identity: dict = {"device": "", "role": None}
+BUNDLE_FORMAT = "curslink-diagnostics/2"
 
 
 def log_dir() -> Path:
@@ -124,6 +135,11 @@ def setup(process: str, verbose: bool = False, console: bool = True) -> Path | N
             handler.setLevel(logging.DEBUG if level == logging.DEBUG else logging.INFO)
             handler.setFormatter(formatter)
             root.addHandler(handler)
+            lines = logging.handlers.RotatingFileHandler(
+                folder / f"{process}.jsonl", maxBytes=MAX_LOG_BYTES, backupCount=LOG_BACKUPS, encoding="utf-8")
+            lines.setLevel(handler.level)
+            lines.setFormatter(JsonFormatter())
+            root.addHandler(lines)
         except OSError as exc:
             log_file = None
             print(f"curslink: can't write logs to {folder}: {exc}", file=sys.stderr)
@@ -139,6 +155,79 @@ def setup(process: str, verbose: bool = False, console: bool = True) -> Path | N
     if log_file:
         log.info("logging to %s", log_file)
     return log_file
+
+
+def set_identity(device: str | None = None, role: str | None = None) -> None:
+    """Name this computer and its role in every record from now on."""
+    if device:
+        _identity["device"] = device
+    if role:
+        _identity["role"] = role
+
+
+def device_name() -> str:
+    return _identity["device"] or socket.gethostname()
+
+
+def event(logger: logging.Logger, name: str, message: str = "", level: int = logging.INFO, **fields) -> None:
+    """Log a structured event: ``message`` for the text log, and ``event`` and
+    ``fields`` as their own keys in the JSON lines (so they can be filtered on)."""
+    logger.log(level, message or name, extra={"event": name, "fields": fields})
+
+
+def utc_stamp(when: float) -> str:
+    """``2026-11-14T21:50:14.123Z``: sorts as text across time zones."""
+    t = _dt.datetime.fromtimestamp(when, _dt.timezone.utc)
+    return t.strftime("%Y-%m-%dT%H:%M:%S.") + f"{t.microsecond // 1000:03d}Z"
+
+
+def subsystem(logger_name: str) -> str:
+    return logger_name.removeprefix("curslink.") or logger_name
+
+
+def record_dict(record: logging.LogRecord) -> dict:
+    """One log record as the flat dict the JSON lines, the debug console and
+    the diagnostics file use."""
+    try:
+        message = record.getMessage()
+    except Exception:  # a broken format string
+        message = str(record.msg)
+    out = {
+        "type": "log",
+        "ts": utc_stamp(record.created),
+        "device": device_name(),
+        "role": _identity["role"],
+        "proc": _state.get("process", "curslink"),
+        "pid": record.process,
+        "thread": record.threadName,
+        "lvl": record.levelname.lower(),
+        "sub": subsystem(record.name),
+        "msg": message,
+    }
+    name = getattr(record, "event", None)
+    if name:
+        out["event"] = str(name)
+    fields = getattr(record, "fields", None)
+    if fields:
+        out["fields"] = fields
+    if record.exc_info and record.exc_info[0] is not None:
+        out["exc"] = "".join(traceback.format_exception(*record.exc_info)).rstrip()
+    return out
+
+
+KEY_ORDER = ("type", "ts", "device", "role", "proc", "lvl", "sub", "event", "msg", "fields")
+
+
+def dumps(obj: dict) -> str:
+    """One compact JSON line, the usual keys first (a dict that went through
+    a Qt signal comes back with its keys sorted)."""
+    head = {k: obj[k] for k in KEY_ORDER if k in obj}
+    return json.dumps({**head, **obj}, default=str, ensure_ascii=False, separators=(",", ":"))
+
+
+class JsonFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        return dumps(record_dict(record))
 
 
 def current_log_file() -> Path | None:
@@ -299,6 +388,29 @@ def environment() -> str:
     return "\n".join(lines)
 
 
+def environment_dict() -> dict:
+    out = {
+        "version": __version__,
+        "device": device_name(),
+        "role": _identity["role"],
+        "proc": _state.get("process", "curslink"),
+        "pid": os.getpid(),
+        "platform": platform_summary(),
+        "python": sys.version.split()[0],
+        "frozen": bool(getattr(sys, "frozen", False)),
+    }
+    modules = {}
+    for module in ("PySide6", "mediapipe", "cv2", "numpy", "pynput", "zeroconf"):
+        mod = sys.modules.get(module)
+        if mod is not None:
+            modules[module] = str(getattr(mod, "__version__", "?"))
+    qt = sys.modules.get("PySide6.QtCore")
+    if qt is not None:
+        modules["Qt"] = qt.qVersion()
+    out["modules"] = modules
+    return out
+
+
 def platform_summary() -> str:
     if sys.platform == "darwin":
         name = f"macOS {platform.mac_ver()[0]}"
@@ -346,33 +458,117 @@ def _prune(folder: Path) -> None:
 
 
 def crash_reports() -> list[Path]:
-    folder = _state.get("folder") or log_dir()
+    return crash_reports_in(_state.get("folder") or log_dir())
+
+
+def write_bundle(dest: Path) -> Path:
+    """Write everything a bug report needs into one JSON-lines file at
+    ``dest`` (no pairing keys or other secrets): a ``meta`` line, a ``config``
+    line per settings file, a ``crash`` line per crash report, a ``stacks``
+    line, then every process's ``log`` lines merged in time order."""
+    dest = Path(dest)
+    with open(dest, "w", encoding="utf-8", newline="\n") as f:
+        for rec in bundle_records():
+            f.write(dumps(rec) + "\n")
+    return dest
+
+
+def bundle_records(folder: Path | None = None) -> list[dict]:
+    folder = Path(folder or _state.get("folder") or log_dir())
+    now = utc_stamp(time.time())
+    out: list[dict] = [{"type": "meta", "ts": now, "format": BUNDLE_FORMAT, **environment_dict()}]
+    for name, settings in config_files():
+        out.append({"type": "config", "ts": now, "file": name, "config": settings})
+    for report in reversed(crash_reports_in(folder)):
+        try:
+            text = report.read_text(encoding="utf-8", errors="replace")
+            out.append({"type": "crash", "ts": utc_stamp(report.stat().st_mtime), "file": report.name, "text": text})
+        except OSError:
+            pass
+    out.append({"type": "stacks", "ts": now, "proc": _state.get("process", "curslink"), "text": all_stacks()})
+    out.extend(sorted(log_records(folder), key=lambda r: r.get("ts", "")))
+    return out
+
+
+def _log_files(folder: Path, suffix: str) -> list[Path]:
+    try:
+        files = [f for f in folder.iterdir() if f.is_file() and (f.name.endswith(suffix) or f"{suffix}." in f.name)]
+    except OSError:
+        return []
+    return sorted(files, key=lambda f: f.name)
+
+
+def _stem(f: Path, suffix: str) -> str:
+    return f.name.split(suffix)[0]
+
+
+def log_records(folder: Path) -> list[dict]:
+    """Every process's records: its JSON lines, or (for a process that only
+    has a text log, like the Windows helper or an older version) its text log
+    parsed into the same shape."""
+    records: list[dict] = []
+    with_json = set()
+    for f in _log_files(folder, ".jsonl"):
+        with_json.add(_stem(f, ".jsonl"))
+        try:
+            lines = f.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(rec, dict):
+                records.append(rec)
+    for f in _log_files(folder, ".log"):
+        proc = _stem(f, ".log")
+        if proc in with_json or proc.startswith("fault-"):
+            continue
+        records.extend(parse_text_log(f, proc))
+    return records
+
+
+_TEXT_LINE = re.compile(
+    r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d),(\d{3}) (\w+)\s+(?:\[(\d+) ([^\]]*)\] )?([^:\s]+): ?(.*)$")
+
+
+def parse_text_log(path: Path, proc: str) -> list[dict]:
+    """A text log (:data:`LOG_FORMAT`) as records; lines that don't start a
+    record (tracebacks) join the one before."""
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        mtime = path.stat().st_mtime
+    except OSError:
+        return []
+    out: list[dict] = []
+    for line in lines:
+        m = _TEXT_LINE.match(line)
+        if m:
+            when, ms, level, pid, thread, name, message = m.groups()
+            try:
+                stamp = time.mktime(time.strptime(when, "%Y-%m-%d %H:%M:%S")) + int(ms) / 1000
+            except (ValueError, OverflowError):
+                stamp = mtime
+            rec = {"type": "log", "ts": utc_stamp(stamp), "device": device_name(), "role": None, "proc": proc,
+                   "lvl": level.lower(), "sub": subsystem(name), "msg": message, "src": "text"}
+            if pid:
+                rec["pid"] = int(pid)
+                rec["thread"] = thread
+            out.append(rec)
+        elif out:
+            out[-1]["msg"] += "\n" + line
+        elif line.strip():
+            out.append({"type": "log", "ts": utc_stamp(mtime), "device": device_name(), "proc": proc,
+                        "lvl": "info", "sub": proc, "msg": line, "src": "text"})
+    return out
+
+
+def crash_reports_in(folder: Path) -> list[Path]:
     try:
         return sorted(folder.glob("crash-*.txt"), key=lambda p: p.stat().st_mtime, reverse=True)
     except OSError:
         return []
-
-
-def write_bundle(dest: Path) -> Path:
-    """Zip the logs, crash reports and settings (no pairing keys or other
-    secrets) into ``dest``."""
-    folder = _state.get("folder") or log_dir()
-    dest = Path(dest)
-    with zipfile.ZipFile(dest, "w", compression=zipfile.ZIP_DEFLATED) as z:
-        z.writestr("environment.txt", environment() + "\n\n== Every thread ==\n" + all_stacks() + "\n")
-        if folder.exists():
-            for f in sorted(folder.iterdir()):
-                if f.is_file() and (f.suffix in (".txt", ".log") or ".log." in f.name):
-                    z.write(f, f.name)
-        layout = layout_text()
-        if layout:
-            z.writestr("layout.toml", layout)
-        config = config_text()
-        if config:
-            # Every setting and every screen (the [[devices]] and where they
-            # sit), so a bundle says what the layout is without a screenshot.
-            z.writestr("config.toml", config)
-    return dest
 
 
 # A setting with a name like these is left out of a bundle's config.toml:
@@ -390,6 +586,28 @@ def _redact(value, name: str = ""):
     if isinstance(value, list):
         return [_redact(v, name) for v in value]
     return value
+
+
+def config_files(path: Path | None = None) -> list[tuple[str, dict]]:
+    """(file name, settings with secrets left out) for the config and the
+    role's side files."""
+    try:
+        import tomllib
+
+        if path is None:
+            from curslink.configedit import default_config_path
+
+            path = default_config_path()
+        path = Path(path)
+    except Exception:
+        return []
+    out = []
+    for f in [path] + sorted(path.parent.glob(path.stem + ".*" + path.suffix)):
+        try:
+            out.append((f.name, _redact(tomllib.loads(f.read_text(encoding="utf-8")))))
+        except Exception:
+            continue
+    return out
 
 
 def config_text(path: Path | None = None) -> str:
@@ -447,7 +665,80 @@ def layout_text(path: Path | None = None) -> str:
 
 
 def bundle_name() -> str:
-    return f"curslink-diagnostics-{time.strftime('%Y%m%d-%H%M%S')}.zip"
+    return f"curslink-diagnostics-{time.strftime('%Y%m%d-%H%M%S')}.jsonl"
+
+
+# ----------------------------------------------------------------- querying
+
+LEVELS = {"debug": 10, "info": 20, "warning": 30, "error": 40, "critical": 50}
+
+
+def matches(rec: dict, terms: list[str], min_level: str | None = None) -> bool:
+    """Whether ``rec`` passes a filter: every term must match, where
+    ``key=value`` means the key's value contains the value (``fields.x=`` for a
+    field), ``-term`` means it must not match, and anything else is looked for
+    anywhere in the line. Case doesn't matter. ``min_level`` keeps log lines at
+    or above it (other records pass)."""
+    if min_level and rec.get("type", "log") == "log":
+        if LEVELS.get(str(rec.get("lvl")), 20) < LEVELS.get(min_level, 0):
+            return False
+    line = None
+    for term in terms:
+        negate = term.startswith("-") and len(term) > 1
+        if negate:
+            term = term[1:]
+        key, eq, want = term.partition("=")
+        if eq and key:
+            value = rec
+            for part in key.split("."):
+                value = value.get(part) if isinstance(value, dict) else None
+            hit = value is not None and want.lower() in str(value).lower()
+        else:
+            if line is None:
+                line = dumps(rec).lower()
+            hit = term.lower() in line
+        if hit == negate:
+            return False
+    return True
+
+
+def short_line(rec: dict) -> str:
+    """A record as one readable line (``curslink diag show`` without --json)."""
+    kind = rec.get("type", "log")
+    who = "/".join(str(x) for x in (rec.get("device"), rec.get("proc")) if x)
+    if kind == "log":
+        text = f"{rec.get('lvl', ''):<7} {rec.get('sub', '')}: {rec.get('msg', '')}"
+        if rec.get("event"):
+            text += f" [{rec['event']}]"
+        if rec.get("fields"):
+            text += " " + dumps(rec["fields"])
+        if rec.get("exc"):
+            text += "\n" + rec["exc"]
+    elif kind == "event":
+        text = f"event   {rec.get('event', '')} " + dumps(rec.get("fields", {}))
+    elif kind in ("crash", "stacks"):
+        text = f"{kind:<7} {rec.get('file', '')}\n{rec.get('text', '')}"
+    else:
+        rest = {k: v for k, v in rec.items() if k not in ("type", "ts", "device", "proc")}
+        text = f"{kind:<7} " + dumps(rest)
+    return f"{rec.get('ts', '')} {who} {text}"
+
+
+def read_records(path: Path) -> list[dict]:
+    """A diagnostics file (or a ``.jsonl`` log) as records; a text log is parsed."""
+    path = Path(path)
+    if path.suffix == ".log" or ".log." in path.name:
+        return parse_text_log(path, _stem(path, ".log"))
+    out = []
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(rec, dict):
+                out.append(rec)
+    return out
 
 
 def qt_message_handler(mode, context, message: str) -> None:

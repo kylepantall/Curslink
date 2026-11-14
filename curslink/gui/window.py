@@ -13,7 +13,7 @@ import logging
 import sys
 
 from PySide6.QtCore import QEvent, QRectF, QSize, Qt, QTimer
-from PySide6.QtGui import QCloseEvent, QColor, QPainter, QPixmap
+from PySide6.QtGui import QCloseEvent, QColor, QKeySequence, QPainter, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QButtonGroup,
     QFrame,
@@ -141,6 +141,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.app = app
         self.setWindowTitle("Curslink")
+        QShortcut(QKeySequence("Ctrl+Shift+D"), self, app.show_console)  # Cmd+Shift+D on a Mac
         self.resize(1080, 720)
         self.setMinimumSize(QSize(760, 520))
         self.glass = False
