@@ -365,6 +365,10 @@ async def run_host(cfg: HostConfig) -> None:
     network = loop.create_task(report_network_host(server, cfg.optimise)) if events.channel.enabled else None
     wifi = low_latency_wifi(cfg.optimise)
     router.blocked = input_blocked_reason()
+    if sys.platform == "win32":
+        from curslink.inputs.pynput_backend import win_cursor_clip
+
+        router.cursor_clip = win_cursor_clip
 
     # Gaze can come from this computer's camera, the agents' own cameras,
     # or both, so the arbiter runs even when this camera is off.
