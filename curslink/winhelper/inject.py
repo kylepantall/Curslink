@@ -3,7 +3,8 @@
 Started by the service (:mod:`.service`), one per console session. It
 serves one agent at a time on ``\\\\.\\pipe\\curslink-input-<session>``,
 which only that session's user (and SYSTEM) can open and which refuses
-connections from other computers.
+connections from other computers. A host can ask it to listen as well
+(:mod:`.watch`): it reports what it hears on a second pipe.
 """
 
 from __future__ import annotations
@@ -17,8 +18,10 @@ from curslink.winhelper import WIRE_VERSION, pipe_name, wire
 log = logging.getLogger(__name__)
 
 
-def serve_one(handle: int, session: int, sink, follower) -> int:
-    """Read one client's commands until it goes away. How many were applied."""
+def serve_one(handle: int, session: int, sink, follower, watcher=None) -> int:
+    """Read one client's commands until it goes away. How many were applied.
+    ``watcher``: the hooks a host can ask for (``["watch", mode]``, see
+    curslink.winhelper.watch); they stop when the client goes."""
     import msvcrt
 
     from curslink.winhelper import win32
@@ -42,6 +45,10 @@ def serve_one(handle: int, session: int, sink, follower) -> int:
                 command = wire.decode(line)
                 if command is None:
                     continue
+                if command[0] == "watch":
+                    if watcher is not None:
+                        watcher.set_mode(command[1])
+                    continue
                 follower.follow()
                 try:
                     wire.apply(sink, command)
@@ -50,6 +57,9 @@ def serve_one(handle: int, session: int, sink, follower) -> int:
                     log.exception("couldn't inject %s", command[0])
         except OSError as exc:
             log.info("agent went away (%s)", exc)
+        finally:
+            if watcher is not None:
+                watcher.set_mode("off")
     log.info("agent (process %d) disconnected after %d commands", pid, count)
     return count
 
@@ -74,8 +84,11 @@ def main() -> int:
     session = win32.this_session()
     setup_logging(f"inject-{session}")
     log.info("input helper for session %d starting", session)
+    from curslink.winhelper.watch import HookWatcher
+
     sink = PynputSink()
     follower = win32.DesktopFollower()
+    watcher = HookWatcher(session)
     while True:
         sid = win32.session_user_sid(session)
         if sid is None:
@@ -83,7 +96,7 @@ def main() -> int:
             continue
         try:
             handle = win32.create_pipe(pipe_name(session), win32.pipe_sddl(sid))
-            serve_one(handle, session, sink, follower)
+            serve_one(handle, session, sink, follower, watcher)
         except OSError:
             log.exception("pipe failed")
             time.sleep(1.0)
