@@ -312,6 +312,7 @@ async def run_host(cfg: HostConfig) -> None:
         settings=cfg.router,
     )
     router.key_for = key_mapper(server, cfg.keymaps, pc_names=capture.pc_names)
+    router.feel = pointer_feel(cfg, server)
     edges = edge_indicator(cfg, router, server, overlay)
     from curslink.keepawake import ScreenKeeper
 
@@ -1704,3 +1705,17 @@ def calibrate(cfg: HostConfig, seconds: float = 1.5) -> Calibration:
     finally:
         cal.stop()
     return cal.calibration
+
+
+def pointer_feel(cfg, server):
+    """How far the pointer goes on each agent ([pointer]): see curslink.pointerfeel."""
+    from curslink.pointerfeel import PointerFeel, local_profile
+
+    def profile_of(device_id: str):
+        conn = server.connections.get(device_id)
+        return getattr(conn, "pointer", None) if conn is not None else None
+
+    feel = PointerFeel(cfg.pointer, profile_of=profile_of)
+    if any(f.feel == "native" for f in [cfg.pointer.default, *cfg.pointer.devices.values()]):
+        feel.here = local_profile()
+    return feel
