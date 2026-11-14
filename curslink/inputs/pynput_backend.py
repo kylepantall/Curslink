@@ -18,6 +18,7 @@ import os
 import sys
 import threading
 import time
+import types
 from typing import Callable
 
 from curslink.inputs.base import CaptureHandler
@@ -135,7 +136,12 @@ class PynputCapture:
         self.loop_alive: Callable[[], bool] = lambda: True
         self.took_back = False
         self.hooks_lost = 0  # Windows: times the hooks were found gone (_watch_hooks)
-        self._hook_heard_at = 0.0  # when the mouse hook last reported a move
+        self._hook_heard_at = 0.0  # when the mouse hook (or the input helper) last reported a move
+        self._own_heard_at = 0.0   # ... this process's own hook
+        # Windows: the input helper's hooks (curslink.winhelper.client.HelperWatch),
+        # which hear the mouse and keyboard over apps that run as administrator.
+        self._helper = None
+        self._restart_lock = threading.RLock()
         self._ungrabbed_at = 0.0
         self._deaf_said: dict[str, float] = {}
         self._closed = False
@@ -166,6 +172,7 @@ class PynputCapture:
         self._restart()
         if sys.platform == "win32":
             threading.Thread(target=self._watch_hooks, name="curslink-hooks", daemon=True).start()
+            self._start_helper()
 
     def stop(self) -> None:
         with self._lock:
@@ -180,6 +187,8 @@ class PynputCapture:
     def close(self) -> None:
         """Stop for good: the cursor shows again, and macOS's shortcuts work."""
         self._closed = True
+        if self._helper is not None:
+            self._helper.close()
         self.stop()
         if self._shortcuts is not None:
             self._shortcuts.set_off(False)
@@ -209,6 +218,8 @@ class PynputCapture:
             if self._shortcuts is not None:
                 self._shortcuts.set_off(grabbed)
             return
+        if self._helper is not None:
+            self._helper.set_mode("grab" if grabbed else "moves")
         if grabbed and self._controller is not None:
             self._controller.position = self.park_at
         if self._hider is not None:
@@ -216,6 +227,10 @@ class PynputCapture:
         self._restart()
 
     def _restart(self) -> None:
+        with self._restart_lock:  # the hooks' watchdog and the input helper restart them too
+            self._restart_now()
+
+    def _restart_now(self) -> None:
         from pynput import keyboard, mouse
 
         _prime_macos()
@@ -527,7 +542,69 @@ class PynputCapture:
 
     # -- callbacks -------------------------------------------------------------
     def _on_move(self, x, y, injected=False):
-        self._hook_heard_at = time.monotonic()
+        now = time.monotonic()
+        self._hook_heard_at = now
+        if not injected:
+            self._own_heard_at = now
+        self._moved(x, y, injected)
+
+    # -- Windows: the input helper's hooks (wire v2) ---------------------------
+    def _start_helper(self) -> None:
+        try:
+            from curslink.winhelper import win32 as helper_win32
+            from curslink.winhelper.client import HelperWatch
+
+            self._helper = HelperWatch(helper_win32.this_session(), self._helper_event, self._helper_listening)
+            self._helper.mode = "grab" if self._grabbed else "moves"
+            self._helper.start()
+        except Exception:
+            log.warning("input: couldn't look for the input helper", exc_info=True)
+            self._helper = None
+
+    def _helper_listening(self) -> None:
+        """The helper's hooks are in: put ours back in front of them, so the
+        helper only gets what ours don't take (and holds back nothing ours do)."""
+        if not self._closed:
+            self._restart()
+
+    def _helper_event(self, command: tuple) -> None:
+        """Something the input helper's hooks heard (curslink.winhelper.watch).
+        While input is on another computer, it's only what this process's
+        hooks didn't take: they hold input back themselves, so it never gets
+        that far. While input is here, the helper reports every move, and
+        only the ones this process's own hook didn't hear count."""
+        op, a, b, grabbed = command
+        if grabbed != self._grabbed or self._handler is None:
+            return  # seen before a switch: not what it means now
+        now = time.monotonic()
+        if op == "pm":
+            if not grabbed and now - self._own_heard_at < HELPER_FILL_S:
+                return  # our own hook hears the mouse: that's the one that counts
+            self._hook_heard_at = now
+            self._moved(a, b)
+        elif op == "pb":
+            self._on_click(0, 0, types.SimpleNamespace(name=a), b)
+        elif op == "ps":
+            self._on_scroll(0, 0, a, b)
+        elif op == "pk":
+            key = self._key_for_vk(a, b)
+            if key is not None:
+                self._on_key(key, b, False)
+
+    def _key_for_vk(self, vk: int, pressed: bool):
+        """The pynput key our own keyboard hook would have made of ``vk``."""
+        listener = self._key_listener
+        try:
+            if listener is not None and hasattr(listener, "_event_to_key"):
+                return listener._event_to_key(0x100 if pressed else 0x101, vk)
+            from pynput import keyboard
+
+            return keyboard.KeyCode.from_vk(vk)
+        except Exception:
+            log.debug("no key for vk %s", vk, exc_info=True)
+            return None
+
+    def _moved(self, x, y, injected=False):
         if injected or self._handler is None:
             return
         if not self._grabbed:
@@ -680,6 +757,7 @@ ESCAPE_WINDOW_S = 1.5   # Escape three times within this: input comes home
 HOOK_CHECK_S = 0.25     # Windows: how often the parked cursor is checked (_watch_hooks)
 HOOK_DRIFT_PX = 24      # ... and how far off the park point means the hooks are gone
 HOOK_LOST_MAX = 4       # gone this often in 10 s: input comes home instead
+HELPER_FILL_S = 0.1     # Windows: helper moves count after our own hook heard none for this long
 DEAF_TICKS = 3          # Windows: checks in a row the cursor moved and the hook heard nothing (_DeafHook)
 DEAF_SAY_S = 60.0       # ... said at most this often per app in front
 HOLD_MAX_S = 60.0       # a button-up held for a drop goes after this at most
@@ -1442,7 +1520,8 @@ class _DeafHook:
         log.warning("input: the cursor is moving at (%d, %d) but Curslink's mouse hook hears nothing (in front: %s)%s",
                     at[0], at[1], app,
                     ": Windows keeps the mouse from Curslink over apps that run as administrator, so the "
-                    "pointer can't cross to another computer until another app is in front"
+                    "pointer can't cross to another computer until another app is in front (Settings > "
+                    "Control admin apps lets Curslink hear it there)"
                     if admin else ": the pointer can't cross to another computer until it hears the mouse again")
 
 

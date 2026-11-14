@@ -250,19 +250,23 @@ class SettingsPage(Page):
         self.agent_camera_picker.picked.connect(self.set_agent_camera_device)
         self.agent_camera_row = self.agent_card.add_row(
             text_block("Camera", "The one that faces you when you use this screen."), self.agent_camera_picker)
-        # Windows: the input helper service (curslink.winhelper).
+        self.add(self.agent_card)
+
+        # Windows, both roles: the input helper service (curslink.winhelper).
         self.helper = None
         if sys.platform == "win32":
+            self.helper_card = Card("Admin apps", rows=True)
             self.helper = Toggle("Control admin apps and UAC prompts")
             self.helper.clicked.connect(self.set_helper)
             self.helper_block = text_block(
                 "Control admin apps and UAC prompts",
                 "Windows keeps other programs out of apps running as administrator, UAC prompts and the "
-                "lock screen. This installs a small Windows service that can reach them (it asks for admin "
-                "once); turning it off removes it. Anything running as you could use it to answer a UAC "
-                "prompt too, so leave it off if you don't need it.")
-            self.agent_card.add_row(self.helper_block, self.helper)
-        self.add(self.agent_card)
+                "lock screen: input from another computer can't reach them, and this PC's own mouse can't "
+                "leave the screen over them. This installs a small Windows service that can reach them (it "
+                "asks for admin once); turning it off removes it. Anything running as you could use it to "
+                "answer a UAC prompt too, so leave it off if you don't need it.")
+            self.helper_card.add_row(self.helper_block, self.helper)
+            self.add(self.helper_card)
 
         # -- clipboard (both) -------------------------------------------------------
         self.clipboard_card = Card("Clipboard", rows=True)

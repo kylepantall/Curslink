@@ -676,7 +676,15 @@ service (`curslink/winhelper`):
   session's user and SYSTEM can open, local clients only, and before each
   command moves its thread to whichever desktop has the input;
 * the agent sends input to the pipe when it's there and injects it itself
-  when it isn't, so turning the helper on or off needs no restart.
+  when it isn't, so turning the helper on or off needs no restart;
+* a host asks it to listen too (wire v2, `curslink/winhelper/watch.py`):
+  an unelevated program's low-level hooks hear nothing over an app that
+  runs as administrator, so the pointer couldn't leave the screen there.
+  The injector's hooks report what they hear on a second pipe
+  (`curslink-input-<session>-events`) and, while input is on another
+  computer, keep it from the PC. The host's own hooks stay in front, so
+  the helper only gets what they didn't take. Older helpers ignore the
+  request; turning the setting off and on again updates the copy.
 
 The copy lives in Program Files so a program running as the user can't
 replace what SYSTEM runs; its logs are there too for the same reason. The

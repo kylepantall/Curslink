@@ -13,6 +13,12 @@ on in Settings (one admin prompt), Curslink installs a small service:
   (the normal one, or the secure one while UAC or the lock screen is up).
 * The agent (:class:`.client.HelperSink`) sends its input there when the
   helper is running, and injects it itself when it isn't.
+* The host (:class:`.client.HelperWatch`, wire v2) asks it to listen too:
+  this PC's own input hooks hear nothing over an app that runs as
+  administrator, so the pointer couldn't leave the screen there and keys
+  meant for another computer went to that app. The helper's hooks (SYSTEM)
+  hear everything; it reports what they hear on a second pipe, and while
+  input is on another computer keeps it from this PC.
 
 The helper is a separate small executable copied into Program Files, so a
 program running as the user can't replace what the service runs. Turning
@@ -30,8 +36,13 @@ DISPLAY_NAME = "Curslink input helper"
 EXE_NAME = "curslink-helper.exe"
 INSTALL_FOLDER = "Curslink Helper"   # under %ProgramFiles%
 PIPE_PREFIX = r"\\.\pipe\curslink-input-"
-WIRE_VERSION = 1
+WIRE_VERSION = 2   # 2: "watch", and the events pipe
 
 
 def pipe_name(session: int) -> str:
     return f"{PIPE_PREFIX}{session}"
+
+
+def events_pipe_name(session: int) -> str:
+    """Where the helper reports what its hooks hear (wire v2)."""
+    return f"{PIPE_PREFIX}{session}-events"
