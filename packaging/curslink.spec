@@ -82,7 +82,8 @@ if sys.platform == "win32":
     ha = Analysis(
         [SPECPATH + "/../curslink/winhelper/__main__.py"],
         pathex=[SPECPATH + "/.."],
-        hiddenimports=collect_submodules("pynput") + ["curslink.winhelper.service", "curslink.winhelper.inject"],
+        hiddenimports=collect_submodules("pynput") + ["curslink.winhelper.service", "curslink.winhelper.inject",
+                                                         "curslink.winhelper.watch"],
         excludes=["pytest", "PySide6", "mediapipe", "cv2", "numpy", "matplotlib", "zeroconf", "tkinter"],
     )
     exes.append(EXE(
