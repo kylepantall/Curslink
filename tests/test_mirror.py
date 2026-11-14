@@ -1921,3 +1921,55 @@ def test_a_diagnostics_bundle_has_every_setting_and_screen_but_no_secret(tmp_pat
     assert "port = 24850" in text and 'return_hotkey = "ctrl+alt+home"' in text
     assert "x = 752" in text and "width = 3440" in text and "allow_overlap = true" in text
     assert "# curslink.host.toml" in text
+
+
+# -- a held chat crossing next to the mirrored part (Kyle, 0.4.76) ------------------
+def _kyles_desk():
+    """Kyle's desk on 0.4.76: a PC host in front of the bottom-left corner
+    of a Mac's ultrawide, lined up (a Fit), mirror mode on."""
+    from curslink.layout import Fit
+
+    devices = [
+        Device("kyles-pc", "Kyles_PC", (Screen("main", "kyles-pc", -1127, -581, 2880, 1620, z=2),)),
+        Device("wks82261", "WKS82261", (
+            Screen("main", "wks82261", 4196, -1234, 1512, 982),
+            Screen("screen2", "wks82261", 756, -1692, 3440, 1440, os_x=-3440, os_y=-458, z=1),
+        )),
+    ]
+    fits = (Fit(("wks82261", "screen2"), ("kyles-pc", "main"), -532.6, 1151.8, 0.5227),)
+    return Layout.from_devices(devices, allow_overlap=True, pointer_through=True, mirror=True, fits=fits)
+
+
+def _chat_router():
+    transport = Transport({"wks82261"}, {"wks82261"})
+    router = Router(_kyles_desk(), "kyles-pc", FakeCapture(), FakeSink(), transport, FakeOverlay())
+    router.carries_drag = lambda src, dst: True  # an Isolink chat is held all along
+    return router
+
+
+def test_a_chat_carried_up_off_the_pc_stays_on_the_mac_through_a_wobble():
+    """0.4.76: up off the PC's top edge the pointer landed 2 px above the
+    part of the Mac's screen that the PC covers; the next move a pixel or
+    two down carried the chat straight back (three times in 13 s)."""
+    router = _chat_router()
+    router.on_pointer(2480, 10)
+    router.on_pointer(2480, 0)
+    assert router.active_device == "wks82261", router.active_device
+    x, y = router.x, router.y
+    behind = router.layout.covered_parts(router.screen)[0][1]
+    assert behind[1] - 3 <= y < behind[1]  # just above it, as on Kyle's desk
+    router.on_motion(-3, 4)   # the hand wobbles into the covered part
+    router.on_motion(2, -1)
+    assert router.active_device == "wks82261"
+    router.on_motion(0, 30)   # but going on down into it carries it back
+    assert router.active_device == "kyles-pc"
+
+
+def test_a_chat_carried_off_the_pc_and_away_can_come_back_through_the_covered_part():
+    router = _chat_router()
+    router.on_pointer(2480, 10)
+    router.on_pointer(2480, 0)
+    assert router.active_device == "wks82261"
+    router.on_motion(0, -60)  # well clear of the covered part: armed again
+    router.on_motion(0, 62)   # back into it by a couple of pixels
+    assert router.active_device == "kyles-pc"

@@ -115,6 +115,10 @@ class PopupHandoff:
         """An agent's ``isolink`` frame."""
         me = data.get("me") if isinstance(data.get("me"), str) else None
         dragging = ChatDrag.from_json(data.get("dragging"))
+        if dragging is not None and self.closing.get(dragging.chat) == device_id:
+            # Already carried off this device and about to close here: a late
+            # "still dragging it" isn't a second drag of the same chat.
+            dragging = None
         was = self.devices.get(device_id)
         self.devices[device_id] = DeviceIsolink(me, data.get("windows") is True, dragging)
         if dragging is not None:

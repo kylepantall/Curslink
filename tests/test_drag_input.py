@@ -155,3 +155,25 @@ def test_a_new_click_lets_go_of_a_held_button_on_windows(monkeypatch):
     capture.hold_left_up = lambda: False
     assert capture._win_mouse_filter(pb._WM_LBUTTONDOWN, Data()) is True
     assert released and not capture._held_up
+
+
+@pytest.mark.parametrize("platform, real", [("darwin", True), ("win32", True), ("linux", False)])
+def test_an_agent_drags_files_from_the_host_for_real_on_a_mac_too(monkeypatch, tmp_path, platform, real):
+    """Kyle, 0.4.76: files dragged from the PC to a Mac agent only showed a
+    card and went to Downloads, and no window came forward under them."""
+    import sys
+    import types
+
+    from conftest import FakeSink
+    from curslink import app
+    from curslink.net.client import AgentSession
+
+    monkeypatch.setattr(sys, "platform", platform)
+    sink = FakeSink()
+    session = AgentSession(sink, lambda *a: None)
+    cfg = types.SimpleNamespace(files=types.SimpleNamespace(folder=tmp_path))
+    overlay = types.SimpleNamespace(command=lambda line: None, pid=None)
+    native = app.receive_files(cfg, session, overlay)
+    assert (native.press is not None) is real
+    assert (native.follow is not None) is real
+    assert native.end_watch is (platform == "darwin")
