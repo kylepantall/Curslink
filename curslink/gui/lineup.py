@@ -1,14 +1,19 @@
 """Auto line-up on screen: the patterns on every monitor, and the steps on
-the host's Layout page (see curslink.lineup for the maths).
+the host's Layout page (see curslink.lineup and curslink.lineup_scene for
+the maths).
 
 The host's Layout page starts a :class:`LineupFlow`: it puts the patterns on
 this computer's monitors (:class:`Markers`) and, through the host service, on
 every connected paired computer's (a ``lineup`` frame, which they show with
 their own :class:`Markers`), and asks every connected phone with the
-Curslink app for a photo (``lineup_camera``). A small window on top says
-what to do; a photo from any other camera can be chosen there instead. The
-photo is read on a worker thread, and the page shows the result to check
-and save.
+Curslink app for its camera (``lineup_camera``, live). The phone sends frame
+after frame as it's moved about; each is read on a worker thread, the desk
+is solved again with every new view, and a small window on top shows the
+layout moving into place and says what to do next (the same goes back to
+the phone's screen, ``lineup_live``). When every screen's place is sure it
+ends by itself, and the page shows the result to check and save. A photo
+from any other camera (or an older phone app) can be used instead: one
+view, so less sure.
 
 A marker payload (one computer's) is::
 
@@ -20,12 +25,22 @@ A marker payload (one computer's) is::
 from __future__ import annotations
 
 import logging
+import queue
 import threading
 import uuid
 
 from PySide6.QtCore import QObject, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import QDialog, QFileDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QDialog,
+    QFileDialog,
+    QHBoxLayout,
+    QLabel,
+    QProgressBar,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from curslink.gui import theme
 from curslink.gui.overlay import find_qscreen
@@ -77,7 +92,7 @@ class _MarkerWindow(QWidget):
         if lines:
             s = lines[0]
             number, title = str(s.get("number") or ""), str(s.get("title") or "")[:80]
-            note = "Lining up: keep this screen in the photo"
+            note = "Lining up: keep these patterns in the camera's view"
             bw = max(mb.horizontalAdvance(number), ms.horizontalAdvance(title), ms.horizontalAdvance(note)) + 2 * ms.height()
             bh = mb.height() + 2.6 * ms.height() + ms.height()
             # In the middle, clear of the patterns along the edges (the top and bottom
@@ -176,11 +191,64 @@ class Markers:
         return bool(self.windows)
 
 
+STATE_COLOURS = {"unseen": QColor(120, 130, 150), "seen": QColor(120, 130, 150),
+                 "placing": QColor(255, 180, 84), "locked": QColor(79, 214, 164)}
+
+
+class LayoutPreview(QWidget):
+    """The layout as the camera has it so far, small: each screen where the
+    last solve put it, amber while it's still being placed, green once sure."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumSize(380, 130)
+        self.rects: list[tuple[str, float, float, float, float, str]] = []  # number, x, y, w, h, state
+
+    def show_layout(self, rects: list[tuple[str, float, float, float, float, str]]) -> None:
+        self.rects = rects
+        self.update()
+
+    def paintEvent(self, _e) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        area = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        back = QPainterPath()
+        back.addRoundedRect(area, 8, 8)
+        p.fillPath(back, QColor(16, 20, 28))
+        if not self.rects:
+            p.setPen(QColor(150, 160, 178))
+            p.drawText(area, Qt.AlignmentFlag.AlignCenter, "The layout appears here as it's measured")
+            p.end()
+            return
+        x0 = min(r[1] for r in self.rects)
+        y0 = min(r[2] for r in self.rects)
+        x1 = max(r[1] + r[3] for r in self.rects)
+        y1 = max(r[2] + r[4] for r in self.rects)
+        pad = 10.0
+        k = min((area.width() - 2 * pad) / max(1.0, x1 - x0), (area.height() - 2 * pad) / max(1.0, y1 - y0))
+        ox = area.left() + (area.width() - (x1 - x0) * k) / 2
+        oy = area.top() + (area.height() - (y1 - y0) * k) / 2
+        font = QFont()
+        font.setBold(True)
+        p.setFont(font)
+        for number, x, y, w, h, state in self.rects:
+            box = QRectF(ox + (x - x0) * k, oy + (y - y0) * k, w * k, h * k).adjusted(1, 1, -1, -1)
+            colour = STATE_COLOURS.get(state, STATE_COLOURS["unseen"])
+            path = QPainterPath()
+            path.addRoundedRect(box, 4, 4)
+            p.fillPath(path, QColor(34, 42, 58, 235))
+            p.setPen(QPen(colour, 2))
+            p.drawPath(path)
+            p.drawText(box, Qt.AlignmentFlag.AlignCenter, number)
+        p.end()
+
+
 class LineupDialog(QDialog):
     """What to do while the patterns are up: on top of them, in the middle of this screen."""
 
     choose = Signal()
     again = Signal()
+    use = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent, Qt.WindowType.Dialog | Qt.WindowType.WindowStaysOnTopHint)
@@ -189,7 +257,7 @@ class LineupDialog(QDialog):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(20, 18, 20, 16)
         lay.setSpacing(10)
-        self.title = QLabel("Take a photo of your desk")
+        self.title = QLabel("Scan your desk with your phone")
         f = self.title.font()
         f.setPointSizeF(f.pointSizeF() * 1.35)
         f.setBold(True)
@@ -199,15 +267,35 @@ class LineupDialog(QDialog):
         self.text.setWordWrap(True)
         self.text.setMinimumWidth(380)
         lay.addWidget(self.text)
+        # Live: how far along, and the layout as it's measured.
+        self.bar = QProgressBar()
+        self.bar.setRange(0, 100)
+        self.bar.setTextVisible(False)
+        self.bar.setFixedHeight(8)
+        self.bar.hide()
+        lay.addWidget(self.bar)
+        self.preview = LayoutPreview()
+        self.preview.hide()
+        lay.addWidget(self.preview)
+        self.detail = QLabel()
+        self.detail.setWordWrap(True)
+        self.detail.setObjectName("small")
+        self.detail.hide()
+        lay.addWidget(self.detail)
         row = QHBoxLayout()
         self.again_button = QPushButton("Ask the phone again")
         self.again_button.clicked.connect(self.again.emit)
+        self.use_button = QPushButton("Use it as it is")
+        self.use_button.setToolTip("Stop scanning and take the layout as measured so far.")
+        self.use_button.clicked.connect(self.use.emit)
+        self.use_button.hide()
         self.choose_button = QPushButton("Choose a photo…")
         self.choose_button.clicked.connect(self.choose.emit)
         cancel = QPushButton("Cancel")
         cancel.clicked.connect(self.reject)
         row.addWidget(self.again_button)
         row.addStretch(1)
+        row.addWidget(self.use_button)
         row.addWidget(self.choose_button)
         row.addWidget(cancel)
         lay.addLayout(row)
@@ -218,6 +306,40 @@ class LineupDialog(QDialog):
         self.choose_button.setEnabled(not busy)
         self.again_button.setVisible(again and not busy)
         self.adjustSize()
+
+    def show_live(self, progress: float, rects: list, detail: str, usable: bool) -> None:
+        """The live line-up's state: the bar, the little layout, the numbers."""
+        first = not self.bar.isVisible()
+        self.bar.show()
+        self.preview.show()
+        self.bar.setValue(round(100 * min(1.0, max(0.0, progress))))
+        self.preview.show_layout(rects)
+        self.detail.setText(detail)
+        self.detail.setVisible(bool(detail))
+        self.use_button.setVisible(usable)
+        self.again_button.hide()
+        self.choose_button.hide()  # the phone's doing it
+        if first:
+            self.adjustSize()
+
+
+def describe(result, names: dict[str, str]) -> str:
+    """A line on how the screens stand, from a curslink.lineup.Result: what
+    one photo couldn't tell."""
+    parts = []
+    for key in result.found:
+        st = result.stance.get(key) or {}
+        if key == result.reference:
+            continue
+        yaw, pitch = st.get("yaw", 0.0), st.get("pitch", 0.0)
+        bits = []
+        if abs(yaw) >= 6:
+            bits.append(f"turned {abs(yaw):.0f}° to the {'right' if yaw > 0 else 'left'}")
+        if abs(pitch) >= 8:
+            bits.append(f"tipped {abs(pitch):.0f}° {'back' if pitch > 0 else 'forward'}")
+        if bits:
+            parts.append(f"{names.get(key, key)} is {' and '.join(bits)}")
+    return "; ".join(parts)
 
 
 class LineupFlow(QObject):
@@ -231,6 +353,7 @@ class LineupFlow(QObject):
 
     finished = Signal(object)
     _analysed = Signal(object, str)  # (Result or None, error), from the worker thread
+    _status = Signal(object)  # a live frame was read: how it's going (a dict), from the worker thread
 
     def __init__(self, screens: list[dict], send, reference: str | None, parent=None):
         super().__init__(parent)
@@ -243,11 +366,20 @@ class LineupFlow(QObject):
         self.dialog.rejected.connect(self.cancel)
         self.dialog.choose.connect(self.choose_photo)
         self.dialog.again.connect(self.ask_phones)
+        self.dialog.use.connect(self.use_now)
         self._analysed.connect(self._done)
+        self._status.connect(self._on_status)
         self.planned: dict[str, dict] = {}
         self.phones: list[dict] = []
         self.busy = False
         self.over = False
+        # Live: frames wait here for the worker thread, which owns ``live``.
+        self.frames: queue.Queue = queue.Queue()
+        self.worker: threading.Thread | None = None
+        self.live = None  # curslink.lineup.Live
+        self.latest = None  # the last Result it gave
+        self.live_device: str | None = None
+        self.ending = False
 
     def start(self) -> bool:
         from curslink import lineup
@@ -270,56 +402,203 @@ class LineupFlow(QObject):
                 remote.setdefault(s["device"], {"screens": [], "seconds": SECONDS})["screens"].append(entry)
         import json
 
+        # This computer's monitors' real sizes (the others' come with lineup_sizes).
+        try:
+            from curslink.screensize import physical_sizes
+
+            self.take_sizes({s["device"]: physical_sizes() for s in shown if s.get("local")})
+        except Exception:  # noqa: BLE001 - only a help to the sums
+            log.debug("couldn't read this computer's monitor sizes", exc_info=True)
         self.markers.show({"screens": local, "seconds": SECONDS})
         self.send("lineup " + json.dumps({"devices": remote}, separators=(",", ":")))
-        self.dialog.say("Take a photo of your desk", "Asking your phone…")
+        self.dialog.say("Scan your desk with your phone", "Asking your phone…")
         self.dialog.show()
         # In the middle of the screen, over its number: clear of its patterns.
-        area = self.dialog.screen().geometry() if self.dialog.screen() is not None else None
-        if area is not None:
-            self.dialog.adjustSize()
-            self.dialog.move(area.center() - self.dialog.rect().center())
+        self.centre_dialog()
         self.dialog.raise_()
         self.dialog.activateWindow()
         self.ask_phones()
         return True
 
+    def centre_dialog(self) -> None:
+        area = self.dialog.screen().geometry() if self.dialog.screen() is not None else None
+        if area is not None:
+            self.dialog.adjustSize()
+            self.dialog.move(area.center() - self.dialog.rect().center())
+
+    def take_sizes(self, devices: dict) -> None:
+        """Monitors' real sizes, per computer (as curslink.screensize gives them)."""
+        from curslink.screensize import match
+
+        for s in self.screens:
+            sizes = devices.get(s["device"])
+            if not isinstance(sizes, list) or not sizes:
+                continue
+            try:
+                os_x, os_y, w, h = (int(v) for v in s["os"])
+                mm = match([m for m in sizes if isinstance(m, dict)], os_x, os_y, w, h)
+            except (TypeError, ValueError, KeyError):
+                mm = None
+            if mm is not None:
+                s["width_mm"], s["height_mm"] = mm
+
     def ask_phones(self) -> None:
         import json
 
-        self.send("lineup_camera " + json.dumps({"id": self.id}))
+        self.send("lineup_camera " + json.dumps({"id": self.id, "live": True}))
 
     def on_event(self, event: dict) -> None:
         kind = event.get("event")
         if self.over or event.get("id") not in (None, self.id):
             return
-        if kind == "lineup_camera":
+        if kind == "lineup_sizes":
+            if isinstance(event.get("devices"), dict) and self.live is None:
+                self.take_sizes(event["devices"])
+        elif kind == "lineup_camera":
             self.phones = [d for d in event.get("devices", []) if isinstance(d, dict)]
             self.say_waiting()
         elif kind == "lineup_photo":
+            live_frame = isinstance(event.get("seq"), int)
             if event.get("cancelled"):
-                self.dialog.say("Take a photo of your desk",
-                                "The photo was cancelled on the phone. Ask it again, or choose a photo "
+                self.dialog.say("Scan your desk with your phone",
+                                "It was cancelled on the phone. Ask it again, or choose a photo "
                                 "taken with another camera.", again=bool(self.phones))
+            elif event.get("done"):
+                self.use_now()
             elif event.get("error"):
-                self.dialog.say("That photo didn't arrive", f"{event['error']}. Ask the phone again.", again=True)
+                if live_frame:  # one frame lost: on with the next
+                    self.send_live(event.get("device"), {"seq": event["seq"]})
+                else:
+                    self.dialog.say("That photo didn't arrive", f"{event['error']}. Ask the phone again.", again=True)
             elif isinstance(event.get("path"), str):
-                self.read_file(event["path"], delete=True)
+                if live_frame:
+                    self.live_frame(event)
+                else:
+                    self.read_file(event["path"], delete=True)
 
     def say_waiting(self) -> None:
-        tips = ("Stand back far enough to get every screen in, hold the phone level, and make sure "
-                "the patterns are sharp.")
+        if self.worker is not None:
+            return  # frames are already coming
         if self.phones:
             names = ", ".join(str(d.get("name") or d.get("id")) for d in self.phones)
-            self.dialog.say("Take a photo of your desk",
-                            f"The camera is opening on {names}. {tips}\n\n"
-                            "No Curslink on your phone? Take the photo with any camera and choose it here.",
+            self.dialog.say("Scan your desk with your phone",
+                            f"The camera is opening on {names}. Sit where you usually sit, hold the phone up in "
+                            "front of your eyes pointing at your screens, then move it slowly in a figure of 8. "
+                            "The layout appears here and keeps adjusting until every screen is lined up.\n\n"
+                            "No Curslink on your phone? Take a photo of the desk with any camera and choose it here.",
                             again=True)
         else:
             self.dialog.say("Take a photo of your desk",
-                            f"No phone with the Curslink app is connected, so take the photo with any camera and "
-                            f"choose it here (AirDrop or copy it over first). {tips}")
+                            "No phone with the Curslink app is connected, so take a photo with any camera and "
+                            "choose it here (AirDrop or copy it over first). Stand back far enough to get every "
+                            "screen in, and make sure the patterns are sharp. One photo is less sure than a "
+                            "scan with the app: it can't tell how far away each screen is.")
 
+    # -- live: frame after frame from the phone --------------------------------
+    def live_frame(self, event: dict) -> None:
+        if self.busy or self.ending:
+            _remove(event["path"])
+            return
+        if self.worker is None:
+            self.worker = threading.Thread(target=self._work, name="curslink-lineup-live", daemon=True)
+            self.worker.start()
+            self.dialog.say("Scanning your desk", "Reading the patterns…")
+        if self.frames.qsize() >= 2:
+            # Behind (it shouldn't be: the phone waits for each frame's answer): skip this one.
+            _remove(event["path"])
+            self.send_live(event.get("device"), {"seq": event["seq"]})
+            return
+        self.frames.put((event["path"], event["seq"], event.get("focal"), event.get("device")))
+
+    def _work(self) -> None:
+        """The worker thread: read each frame, solve again, say how it's going."""
+        import cv2
+        import numpy as np
+
+        from curslink import lineup
+
+        numbers = {s["key"]: s.get("number") for s in self.screens}
+        while True:
+            item = self.frames.get()
+            if item is None:
+                return
+            path, seq, focal, device = item
+            status = {"seq": seq, "device": device}
+            try:
+                with open(path, "rb") as f:
+                    data = f.read()
+                gray = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_GRAYSCALE)
+                if gray is not None:
+                    if self.live is None:
+                        self.live = lineup.Live(self.screens, self.planned, self.reference)
+                    self.live.frame(gray, focal)
+                    self.live.update()
+            except Exception:  # noqa: BLE001 - a frame OpenCV chokes on: on with the next
+                log.warning("couldn't read a line-up frame", exc_info=True)
+            finally:
+                _remove(path)
+            live = self.live
+            if live is not None:
+                status.update(progress=live.progress(), hint=live.hint(numbers), states=live.states(),
+                              result=live.result, aligned=live.aligned, usable=live.usable,
+                              frames=live.frames)
+            self._status.emit(status)
+
+    def send_live(self, device, data: dict) -> None:
+        import json
+
+        if device:
+            self.send("lineup_live " + json.dumps({"device": device, "id": self.id, **data}, separators=(",", ":")))
+
+    def _on_status(self, status: dict) -> None:
+        if self.over or self.ending:
+            return
+        self.live_device = status.get("device") or self.live_device
+        states = status.get("states") or {}
+        result = status.get("result")
+        if result is not None:
+            self.latest = result
+        info = {s["key"]: s for s in self.screens}
+        numbers = [[int(info[k]["number"]), v] for k, v in states.items()
+                   if k in info and isinstance(info[k].get("number"), int)]
+        aligned = bool(status.get("aligned"))
+        self.send_live(status.get("device"), {"seq": status.get("seq"), "progress": status.get("progress", 0.0),
+                                              "hint": status.get("hint", ""), "screens": numbers,
+                                              **({"done": True} if aligned else {})})
+        rects = []
+        if result is not None:
+            for key, (x, y) in result.positions.items():
+                s = info.get(key)
+                if s is not None and key in result.found:
+                    rects.append((str(s.get("number") or ""), x, y, s["width"], s["height"], states.get(key, "placing")))
+        detail = ""
+        if result is not None:
+            worst = max((e for e in result.errors.values()), default=0.0)
+            detail = (f"{result.views} view{'s' if result.views != 1 else ''} kept, patterns fit to "
+                      f"{result.rms:.1f} px, placed to ±{worst:.0f} px" if worst >= 1 else
+                      f"{result.views} views kept, patterns fit to {result.rms:.1f} px, placed to under a pixel")
+            how = describe(result, {s["key"]: f"screen {s.get('number')}" for s in self.screens})
+            if how:
+                detail += ". " + how[:1].upper() + how[1:] + "."
+        self.dialog.say("Lined up" if aligned else "Scanning your desk", status.get("hint") or "Reading the patterns…")
+        self.dialog.show_live(status.get("progress", 0.0), rects, detail, bool(status.get("usable")) and not aligned)
+        if aligned and self.latest is not None:
+            # A moment to see it's done, then the result.
+            self.ending = True
+            QTimer.singleShot(900, lambda: self._end(self.latest) if not self.over else None)
+
+    def use_now(self) -> None:
+        """Stop the scan and take the layout as measured so far."""
+        if self.over or self.ending:
+            return
+        if self.latest is None or len(self.latest.found) < 2:
+            self.dialog.say("Not enough yet", "At least two screens need to be in the camera's view together. "
+                                              "Keep scanning, or cancel.", again=bool(self.phones))
+            return
+        self.send_live(self.live_device, {"progress": 1.0, "hint": "Stopped", "screens": [], "done": True})
+        self._end(self.latest)
+
+    # -- one photo, from any camera ---------------------------------------------
     def choose_photo(self) -> None:
         path, _filter = QFileDialog.getOpenFileName(self.dialog, "Choose the photo of your desk", "",
                                                     "Photos (*.jpg *.jpeg *.png *.heic *.webp);;All files (*)")
@@ -337,12 +616,7 @@ class LineupFlow(QObject):
             return
         finally:
             if delete:
-                import os
-
-                try:
-                    os.remove(path)
-                except OSError:
-                    pass
+                _remove(path)
         self.analyse(data)
 
     def analyse(self, data: bytes) -> None:
@@ -381,10 +655,22 @@ class LineupFlow(QObject):
             self._end(None)
 
     def _end(self, result) -> None:
+        if self.over:
+            return
         self.over = True
+        self.frames.put(None)  # the worker thread, if any, stops
         self.markers.hide()
         self.send('lineup {"hide":true}')
         self.dialog.blockSignals(True)
         self.dialog.hide()
         self.dialog.deleteLater()
         self.finished.emit(result)
+
+
+def _remove(path: str) -> None:
+    import os
+
+    try:
+        os.remove(path)
+    except OSError:
+        pass

@@ -18,10 +18,11 @@ import java.io.File
 import kotlin.concurrent.thread
 
 /**
- * Auto line-up (see curslink/lineup.py on the computer): every screen shows
- * its patterns, and this takes the one photo of the desk the computer reads
- * them from. The phone's own camera app takes it (full resolution, its own
- * focus and exposure); we shrink it and send it over the link.
+ * Auto line-up with a computer whose Curslink is older than the live scan
+ * (see [LineupLiveActivity] for that): every screen shows its patterns, and
+ * this takes the one photo of the desk the computer reads them from. The
+ * phone's own camera app takes it (full resolution, its own focus and
+ * exposure); we shrink it and send it over the link.
  */
 class LineupActivity : AppCompatActivity() {
     private var id = ""
@@ -104,16 +105,22 @@ class LineupActivity : AppCompatActivity() {
         private const val LONGEST = 3000
         @Volatile private var current: LineupActivity? = null
 
-        /** The computer wants a photo for line-up [id] (or, [cancel], not any more). */
-        fun ask(context: Context, id: String, cancel: Boolean) {
+        /**
+         * The computer wants the camera for line-up [id]: [live], frame after
+         * frame as the phone is moved about; else one photo (or, [cancel],
+         * not any more).
+         */
+        fun ask(context: Context, id: String, cancel: Boolean, live: Boolean = false) {
             if (cancel) {
                 current?.let { a -> a.runOnUiThread { if (a.id == id && !a.sent) a.finish() } }
+                LineupLiveActivity.close(id)
                 return
             }
             // Starting it from the background is allowed while the accessibility service runs (as WakeActivity).
             val ctx = InputService.instance ?: context
+            val activity = if (live) LineupLiveActivity::class.java else LineupActivity::class.java
             runCatching {
-                ctx.startActivity(Intent(ctx, LineupActivity::class.java)
+                ctx.startActivity(Intent(ctx, activity)
                     .putExtra(EXTRA_ID, id)
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP))
             }.onFailure { AppLog.w(TAG, "couldn't open the camera for the line-up: $it") }

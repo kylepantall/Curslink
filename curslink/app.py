@@ -430,6 +430,8 @@ async def run_host(cfg: HostConfig) -> None:
             lineup_inbox.markers(line[7:])
         elif line.startswith("lineup_camera "):
             lineup_inbox.camera(line[14:])
+        elif line.startswith("lineup_live "):
+            lineup_inbox.live(line[12:])
         elif line.startswith("fit "):
             fit_command(mirror, line[4:])
         elif line == "pick on":

@@ -374,7 +374,7 @@ class LayoutPage(Page):
         ob.addWidget(overlap_label)
         self.detect_button = button("Detect my screens", None, self.detect)
         self.lineup_button = button("Line up with camera…", None, self.start_lineup)
-        self.lineup_button.setToolTip("Every screen shows a few patterns; take one photo of your desk with your "
+        self.lineup_button.setToolTip("Every screen shows a few patterns; scan your desk with your "
                                       "phone and Curslink arranges the layout to match it.")
         self.save_button = button("Save layout", "primary", self.save)
         self.header.addWidget(self.overlap_box)
@@ -938,7 +938,7 @@ class LayoutPage(Page):
 
     def _on_service_event(self, event: dict) -> None:
         kind = event.get("event")
-        if kind in ("lineup_camera", "lineup_photo"):
+        if kind in ("lineup_camera", "lineup_photo", "lineup_sizes"):
             if self.lineup is not None:
                 self.lineup.on_event(event)
             return
@@ -1118,7 +1118,13 @@ class LayoutPage(Page):
         self.refresh_edges()
         self.overlaps_changed()
         names = {i.key: f"{i.device_name} / {i.screen['id']}" for i in self.items}
-        text = f"Lined up {len(result.found)} screen{'s' if len(result.found) != 1 else ''} from the photo"
+        text = f"Lined up {len(result.found)} screen{'s' if len(result.found) != 1 else ''}"
+        if result.views > 1:
+            worst = max(result.errors.values(), default=0.0)
+            sure = f"to about ±{worst:.0f} px" if worst >= 1 else "to under a pixel"
+            text += f" from {result.views} views of the desk, {sure}"
+        else:
+            text += " from the photo"
         extra = []
         if result.links:
             extra.append(f"{len(result.links)} edge{'s' if len(result.links) != 1 else ''} calibrated")
@@ -1126,7 +1132,13 @@ class LayoutPage(Page):
             extra.append(f"{len(result.fronts)} overlap{'s' if len(result.fronts) != 1 else ''}")
         if extra:
             text += " (" + ", ".join(extra) + ")"
-        text += ". Check it and press Save layout."
+        text += "."
+        from curslink.gui.lineup import describe
+
+        how = describe(result, {i.key: i.device_name for i in self.items})
+        if how:
+            text += " " + how[:1].upper() + how[1:] + "."
+        text += " Check it and press Save layout."
         phones = {s["key"] for s in self.lineup_screens() if s["phone"]}  # they take the photo
         missing = [k for k in result.missing if k not in phones]
         if missing:

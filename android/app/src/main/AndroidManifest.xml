@@ -62,7 +62,17 @@
             android:taskAffinity=""
             android:theme="@style/Theme.Curslink.Wake" />
 
-        <!-- Auto line-up: takes the photo of the desk with the camera app. -->
+        <!-- Auto line-up, live: the camera's picture with how the scan is going over it. -->
+        <activity
+            android:name=".LineupLiveActivity"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:taskAffinity=""
+            android:theme="@style/Theme.Curslink" />
+
+        <!-- Auto line-up with an older computer: takes the photo of the desk with the camera app. -->
         <activity
             android:name=".LineupActivity"
             android:excludeFromRecents="true"

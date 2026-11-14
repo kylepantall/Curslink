@@ -96,25 +96,7 @@ def plan(screens: list[dict]) -> dict[str, dict]:
     return out
 
 
-# -- finding the screens in a photo --------------------------------------------
-
-@dataclass
-class Seen:
-    """A screen found in the photo."""
-
-    key: str
-    homography: list[list[float]]  # its own 0..1 coordinates -> the photo's pixels
-    markers: int  # how many of its markers were read
-    # Where each marker read was, in the photo's pixels (its middle).
-    centres: list[tuple[float, float]] = field(default_factory=list)
-
-
-def _apply(h, x: float, y: float) -> tuple[float, float]:
-    w = h[2][0] * x + h[2][1] * y + h[2][2]
-    if abs(w) < 1e-12:
-        w = 1e-12
-    return ((h[0][0] * x + h[0][1] * y + h[0][2]) / w, (h[1][0] * x + h[1][1] * y + h[1][2]) / w)
-
+# -- finding the patterns in a frame ---------------------------------------------
 
 def load_photo(data: bytes):
     """The photo as a grey image, shrunk to at most :data:`LONGEST` pixels."""
@@ -131,61 +113,103 @@ def load_photo(data: bytes):
     return img
 
 
-def find_screens(gray, planned: dict[str, dict]) -> dict[str, Seen]:
-    """The screens of ``planned`` (as :func:`plan` gives) found in ``gray``."""
+def _detector():
     import cv2
-    import numpy as np
 
     dictionary = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, DICTIONARY))
     params = cv2.aruco.DetectorParameters()
+    # Corners to a fraction of a pixel: everything after is only as good as these.
     params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
-    detector = cv2.aruco.ArucoDetector(dictionary, params)
-    # A screen right at the photo's edge: its patterns' white border runs into
-    # the edge and they aren't found, so give the photo a grey frame.
+    params.cornerRefinementWinSize = 4
+    params.cornerRefinementMaxIterations = 40
+    params.cornerRefinementMinAccuracy = 0.02
+    # Screens glow: under a reflection or in a dim room a pattern's white
+    # runs into its black. Bigger windows for the local threshold, a slacker
+    # outline, and cells read from their middles.
+    params.adaptiveThreshWinSizeMin = 5
+    params.adaptiveThreshWinSizeMax = 45
+    params.adaptiveThreshWinSizeStep = 10
+    params.minMarkerPerimeterRate = 0.012
+    params.polygonalApproxAccuracyRate = 0.05
+    params.perspectiveRemoveIgnoredMarginPerCell = 0.2
+    return cv2.aruco.ArucoDetector(dictionary, params)
+
+
+def find_markers(gray, thorough: bool = True) -> dict[int, "object"]:
+    """The patterns in ``gray``: ``{marker id: its 4 corners (4, 2), in pixels}``.
+
+    ``thorough`` looks a second time with the contrast stretched (a photo;
+    live frames only do when the first look finds next to nothing).
+    """
+    import cv2
+    import numpy as np
+
+    detector = _detector()
+    # A screen right at the picture's edge: its patterns' white border runs into
+    # the edge and they aren't found, so give the picture a grey frame.
     pad = max(16, round(0.02 * max(gray.shape[:2])))
     framed = cv2.copyMakeBorder(gray, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=int(np.median(gray)))
-    corners, ids, _rejected = detector.detectMarkers(framed)
-    if ids is None or not len(ids):
-        # A dim photo of bright screens: stretch the contrast and look again.
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-        corners, ids, _rejected = detector.detectMarkers(clahe.apply(framed))
-    corners = [c - pad for c in corners] if ids is not None else []
+    found: dict[int, object] = {}
+
+    def look(img) -> None:
+        corners, ids, _rejected = detector.detectMarkers(img)
+        if ids is None:
+            return
+        for quad, marker_id in zip(corners, ids.flatten()):
+            found.setdefault(int(marker_id), quad.reshape(4, 2).astype(np.float64) - pad)
+
+    look(framed)
+    if thorough or len(found) < 2:
+        # A dim picture of bright screens, or a reflection across one.
+        look(cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8)).apply(framed))
+    return found
+
+
+def read_frame(gray, planned: dict[str, dict], sizes: dict[str, tuple[float, float]], tolerance: float,
+               thorough: bool = True) -> list:
+    """The screens of ``planned`` (as :func:`plan` gives) seen in ``gray``:
+    a curslink.lineup_scene.Sighting for each with at least two patterns
+    that agree. ``sizes``: ``{key: (width, height)}`` in pixels."""
+    import numpy as np
+
+    from curslink.lineup_scene import sight
+
     by_slot = {p["slot"]: (key, p) for key, p in planned.items()}
-    points: dict[str, tuple[list, list, list]] = {}
-    for quad, marker_id in zip(corners, ids.flatten() if ids is not None else []):
-        slot, index = divmod(int(marker_id), PER_SCREEN)
+    per_screen: dict[str, tuple[list, list]] = {}
+    for marker_id, quad in find_markers(gray, thorough).items():
+        slot, index = divmod(marker_id, PER_SCREEN)
         if slot not in by_slot:
-            continue
+            continue  # not one of ours: something on the desk that looks like a pattern
         key, p = by_slot[slot]
-        _bits, x, y, w, h = p["markers"][index]
-        src, dst, centres = points.setdefault(key, ([], [], []))
-        src.extend([(x, y), (x + w, y), (x + w, y + h), (x, y + h)])  # as ArUco orders a marker's corners
-        q = quad.reshape(4, 2)
-        dst.extend(q.tolist())
-        centres.append((float(q[:, 0].mean()), float(q[:, 1].mean())))
-    out = {}
-    for key, (src, dst, centres) in points.items():
-        method = cv2.RANSAC if len(src) >= 8 else 0
-        h, _mask = cv2.findHomography(np.array(src, np.float64), np.array(dst, np.float64), method, 3.0)
-        if h is None:
+        if key not in sizes:
             continue
-        out[key] = Seen(key, h.tolist(), len(centres), centres)
+        sw, sh = sizes[key]
+        _bits, x, y, w, h = p["markers"][index]
+        # As ArUco orders a marker's corners: clockwise from its top left.
+        uv = np.array([(x, y), (x + w, y), (x + w, y + h), (x, y + h)], np.float64) * (sw, sh)
+        on, at = per_screen.setdefault(key, ([], []))
+        on.append(uv)
+        at.append(quad)
+    out = []
+    for key, (on, at) in per_screen.items():
+        s = sight(key, on, at, tolerance)
+        if s is not None:
+            out.append(s)
     return out
 
 
-# -- from where they are in the photo to the layout ---------------------------
+# -- from the desk in 3D to the layout -----------------------------------------
 
 @dataclass
 class Placed:
-    """Where a screen really is, in the reference screen's pixels."""
+    """A screen as it's seen against another screen's plane, in that screen's pixels."""
 
     key: str
     x0: float
     y0: float
     x1: float
     y1: float
-    k: float  # its own pixels per reference pixel
-    markers: list[tuple[float, float]]  # where its markers were read, same units
+    k: float  # its own pixels per pixel of the plane
 
     @property
     def w(self) -> float:
@@ -199,77 +223,25 @@ class Placed:
     def area(self) -> float:
         return self.w * self.h
 
-    def inside(self, x: float, y: float) -> bool:
-        return self.x0 <= x <= self.x1 and self.y0 <= y <= self.y1
-
 
 @dataclass
 class Result:
-    """What the photo says, for the Layout page to show before it's saved."""
+    """What the camera says, for the Layout page to show before it's saved."""
 
     positions: dict[str, tuple[int, int]]  # key -> new (x, y) in the layout
     fronts: list[tuple[str, str]]  # (behind, front) for each overlap: front goes in front
     links: list[dict]  # for ConfigFile.set_link: a, a_side, a_span, b, b_side, b_span
     fits: list[dict]  # for ConfigFile.set_fit: behind, front, x, y, scale
-    found: list[str]  # the screens seen in the photo
+    found: list[str]  # the screens placed
     missing: list[str]  # the screens that weren't
     reference: str
-
-
-def _invert(h):
-    import numpy as np
-
-    return np.linalg.inv(np.array(h, np.float64)).tolist()
-
-
-def _matmul(a, b):
-    return [[sum(a[i][k] * b[k][j] for k in range(3)) for j in range(3)] for i in range(3)]
-
-
-def _convex(quad: list[tuple[float, float]]) -> bool:
-    """Is the quad convex and clockwise on screen (y down), as a screen seen from the front is?"""
-    signs = []
-    for i in range(4):
-        (ax, ay), (bx, by), (cx, cy) = quad[i], quad[(i + 1) % 4], quad[(i + 2) % 4]
-        signs.append((bx - ax) * (cy - by) - (by - ay) * (cx - bx))
-    return all(s > 0 for s in signs)
-
-
-def measure(screens: list[dict], seen: dict[str, Seen], reference: str | None = None) -> tuple[str, dict[str, Placed]]:
-    """Each seen screen's real rectangle, in the reference screen's pixels.
-
-    ``screens``: ``{"key", "width", "height"}``. The reference is
-    ``reference`` if it was seen, else the screen with the most markers read.
-    """
-    sizes = {s["key"]: (float(s["width"]), float(s["height"])) for s in screens}
-    seen = {k: v for k, v in seen.items() if k in sizes}
-    if not seen:
-        raise LineupError("none of the screens' patterns are in the photo")
-    if reference not in seen:
-        reference = max(seen.values(), key=lambda s: (s.markers, s.key)).key
-    rw, rh = sizes[reference]
-    to_ref = _invert(seen[reference].homography)  # photo -> the reference's 0..1
-    out = {}
-    for key, s in seen.items():
-        w, h = sizes[key]
-        m = _matmul(to_ref, s.homography)
-        quad = [_apply(m, x, y) for x, y in ((0, 0), (1, 0), (1, 1), (0, 1))]
-        quad = [(x * rw, y * rh) for x, y in quad]
-        if not _convex(quad):
-            continue  # seen at a slant no screen stands at: a misread
-        (tlx, tly), (trx, try_), (brx, bry), (blx, bly) = quad
-        x0, x1 = (tlx + blx) / 2, (trx + brx) / 2
-        y0, y1 = (tly + try_) / 2, (bly + bry) / 2
-        if x1 - x0 < 1 or y1 - y0 < 1:
-            continue
-        k = (w / (x1 - x0) + h / (y1 - y0)) / 2
-        if not 0.02 < k * (rw / w) < 50:  # wildly bigger or smaller than the reference: a misread
-            continue
-        to_ref_px = [_apply(to_ref, cx, cy) for cx, cy in s.centres]
-        out[key] = Placed(key, x0, y0, x1, y1, k, [(x * rw, y * rh) for x, y in to_ref_px])
-    if reference not in out:
-        raise LineupError("the photo is too slanted to use: take it from in front of the screens")
-    return reference, out
+    # How unsure each placed screen still is (1 sigma, in the reference's pixels).
+    errors: dict[str, float] = field(default_factory=dict)
+    # How each stands: {"yaw", "pitch"} in degrees against the reference, "scale"
+    # (its pixel's size against the reference's), "depth" (reference pixels nearer).
+    stance: dict[str, dict] = field(default_factory=dict)
+    views: int = 1  # the frames it's from
+    rms: float = 0.0  # how well the patterns fit, in frame pixels
 
 
 def _span(a0: float, a1: float, b0: float, b1: float) -> tuple[float, float] | None:
@@ -301,37 +273,124 @@ def relation(a: Placed, b: Placed) -> tuple[str, ...] | None:
     return ("side", side)
 
 
-def in_front(a: Placed, b: Placed) -> bool:
-    """Is ``a`` in front of ``b`` where they overlap? Its markers were read
-    inside ``b`` (which they'd be hidden by otherwise); else the smaller one
-    is, like a laptop in front of a monitor."""
-    a_in_b = sum(1 for x, y in a.markers if b.inside(x, y))
-    b_in_a = sum(1 for x, y in b.markers if a.inside(x, y))
-    if a_in_b != b_in_a:
-        return a_in_b > b_in_a
-    return a.area < b.area
-
-
 OPP = {"left": "right", "right": "left", "top": "bottom", "bottom": "top"}
 
 
-def solve(screens: list[dict], seen: dict[str, Seen], reference: str | None = None) -> Result:
-    """The layout from what was seen.
+class _Desk:
+    """The solved desk, asked how one screen looks against another from
+    where the person sits (the eye: where the camera was held)."""
+
+    def __init__(self, solution):
+        self.sol = solution
+        self.screens = solution.screens
+
+    def _quad(self, plane: str, other: str):
+        from curslink.lineup_scene import project_from
+
+        return project_from(self.sol.eye, self.screens[plane], self.screens[other].corners())
+
+    @staticmethod
+    def _whole(key: str, quad, w: float, h: float) -> Placed | None:
+        (tlx, tly), (trx, try_), (brx, bry), (blx, bly) = quad
+        x0, x1 = (tlx + blx) / 2, (trx + brx) / 2
+        y0, y1 = (tly + try_) / 2, (bly + bry) / 2
+        if x1 - x0 < 1e-6 or y1 - y0 < 1e-6:
+            return None
+        return Placed(key, x0, y0, x1, y1, (w / (x1 - x0) + h / (y1 - y0)) / 2)
+
+    @staticmethod
+    def _by_edge(key: str, quad, w: float, h: float, edge: str) -> Placed | None:
+        """From the one edge that meets the other screen: where that edge is
+        seen, and the screen's size as it is right there. A monitor turned
+        in looks taller at its near edge than at its far one, and it's the
+        near one the pointer crosses."""
+        (tlx, tly), (trx, try_), (brx, bry), (blx, bly) = quad
+        if edge in ("left", "right"):
+            (ax, ay), (bx, by) = ((tlx, tly), (blx, bly)) if edge == "left" else ((trx, try_), (brx, bry))
+            if by - ay < 1e-6:
+                return None
+            k = h / (by - ay)
+            x = (ax + bx) / 2
+            x0, x1 = (x, x + w / k) if edge == "left" else (x - w / k, x)
+            return Placed(key, x0, ay, x1, by, k)
+        (ax, ay), (bx, by) = ((tlx, tly), (trx, try_)) if edge == "top" else ((blx, bly), (brx, bry))
+        if bx - ax < 1e-6:
+            return None
+        k = w / (bx - ax)
+        y = (ay + by) / 2
+        y0, y1 = (y, y + h / k) if edge == "top" else (y - h / k, y)
+        return Placed(key, ax, y0, bx, y1, k)
+
+    def pair(self, p: str, n: str, side: str | None = None) -> tuple[Placed, Placed] | None:
+        """``p`` and ``n`` against one plane (p's, else n's): with ``side``
+        (the side of p that n is on), measured at the edges that meet."""
+        P, N = self.screens[p], self.screens[n]
+        quad = self._quad(p, n)
+        if quad is not None:
+            other = self._whole(n, quad, N.width, N.height) if side is None else \
+                self._by_edge(n, quad, N.width, N.height, OPP[side])
+            if other is not None:
+                return Placed(p, 0.0, 0.0, P.width, P.height, 1.0), other
+        quad = self._quad(n, p)
+        if quad is not None:
+            other = self._whole(p, quad, P.width, P.height) if side is None else \
+                self._by_edge(p, quad, P.width, P.height, side)
+            if other is not None:
+                return other, Placed(n, 0.0, 0.0, N.width, N.height, 1.0)
+        return None
+
+    def in_front(self, a: str, b: str) -> bool:
+        """Is ``a`` nearer the person than ``b`` where they overlap? The
+        smaller one's middle, against the bigger one's plane; when that
+        can't be told (one photo, sizes unknown: both come out in one
+        plane), the smaller one is, like a laptop in front of a monitor."""
+        A, B = self.screens[a], self.screens[b]
+        small, big = (A, B) if A.width * A.height * A.scale ** 2 <= B.width * B.height * B.scale ** 2 else (B, A)
+        depth = float((small.centre - big.t) @ big.normal)  # < 0: on the eye's side of big
+        if abs(depth) < 0.02 * big.width * big.scale:
+            return small is A
+        return (depth < 0) == (small is A)
+
+    def stance(self, key: str) -> dict:
+        import math
+
+        ref = self.screens[self.sol.reference]
+        s = self.screens[key]
+        n = ref.r.T @ s.normal
+        mid = ref.r.T @ (s.centre - ref.centre)
+        # yaw: turned to face the person's right; pitch: tipped back.
+        return {"yaw": -math.degrees(math.atan2(n[0], n[2])), "pitch": math.degrees(math.atan2(n[1], n[2])),
+                "scale": s.scale / ref.scale, "depth": -float(mid[2]) / ref.scale}
+
+
+def arrange(screens: list[dict], solution) -> Result:
+    """The layout from the desk in 3D (a curslink.lineup_scene.Solution).
 
     ``screens``: every screen in the layout, ``{"key", "device", "x", "y",
-    "width", "height"}``. The reference screen stays where it is; the others
-    are placed from it, each beside or over a screen already placed, in that
-    screen's pixels. Screens not seen move with their own computer's screens
-    that were (or stay put), and nothing ends up overlapping that didn't
-    overlap in the photo.
+    "width", "height"}``. What matters to the pointer is what the person
+    sees: which edges look as if they meet, and where along them. So each
+    pair of screens is measured as it's seen from where the camera was held
+    (in front of the person's face), one against the plane of the other.
+
+    The reference screen stays where it is; the others are placed from it,
+    each beside or over a screen already placed, in that screen's pixels.
+    Screens not seen move with their own computer's screens that were (or
+    stay put), and nothing ends up overlapping that doesn't on the desk.
     """
+    import numpy as np
+
     info = {s["key"]: s for s in screens}
-    ref, placed = measure(screens, seen, reference)
-    keys = sorted(placed, key=lambda k: (k != ref, -len(placed[k].markers), k))
+    desk = _Desk(solution)
+    ref = solution.reference
+    poses = {k: v for k, v in solution.screens.items() if k in info}
+    if ref not in poses:
+        raise LineupError("none of the screens' patterns were seen")
+    keys = sorted(poses, key=lambda k: (k != ref, -poses[k].views, k))
     rel = {}
     for i, a in enumerate(keys):
         for b in keys[i + 1:]:
-            r = relation(placed[a], placed[b])
+            both = desk.pair(a, b)
+            r = relation(*both) if both is not None else None
             if r is not None:
                 rel[(a, b)] = r
                 rel[(b, a)] = ("overlap",) if r[0] == "overlap" else ("side", OPP[r[1]])
@@ -340,26 +399,27 @@ def solve(screens: list[dict], seen: dict[str, Seen], reference: str | None = No
 
     def place(p: str, n: str) -> tuple[float, float]:
         """Where ``n`` goes, from ``p`` already placed."""
-        P, N = placed[p], placed[n]
         px, py = pos[p]
         pw, ph = float(info[p]["width"]), float(info[p]["height"])
         nw, nh = float(info[n]["width"]), float(info[n]["height"])
         r = rel.get((p, n))
-        if r is not None and r[0] == "side":
-            side = r[1]
-            if side == "right":
-                return px + pw, py + (N.y0 - P.y0) * P.k
-            if side == "left":
-                return px - nw, py + (N.y0 - P.y0) * P.k
-            if side == "bottom":
-                return px + (N.x0 - P.x0) * P.k, py + ph
+        side = r[1] if r is not None and r[0] == "side" else None
+        both = desk.pair(p, n, side) or desk.pair(p, n)
+        if both is None:
+            return px + pw, py  # can't be seen against each other at all: just beside it
+        P, N = both
+        if side == "right":
+            return px + pw, py + (N.y0 - P.y0) * P.k
+        if side == "left":
+            return px - nw, py + (N.y0 - P.y0) * P.k
+        if side == "bottom":
+            return px + (N.x0 - P.x0) * P.k, py + ph
+        if side == "top":
             return px + (N.x0 - P.x0) * P.k, py - nh
-        if r is not None and not in_front(P, N):
-            # n is in front of p: where it covers p, in p's pixels.
-            return px + (N.x0 - P.x0) * P.k, py + (N.y0 - P.y0) * P.k
-        if r is not None:
+        if r is not None and desk.in_front(p, n):
             # n is behind p: p sits on n at (P - N) in n's pixels.
             return px - (P.x0 - N.x0) * N.k, py - (P.y0 - N.y0) * N.k
+        # n is in front of p (where it covers p, in p's pixels), or apart from it.
         return px + (N.x0 - P.x0) * P.k, py + (N.y0 - P.y0) * P.k
 
     # Breadth first along the screens that meet, nearest first.
@@ -371,8 +431,7 @@ def solve(screens: list[dict], seen: dict[str, Seen], reference: str | None = No
                 if (p, n) in rel:
                     score = (0, keys.index(p), keys.index(n))
                 else:
-                    P, N = placed[p], placed[n]
-                    d = math.hypot((P.x0 + P.x1 - N.x0 - N.x1) / 2, (P.y0 + P.y1 - N.y0 - N.y1) / 2)
+                    d = float(np.linalg.norm(poses[p].centre - poses[n].centre))
                     score = (1, d, keys.index(n))
                 if best is None or score < best[0]:
                     best = (score, p, n)
@@ -411,34 +470,47 @@ def solve(screens: list[dict], seen: dict[str, Seen], reference: str | None = No
             r = rel.get((a, b))
             if r is None:
                 continue
-            A, B = placed[a], placed[b]
             if r[0] == "overlap":
-                behind, front = (a, b) if in_front(B, A) else (b, a)
+                behind, front = (a, b) if desk.in_front(b, a) else (b, a)
                 fronts.append((behind, front))
-                if info[a]["device"] != info[b]["device"]:
-                    Bh, Fr = placed[behind], placed[front]
-                    fits.append({"behind": behind, "front": front, "x": (Fr.x0 - Bh.x0) * Bh.k,
-                                 "y": (Fr.y0 - Bh.y0) * Bh.k, "scale": Bh.k / Fr.k})
+                both = desk.pair(behind, front)
+                if info[a]["device"] != info[b]["device"] and both is not None:
+                    Bh, Fr = both
+                    fits.append({"behind": behind, "front": front, "x": float((Fr.x0 - Bh.x0) * Bh.k),
+                                 "y": float((Fr.y0 - Bh.y0) * Bh.k), "scale": float(Bh.k / Fr.k)})
                 continue
             if info[a]["device"] == info[b]["device"]:
                 continue  # its own OS moves the pointer between them
             side = r[1]
+            both = desk.pair(a, b, side)
+            if both is None:
+                continue
+            A, B = both
             if side in ("left", "right"):
-                lo, hi = _span(A.y0, A.y1, B.y0, B.y1)
+                shared = _span(A.y0, A.y1, B.y0, B.y1)
+                if shared is None:
+                    continue
+                lo, hi = shared
                 a_span = ((lo - A.y0) * A.k, (hi - A.y0) * A.k)
                 b_span = ((lo - B.y0) * B.k, (hi - B.y0) * B.k)
                 a_len, b_len = float(info[a]["height"]), float(info[b]["height"])
             else:
-                lo, hi = _span(A.x0, A.x1, B.x0, B.x1)
+                shared = _span(A.x0, A.x1, B.x0, B.x1)
+                if shared is None:
+                    continue
+                lo, hi = shared
                 a_span = ((lo - A.x0) * A.k, (hi - A.x0) * A.k)
                 b_span = ((lo - B.x0) * B.k, (hi - B.x0) * B.k)
                 a_len, b_len = float(info[a]["width"]), float(info[b]["width"])
-            a_span = tuple(min(max(v, 0.0), a_len) for v in a_span)
-            b_span = tuple(min(max(v, 0.0), b_len) for v in b_span)
+            a_span = tuple(float(min(max(v, 0.0), a_len)) for v in a_span)
+            b_span = tuple(float(min(max(v, 0.0), b_len)) for v in b_span)
             if a_span[1] - a_span[0] < 1 or b_span[1] - b_span[0] < 1:
                 continue
             links.append({"a": a, "a_side": side, "a_span": a_span, "b": b, "b_side": OPP[side], "b_span": b_span})
-    return Result(final, fronts, links, fits, found=keys, missing=missing, reference=ref)
+    return Result(final, fronts, links, fits, found=keys, missing=missing, reference=ref,
+                  errors={k: float(poses[k].error) for k in keys},
+                  stance={k: desk.stance(k) for k in keys},
+                  views=solution.frames, rms=solution.rms)
 
 
 def overlap_of(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> tuple[int, int, int, int] | None:
@@ -463,36 +535,225 @@ def push_apart(rect: tuple[int, int, int, int], others: list[tuple[int, int, int
     return x, y
 
 
+def _sizes_mm(screens: list[dict]) -> dict[str, tuple[float, float]]:
+    out = {}
+    for s in screens:
+        try:
+            w, h = float(s["width_mm"]), float(s["height_mm"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if w > 0 and h > 0:
+            out[s["key"]] = (w, h)
+    return out
+
+
 def line_up(photo: bytes, screens: list[dict], planned: dict[str, dict], reference: str | None = None) -> Result:
-    """All of it: the photo's bytes and the screens (see :func:`solve`) to the result."""
+    """One photo's worth: its bytes and the screens (see :func:`arrange`; with
+    ``width_mm`` and ``height_mm`` where their real size is known) to the result.
+
+    One view can't tell how far away a screen is unless its size is known,
+    so without that the screens are taken to stand about in one plane; the
+    live line-up (:class:`Live`) is the one that measures.
+    """
     try:
         import cv2  # noqa: F401
     except ImportError as exc:
         raise LineupError("this copy of Curslink has no camera support (install curslink[gaze])") from exc
-    seen = find_screens(load_photo(photo), planned)
-    if not seen:
+    from curslink.lineup_scene import Scene, SceneError
+
+    gray = load_photo(photo)
+    dims = {s["key"]: (float(s["width"]), float(s["height"])) for s in screens if s["key"] in planned}
+    scene = Scene(dims, reference, _sizes_mm(screens), (gray.shape[1], gray.shape[0]))
+    scene.add(read_frame(gray, planned, dims, scene.tolerance))
+    if not scene.frames:
         raise LineupError("Curslink couldn't find the patterns in that photo. Get every screen in the picture, "
                           "close enough that the patterns are sharp, and try again")
-    return solve(screens, seen, reference)
+    try:
+        return arrange(screens, scene.solve())
+    except SceneError as exc:
+        raise LineupError(str(exc)) from exc
+
+
+# -- live: frame after frame from a phone moved about ------------------------------
+
+# A screen is lined up when its place is known to this share of the
+# reference screen's shorter side (a 27" monitor: under a millimetre).
+ALIGNED = 0.0025
+MIN_VIEWS = 8  # and from at least this many different places
+STEADY = 3  # and when this many solves in a row agree
+
+
+class Live:
+    """A live line-up: frames come in from the phone as it's moved about
+    (:meth:`frame`), the desk is solved again whenever there's a new view
+    (:meth:`update`), and :meth:`status` says how it's going, for the
+    phone's screen and the computer's.
+
+    ``screens`` as for :func:`arrange` (with ``width_mm``/``height_mm``
+    where known); ``planned`` as :func:`plan` gives: the screens showing
+    patterns, which are the ones to find.
+    """
+
+    def __init__(self, screens: list[dict], planned: dict[str, dict], reference: str | None = None):
+        self.screens = screens
+        self.planned = planned
+        self.reference = reference
+        self.dims = {s["key"]: (float(s["width"]), float(s["height"])) for s in screens if s["key"] in planned}
+        self.wanted = [s["key"] for s in screens if s["key"] in planned]
+        self.scene = None
+        self.focal: float | None = None
+        self.frames = 0  # every frame taken in
+        self.last_seen: list[str] = []  # the screens in the latest one
+        self.result: Result | None = None
+        self.error = ""
+        self.fresh = False  # a new view since the last solve
+        self.history: list[dict[str, tuple[int, int]]] = []
+        self.solves = 0
+
+    @property
+    def tolerance(self) -> float:
+        """What "lined up" asks of each screen's place, in the reference's pixels."""
+        ref = self.result.reference if self.result is not None else self.reference
+        w, h = self.dims.get(ref) or next(iter(self.dims.values()), (1920.0, 1080.0))
+        return max(2.0, ALIGNED * min(w, h))
+
+    def frame(self, gray, focal: float | None = None) -> bool:
+        """Take a frame in (a grey image); True if it gave a new view."""
+        from curslink.lineup_scene import Scene
+
+        size = (gray.shape[1], gray.shape[0])
+        if focal and focal > 0:
+            self.focal = float(focal)
+        if self.scene is None or self.scene.image_size != size:
+            # (A phone turned from upright to sideways sends frames the other
+            # way up: a different camera, as far as the sums go. Start again.)
+            self.scene = Scene(self.dims, self.reference, _sizes_mm(self.screens), size, self.focal)
+            self.result = None
+            self.history = []
+        self.frames += 1
+        sightings = read_frame(gray, self.planned, self.dims, self.scene.tolerance, thorough=False)
+        self.last_seen = [s.key for s in sightings]
+        kept = self.scene.add(sightings)
+        self.fresh = self.fresh or kept
+        return kept
+
+    def update(self) -> Result | None:
+        """Solve again if there's a new view; the latest result (or None)."""
+        from curslink.lineup_scene import SceneError
+
+        if not self.fresh or self.scene is None:
+            return self.result
+        self.fresh = False
+        try:
+            self.result = arrange(self.screens, self.scene.solve())
+            self.error = ""
+        except (SceneError, LineupError) as exc:
+            self.error = str(exc)
+            return self.result
+        self.solves += 1
+        self.history = (self.history + [dict(self.result.positions)])[-STEADY:]
+        return self.result
+
+    def steady(self) -> bool:
+        if len(self.history) < STEADY:
+            return False
+        tol = self.tolerance
+        first = self.history[0]
+        return all(k in h and abs(h[k][0] - first[k][0]) <= tol and abs(h[k][1] - first[k][1]) <= tol
+                   for h in self.history[1:] for k in first)
+
+    def states(self) -> dict[str, str]:
+        """Each wanted screen: "unseen", "seen" (but not yet with a screen
+        that's placed), "placing" or "locked"."""
+        seen = self.scene.seen() if self.scene is not None else {}
+        out = {}
+        tol = self.tolerance
+        enough = self.result is not None and self.result.views >= MIN_VIEWS
+        for k in self.wanted:
+            if self.result is not None and k in self.result.errors:
+                out[k] = "locked" if enough and self.result.errors[k] <= tol else "placing"
+            else:
+                out[k] = "seen" if k in seen else "unseen"
+        return out
+
+    @property
+    def aligned(self) -> bool:
+        states = self.states()
+        return bool(states) and all(v == "locked" for v in states.values()) and self.steady()
+
+    @property
+    def usable(self) -> bool:
+        """Is there a result worth taking as it is (if the person says so)?"""
+        return self.result is not None and len(self.result.found) >= 2
+
+    def progress(self) -> float:
+        states = self.states()
+        if not states:
+            return 0.0
+        tol = self.tolerance
+        views = min(1.0, (self.result.views if self.result is not None else 0) / MIN_VIEWS)
+        total = 0.0
+        for k, state in states.items():
+            if state == "unseen":
+                continue
+            if state == "seen":
+                total += 0.15
+                continue
+            err = self.result.errors.get(k, float("inf"))
+            sure = 1.0 if err <= tol else max(0.0, min(1.0, tol / err))
+            total += 0.3 + 0.7 * views * sure
+        p = total / len(states)
+        if p >= 0.999 and not self.aligned:
+            p = 0.97  # all sure, waiting for the solves to agree
+        return p
+
+    def hint(self, numbers: dict[str, object] | None = None) -> str:
+        """What to do next, in a few words (for the phone's screen)."""
+        numbers = numbers or {}
+
+        def name(keys: list[str]) -> str:
+            ns = [str(numbers.get(k) or "") for k in keys]
+            ns = [n for n in ns if n]
+            if not ns:
+                return "every screen"
+            return ("screen " + ns[0]) if len(ns) == 1 else "screens " + ", ".join(ns[:-1]) + " and " + ns[-1]
+
+        states = self.states()
+        if self.aligned:
+            return "Lined up"
+        if not self.frames or all(v == "unseen" for v in states.values()):
+            return "Hold the phone up in front of your eyes, pointing at your screens"
+        unseen = [k for k, v in states.items() if v == "unseen"]
+        if unseen:
+            return f"Get {name(unseen)} in the picture"
+        loose = [k for k, v in states.items() if v == "seen"]
+        if loose:
+            return f"Get {name(loose)} in the picture together with the screen next to it"
+        if all(v == "locked" for v in states.values()):
+            return "Nearly there: keep moving"
+        return "Move the phone slowly in a figure of 8"
 
 
 # -- the host's end: asking phones, taking their photos -------------------------
 
 class PhotoInbox:
     """The host service's part of a line-up: puts the patterns up on the
-    paired computers, asks the phones for a photo and gathers it.
+    paired computers, asks the phones for their camera and gathers what
+    they send (one photo, or frame after frame of a live line-up).
 
-    ``send(device_id, t, **data)`` sends a frame; ``emit(event, **data)``
-    tells the app (see curslink.events): ``lineup_camera`` (which phones
-    were asked), ``lineup_photo`` (``{device, id, path}`` or ``{device, id,
-    cancelled}`` or ``{device, id, error}``) and ``lineup_request``.
+    ``server.send(device_id, t, **data)`` sends a frame; ``emit(event,
+    **data)`` tells the app (see curslink.events): ``lineup_sizes`` (the
+    paired computers' monitors' real sizes), ``lineup_camera`` (which phones
+    were asked), ``lineup_photo`` (``{device, id, path}``, with ``seq`` and
+    maybe ``focal`` for a live frame; or ``{device, id, cancelled}``,
+    ``{device, id, done}`` or ``{device, id, error}``) and ``lineup_request``.
     """
 
     def __init__(self, server, emit, folder=None):
         self.server = server
         self.emit = emit
         self.folder = folder
-        self.parts: dict[tuple[str, str], tuple[int, list[bytes]]] = {}
+        self.parts: dict[tuple[str, str], tuple[int, list[bytes], dict]] = {}
 
     def _send(self, device_id: str, t: str, **data) -> None:
         self.server.send(device_id, t, **data)
@@ -508,6 +769,7 @@ class PhotoInbox:
         except ValueError:
             return
         devices = data.get("devices") if isinstance(data.get("devices"), dict) else {}
+        sizes = {}
         for device_id in list(self.server.connections):
             if not self.server.supports(device_id, "lineup"):
                 continue
@@ -517,9 +779,15 @@ class PhotoInbox:
             else:
                 seconds = entry.get("seconds", 300)
                 self._send(device_id, "lineup", screens=entry["screens"], seconds=seconds)
+                mm = getattr(self.server.connections[device_id], "screen_mm", None)
+                if mm:
+                    sizes[device_id] = list(mm)
+        if sizes:
+            # How big those monitors really are (curslink.screensize), for the sums.
+            self.emit("lineup_sizes", devices=sizes)
 
     def camera(self, payload: str) -> None:
-        """``lineup_camera {"id": ..., "cancel": false}``: ask every connected phone."""
+        """``lineup_camera {"id": ..., "live": true, "cancel": false}``: ask every connected phone."""
         import json
 
         from curslink.protocol import LINEUP_CAMERA_FEATURE
@@ -536,12 +804,45 @@ class PhotoInbox:
             if data.get("cancel"):
                 self._send(device_id, "lineup_camera", id=lineup_id, cancel=True)
             else:
-                self._send(device_id, "lineup_camera", id=lineup_id)
+                if data.get("live"):
+                    self._send(device_id, "lineup_camera", id=lineup_id, live=True)
+                else:
+                    self._send(device_id, "lineup_camera", id=lineup_id)
                 asked.append({"id": device_id, "name": conn.name})
         if data.get("cancel"):
             self.parts = {k: v for k, v in self.parts.items() if k[1] != lineup_id}
         else:
             self.emit("lineup_camera", id=lineup_id, devices=asked)
+
+    def live(self, payload: str) -> None:
+        """``lineup_live {"device": ..., "id": ..., "seq", "progress", "hint",
+        "screens", "done"}``: how it's going, to the phone sending the frames."""
+        import json
+
+        from curslink.protocol import LINEUP_CAMERA_FEATURE
+
+        try:
+            data = json.loads(payload)
+            device_id, lineup_id = str(data["device"]), str(data["id"])
+        except (ValueError, KeyError, TypeError):
+            return
+        conn = self.server.connections.get(device_id)
+        if conn is None or LINEUP_CAMERA_FEATURE not in conn.features:
+            return
+        out = {"id": lineup_id}
+        if isinstance(data.get("seq"), int) and not isinstance(data.get("seq"), bool):
+            out["seq"] = data["seq"]
+        try:
+            out["progress"] = round(min(1.0, max(0.0, float(data.get("progress", 0)))), 3)
+        except (TypeError, ValueError):
+            out["progress"] = 0.0
+        out["hint"] = str(data.get("hint", ""))[:200]
+        screens = data.get("screens") if isinstance(data.get("screens"), list) else []
+        out["screens"] = [[s[0], str(s[1])] for s in screens[:MAX_SCREENS]
+                          if isinstance(s, list) and len(s) == 2 and isinstance(s[0], int)]
+        if data.get("done"):
+            out["done"] = True
+        self._send(device_id, "lineup_live", **out)
 
     def handle(self, device_id: str, t: str, data: dict) -> None:
         import base64
@@ -560,25 +861,36 @@ class PhotoInbox:
                 self.parts.pop(key, None)
                 self.emit("lineup_photo", device=device_id, id=lineup_id, cancelled=True)
                 return
+            if data.get("done"):
+                self.parts.pop(key, None)
+                self.emit("lineup_photo", device=device_id, id=lineup_id, done=True)
+                return
             size = data.get("size")
             if not isinstance(size, int) or isinstance(size, bool) or not 0 < size <= LINEUP_PHOTO_MAX:
                 self.emit("lineup_photo", device=device_id, id=lineup_id, error="the photo is too big")
                 return
-            self.parts[key] = (size, [])
+            extra = {}
+            seq = data.get("seq")
+            if isinstance(seq, int) and not isinstance(seq, bool):
+                extra["seq"] = seq  # a frame of a live line-up
+                focal = data.get("focal")
+                if isinstance(focal, (int, float)) and not isinstance(focal, bool) and 50 < focal < 1e5:
+                    extra["focal"] = float(focal)
+            self.parts[key] = (size, [], extra)
             return
         if key not in self.parts:
             return
-        size, chunks = self.parts[key]
+        size, chunks, extra = self.parts[key]
         try:
             chunks.append(base64.b64decode(data.get("data", ""), validate=True))
         except ValueError:
             self.parts.pop(key, None)
-            self.emit("lineup_photo", device=device_id, id=lineup_id, error="the photo arrived garbled")
+            self.emit("lineup_photo", device=device_id, id=lineup_id, error="the photo arrived garbled", **extra)
             return
         got = sum(len(c) for c in chunks)
         if got > size:
             self.parts.pop(key, None)
-            self.emit("lineup_photo", device=device_id, id=lineup_id, error="the photo arrived garbled")
+            self.emit("lineup_photo", device=device_id, id=lineup_id, error="the photo arrived garbled", **extra)
             return
         if not data.get("end"):
             return
@@ -587,4 +899,4 @@ class PhotoInbox:
         with os.fdopen(fd, "wb") as f:
             for c in chunks:
                 f.write(c)
-        self.emit("lineup_photo", device=device_id, id=lineup_id, path=path)
+        self.emit("lineup_photo", device=device_id, id=lineup_id, path=path, **extra)
