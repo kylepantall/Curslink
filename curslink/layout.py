@@ -507,6 +507,20 @@ class Layout:
                 return s
         return None
 
+    def nearest_os(self, device_id: str, ox: float, oy: float) -> tuple[Screen, float, float] | None:
+        """The nearest point, in OS pixels, on any of the device's screens:
+        ``(screen, ox, oy)``, or None if it has none. Windows' mouse hook can
+        report where a move was headed, past the edge of the desktop, before
+        Windows stops the cursor on the edge."""
+        best: tuple[float, Screen, float, float] | None = None
+        for s in self.screens(device_id):
+            cx = min(max(ox, s.os_x), s.os_x + s.width - 1)
+            cy = min(max(oy, s.os_y), s.os_y + s.height - 1)
+            dist = (cx - ox) ** 2 + (cy - oy) ** 2
+            if best is None or dist < best[0]:
+                best = (dist, s, cx, cy)
+        return None if best is None else best[1:]
+
     def clamp_to_device(self, device_id: str, x: float, y: float) -> tuple[Screen, float, float]:
         """Nearest point on any of the device's screens (lets the pointer slide along edges).
 

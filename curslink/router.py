@@ -43,6 +43,16 @@ GAZE_HOLD_S = 0.4
 # waits until it has been at least this far from that edge.
 ARM_PX = 24
 
+# The pointer pressed against an edge of this computer for this many mouse
+# reports without crossing: the log says why, once per edge and reason in
+# STOP_SAY_S (Kyle, 0.4.76: "Windows feels like it's forcefully stopping the
+# cursor leaving the monitor", and nothing in the log said why).
+STOP_REPORTS = 6
+STOP_SAY_S = 30.0
+
+
+_SIDE_NAMES = {(-1, 0): "left", (1, 0): "right", (0, -1): "top", (0, 1): "bottom"}
+
 
 class Transport(Protocol):
     def is_connected(self, device_id: str) -> bool: ...
@@ -146,6 +156,14 @@ class Router:
         # the edge it left by; it has to leave that edge before an edge push
         # counts again, or the next pointer event bounces input straight back.
         self._edge_armed = True
+        # Why the last switch home wasn't by an edge (see _edge_armed).
+        self._armed_why = ""
+        # The pointer pressed against an edge here: (where, reports so far).
+        self._pressing: tuple[tuple[float, float, tuple], int] | None = None
+        self._stop_said: dict[tuple, float] = {}
+        # Windows: the rectangle an app holds the cursor in (ClipCursor), in
+        # OS pixels, or None when the cursor is free. Set by the app.
+        self.cursor_clip: Callable[[], tuple[int, int, int, int] | None] = lambda: None
         self.clock: Callable[[], float] = time.monotonic
         self._arrived: tuple[float, str] | None = None  # (when, from which device)
         self._moved_at = -1e9  # when the mouse last moved (self.clock())
@@ -226,7 +244,15 @@ class Router:
             return
         screen = self.layout.screen_at_os(self.local_id, ox, oy)
         if screen is None:
-            return
+            # Past the edge of every screen here (Windows' mouse hook reports
+            # where a fast move was headed, before the cursor stops on the
+            # edge): that's a push on the edge it stops on. Dropping it left
+            # a quick flick at the edge doing nothing, as if Windows held the
+            # cursor back.
+            near = self.layout.nearest_os(self.local_id, ox, oy)
+            if near is None:
+                return
+            screen, ox, oy = near
         x, y = screen.from_os(ox, oy)
         self._moved_at = self.clock()
         if self.settings.edge_switching:
@@ -250,7 +276,13 @@ class Router:
         pushes = self.layout.edge_pushes(self.local_id, self.x, self.y)
         if not self._edge_armed:
             self._edge_armed = not pushes
+            if pushes:
+                self._pressed(screen, pushes, "edge switching waits for the pointer to come off this edge first "
+                                              f"(it came back here {self._armed_why or 'without crossing an edge'})")
+            else:
+                self._pressing = None
             return
+        offline = ""
         for ex, ey in pushes:
             crossing = self.layout.find_crossing(
                 self.local_id, self.x, self.y, ex, ey, self.settings.gap_tolerance_px
@@ -258,6 +290,73 @@ class Router:
             if crossing and self.available(crossing.screen.device_id):
                 self.switch_to(crossing.screen, crossing.x, crossing.y, "edge")
                 return
+            if crossing:
+                offline = f"{crossing.screen.device_id} isn't connected"
+        if pushes:
+            self._pressed(screen, pushes, lambda: offline or self._nowhere(screen, pushes))
+        else:
+            self._pressed(screen, (), "")
+
+    def _pressed(self, screen: Screen, pushes, why) -> None:
+        """The local pointer reported at (self.x, self.y): count reports in a
+        row at the same spot (the mouse moving, the cursor not), and after
+        STOP_REPORTS say why it isn't crossing (``why``: a reason, or a
+        function that works it out). Off an edge, that's an app
+        holding the cursor in a box (ClipCursor), or nothing to say."""
+        spot = (round(self.x), round(self.y), tuple(pushes))
+        if self._pressing is None or self._pressing[0][2] != spot[2] or (
+                not pushes and self._pressing[0][:2] != spot[:2]):
+            self._pressing = (spot, 1)
+            return
+        count = self._pressing[1] + 1
+        self._pressing = (spot, count)
+        if count != STOP_REPORTS:
+            return
+        if callable(why):
+            why = why()
+        if not pushes:
+            clip = self.cursor_clip()
+            if clip is None:
+                return
+            why = (f"an app holds the cursor inside {clip[2]}x{clip[3]} at {clip[0]},{clip[1]} "
+                   "(ClipCursor), so it can't reach the edge of the screen")
+        sides = ", ".join(_SIDE_NAMES[p] for p in pushes) or "no"
+        key = (screen.device_id, screen.id, spot[2], why)
+        now = self.clock()
+        if now - self._stop_said.get(key, -1e9) < STOP_SAY_S:
+            return
+        self._stop_said[key] = now
+        ox, oy = screen.to_os(self.x, self.y)
+        log.info("edge: the pointer is pushing on the %s edge of %s/%s at (%d, %d) and stays here: %s",
+                 sides, screen.device_id, screen.id, ox, oy, why)
+
+    def _nowhere(self, screen: Screen, pushes) -> str:
+        """Why pushing on ``pushes`` from (self.x, self.y) leads nowhere: the
+        parts of those edges that do lead somewhere, if any."""
+        parts = []
+        for ex, ey in pushes:
+            along_x = ex == 0
+            length = screen.width if along_x else screen.height
+            step = max(1, length // 400)
+            runs: list[list] = []
+            for i in range(0, length, step):
+                if along_x:
+                    px, py = screen.x + i, (screen.y if ey < 0 else screen.bottom - 1)
+                else:
+                    px, py = (screen.x if ex < 0 else screen.right - 1), screen.y + i
+                c = self.layout.find_crossing(self.local_id, px, py, ex, ey, self.settings.gap_tolerance_px)
+                to = f"{c.screen.device_id}/{c.screen.id}" if c else None
+                if runs and runs[-1][0] == to:
+                    runs[-1][2] = i
+                else:
+                    runs.append([to, i, i])
+            leads = [f"{to} from {a * 100 // length}% to {min(100, (b + step) * 100 // length)}%"
+                     for to, a, b in runs if to]
+            name = _SIDE_NAMES[(ex, ey)]
+            where = "left to right" if along_x else "top to bottom"
+            parts.append(f"the {name} edge leads on only to {', '.join(leads)} of the way {where}"
+                         if leads else f"nothing in the layout is beyond the {name} edge")
+        return "; ".join(parts) + " (move the screens on the Layout page to change that)"
 
     def on_motion(self, dx: float, dy: float, ts: float | None = None) -> None:
         """``ts``: when the motion was captured (time.monotonic()). Sent with
@@ -507,6 +606,8 @@ class Router:
             if old != new:
                 self.capture.set_grab(False)
                 self._edge_armed = reason == "edge"
+                self._armed_why = f"by {reason}"
+                self._pressing = None
             self.local_sink.move_to(ox, oy)
             if old != new:
                 # The screen as the layout has it: the helper places the

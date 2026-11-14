@@ -135,6 +135,9 @@ class PynputCapture:
         self.loop_alive: Callable[[], bool] = lambda: True
         self.took_back = False
         self.hooks_lost = 0  # Windows: times the hooks were found gone (_watch_hooks)
+        self._hook_heard_at = 0.0  # when the mouse hook last reported a move
+        self._ungrabbed_at = 0.0
+        self._deaf_said: dict[str, float] = {}
         self._closed = False
         self._escapes: list[float] = []
         # macOS: what keys typed here mean to a PC, where that differs (Option+D
@@ -189,6 +192,8 @@ class PynputCapture:
             return
         if grabbed:
             self._grabbed_at = time.monotonic()
+        else:
+            self._ungrabbed_at = time.monotonic()
         with self._park_lock:  # no tap warps to the park point once this says "not grabbed"
             self._grabbed = grabbed
         if self._mac:
@@ -370,9 +375,14 @@ class PynputCapture:
         cursor wanders off the park point, put the hooks back."""
         seen: tuple[float, tuple[float, float]] | None = None  # (grab it's for, where the cursor sat)
         lost: list[float] = []
+        deaf = _DeafHook(self)
         while not self._closed:
             time.sleep(HOOK_CHECK_S)
-            if not self._grabbed or self._controller is None or time.monotonic() - self._grabbed_at < 0.5:
+            if not self._grabbed:
+                deaf.check()
+                continue
+            deaf.reset()
+            if self._controller is None or time.monotonic() - self._grabbed_at < 0.5:
                 continue
             try:
                 x, y = self._controller.position
@@ -515,6 +525,7 @@ class PynputCapture:
 
     # -- callbacks -------------------------------------------------------------
     def _on_move(self, x, y, injected=False):
+        self._hook_heard_at = time.monotonic()
         if injected or self._handler is None:
             return
         if not self._grabbed:
@@ -628,6 +639,8 @@ ESCAPE_WINDOW_S = 1.5   # Escape three times within this: input comes home
 HOOK_CHECK_S = 0.25     # Windows: how often the parked cursor is checked (_watch_hooks)
 HOOK_DRIFT_PX = 24      # ... and how far off the park point means the hooks are gone
 HOOK_LOST_MAX = 4       # gone this often in 10 s: input comes home instead
+DEAF_TICKS = 3          # Windows: checks in a row the cursor moved and the hook heard nothing (_DeafHook)
+DEAF_SAY_S = 60.0       # ... said at most this often per app in front
 HOLD_MAX_S = 60.0       # a button-up held for a drop goes after this at most
 _MAC_TAP_DISABLED = frozenset({0xFFFFFFFE, 0xFFFFFFFF})
 _MAC_DELTA_X, _MAC_DELTA_Y = 4, 5          # kCGMouseEventDeltaX / DeltaY
@@ -1310,6 +1323,74 @@ class _WinInjectFailures:
 
 
 _win_failures = _WinInjectFailures()
+
+
+class _DeafHook:
+    """Windows, input here: the cursor moving while the mouse hook hears
+    nothing. Windows doesn't show this (unelevated) process's hooks the
+    mouse over an app that runs as administrator, so at the edge of the
+    screen the cursor just stops: nothing here saw it get there. Kyle
+    (0.4.76): "Windows feels like it's forcefully stopping the cursor
+    leaving the monitor". Says so in the log, with the app in front, once
+    per app in DEAF_SAY_S."""
+
+    def __init__(self, capture: "PynputCapture", clock=time.monotonic,
+                 cursor=lambda: _win_cursor_pos(), foreground=lambda: _win_foreground()):
+        self.capture = capture
+        self.clock = clock
+        self.cursor = cursor
+        self.foreground = foreground
+        self.last: tuple[int, int] | None = None
+        self.ticks = 0
+
+    def reset(self) -> None:
+        self.last, self.ticks = None, 0
+
+    def check(self) -> None:
+        at = self.cursor()
+        last, self.last = self.last, at
+        now = self.clock()
+        if at is None or last is None or at == last or now - self.capture._ungrabbed_at < 1.0 \
+                or now - self.capture._hook_heard_at < HOOK_CHECK_S * 1.5:
+            self.ticks = 0
+            return
+        self.ticks += 1  # it moved since the last look, and the hook heard nothing
+        if self.ticks != DEAF_TICKS:
+            return
+        app = self.foreground()
+        said = self.capture._deaf_said
+        if now - said.get(app, -1e9) < DEAF_SAY_S:
+            return
+        said[app] = now
+        admin = "runs as administrator" in app
+        log.warning("input: the cursor is moving at (%d, %d) but Curslink's mouse hook hears nothing (in front: %s)%s",
+                    at[0], at[1], app,
+                    ": Windows keeps the mouse from Curslink over apps that run as administrator, so the "
+                    "pointer can't cross to another computer until another app is in front"
+                    if admin else ": the pointer can't cross to another computer until it hears the mouse again")
+
+
+def win_cursor_clip() -> tuple[int, int, int, int] | None:
+    """Windows: the box an app holds the cursor in with ClipCursor, as
+    ``(x, y, width, height)`` in physical pixels; None when it can go
+    anywhere on the desktop (or this isn't Windows)."""
+    if sys.platform != "win32":
+        return None
+    try:
+        from ctypes import wintypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        rect = wintypes.RECT()
+        if not user32.GetClipCursor(ctypes.byref(rect)):
+            return None
+        vx, vy = user32.GetSystemMetrics(76), user32.GetSystemMetrics(77)  # SM_X/YVIRTUALSCREEN
+        vw, vh = user32.GetSystemMetrics(78), user32.GetSystemMetrics(79)  # SM_CX/CYVIRTUALSCREEN
+        if rect.left <= vx and rect.top <= vy and rect.right >= vx + vw and rect.bottom >= vy + vh:
+            return None
+        return rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top
+    except Exception:
+        log.debug("GetClipCursor failed", exc_info=True)
+        return None
 
 
 def _win_foreground() -> str:
