@@ -143,6 +143,15 @@ class Router:
         # if it's let go of there), so drag_out is asked for agent to agent too.
         self.takes_drag: Callable[[str], bool] = lambda device_id: False
         self._blocked_said = ""
+        # App mirror (curslink.appmirror.AppMirrorHost): where the pointer
+        # goes into and out of mirrored apps (hop), how fast it moves in one
+        # (scale), whether a device holds the pointer from gaze (holds), and
+        # whether a held crossing from a device is a window being dragged
+        # off it (window_drag) rather than a file. None: no App mirror.
+        self.portal = None
+        # Every button of the host's mouse, wherever input is (App mirror
+        # watches the left one).
+        self.on_any_button: Callable[[str, bool], None] = lambda button, pressed: None
         # After every change of where the pointer is (any device, any
         # screen): mirror mode follows the screen in use and the pointer on it.
         self.on_moved: Callable[[], None] = lambda: None
@@ -259,6 +268,11 @@ class Router:
             screen, ox, oy = near
         x, y = screen.from_os(ox, oy)
         self._moved_at = self.clock()
+        if self.portal is not None:
+            hop = self.portal.hop(self.local_id, screen, x, y)
+            if hop is not None:
+                self.switch_to(*hop, "app")
+                return
         if self.settings.edge_switching:
             carried = self._carried_to_front(screen, x, y)
             if carried is not None:
@@ -371,8 +385,16 @@ class Router:
         if dx or dy:
             self._moved_at = self.clock()
             dx, dy = self.feel.scale(self.active_device, dx, dy, self.clock() if ts is None else ts)
+            if self.portal is not None:
+                kx, ky = self.portal.scale(self.active_device)
+                dx, dy = dx * kx, dy * ky
         nx, ny = self.x + dx, self.y + dy
         here = self.layout.screen_at(nx, ny, self.active_device, prefer=self.screen)
+        if self.portal is not None and (dx or dy):
+            hop = self.portal.hop(self.active_device, here, nx, ny)
+            if hop is not None:
+                self.switch_to(*hop, "app")
+                return
         if here is None and self.settings.edge_switching:
             crossing = self.layout.find_crossing(
                 self.active_device, self.x, self.y, dx, dy, self.settings.gap_tolerance_px
@@ -455,6 +477,10 @@ class Router:
         return source == device_id and self.clock() - when < RETURN_GUARD_S
 
     def on_button(self, button: str, pressed: bool) -> None:
+        try:
+            self.on_any_button(button, pressed)
+        except Exception:  # pragma: no cover - never lose a click to it
+            log.exception("button hook")
         if self.is_local:
             return
         self._moved_at = self.clock()  # clicking counts as using the mouse
@@ -521,6 +547,8 @@ class Router:
             return  # never yank the pointer away mid-drag (unless it carries a file home, or a chat)
         if self.clock() - self._moved_at < GAZE_HOLD_S:
             return  # the mouse is moving: it decides (gaze is asked again shortly)
+        if self.portal is not None and self.portal.holds(target.device_id):
+            return  # looking at the mirror of the app the pointer is in
         try:
             screen = self.layout.screen(target.device_id, target.screen_id)
         except KeyError:
@@ -586,7 +614,9 @@ class Router:
         left_at = (self.x, self.y)
         self._last_pos[old] = left_at
         self._screen_pos[(self.screen.device_id, self.screen.id)] = left_at
-        effect = "none" if self.setup_quiet else self.settings.effect
+        # Into and out of a mirrored app (curslink.appmirror): no animation,
+        # it's one picture as far as the eye goes.
+        effect = "none" if self.setup_quiet or reason == "app" else self.settings.effect
         # Where the pointer leaves from. Nothing plays there (the edge glow
         # shows the crossing); the animation only marks where it lands.
         exit_x, exit_y = self.screen.to_os(self.x, self.y)
@@ -603,7 +633,9 @@ class Router:
                 # takes files) may be a file: the device finds out and ends its
                 # drag itself, rather than let go of the button wherever its
                 # pointer stopped.
-                dragging_out = "left" in self._remote_buttons and self._hands_drag_to(old, new)
+                # (A window dragged by its title bar isn't: App mirror casts it.)
+                dragging_out = ("left" in self._remote_buttons and self._hands_drag_to(old, new)
+                                and not (self.portal is not None and self.portal.window_drag(old)))
                 for button in sorted(self._remote_buttons):
                     if not (dragging_out and button == "left"):
                         self.transport.send(old, "button", button=button, pressed=False)

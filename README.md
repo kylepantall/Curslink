@@ -57,6 +57,13 @@ next computer, with a quick "pop" or "blink" so you always see where it went.
   desktop or in a folder and they're saved there, drop on an app and it
   opens them. Let go before a big file has arrived and the drop waits, with
   a progress popup.
+* **App mirror.** Drag a window by its title bar over the edge to another
+  computer and it opens there, live, its own shape and real size, with no
+  frame of its own (a Mac app on a PC looks like the Mac app). Point into it
+  and your mouse and keyboard are on the computer the app runs on; its own
+  title bar moves it, and dragging it back home puts it away. Files dragged
+  into it go to the app. A phone's screen can be dragged across too, and a
+  phone shows computers' apps. Turn it off in Settings > App mirror.
 * **One clipboard.** Copy text, a picture or files on one computer and
   paste them on any other. Passwords copied from a password manager stay
   put, and copies over 25 MB aren't shared. Turn it off in Settings >

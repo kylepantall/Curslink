@@ -89,6 +89,9 @@ class HostConfig:
     mirror_fps: int = 0
     # How sharp a mirror's picture is ([layout] mirror_quality, see curslink.mirror.QUALITIES).
     mirror_quality: str = "auto"
+    # App mirror: drag an app's window off this computer or another onto a
+    # third, where it's shown and used ([app_mirror] enabled; see curslink.appmirror).
+    app_mirror: bool = True
     # Share what's copied with the agents ([host] clipboard; see curslink.clipboard).
     clipboard: bool = True
     # Copies bigger than this (MB) stay on their own device ([host] clipboard_max_mb).
@@ -142,6 +145,8 @@ class AgentConfig:
     isolink: bool = True
     # Take part in mirror mode: show and capture covered screen areas ([agent] mirror).
     mirror: bool = True
+    # App mirror: cast this computer's app windows, show other devices' ([agent] app_mirror).
+    app_mirror: bool = True
     # Share what's copied with the host ([agent] clipboard; see curslink.clipboard).
     clipboard: bool = True
     clipboard_max_mb: int = 25
@@ -542,6 +547,7 @@ def host_config(raw: dict[str, Any], base_dir: Path = Path(".")) -> HostConfig:
         isolink=_enabled(raw.get("isolink", {}), "[isolink]"),
         mirror_fps=_mirror_fps(raw.get("layout", {})),
         mirror_quality=_mirror_quality(raw.get("layout", {})),
+        app_mirror=_enabled(raw.get("app_mirror", {}), "[app_mirror]"),
         clipboard=bool(host.get("clipboard", True)),
         clipboard_max_mb=_clipboard_max_mb(host, "[host]"),
         hide_cursor=bool(host.get("hide_cursor", True)),
@@ -580,6 +586,7 @@ def agent_config(raw: dict[str, Any], base_dir: Path = Path(".")) -> AgentConfig
         files=agent_files_config(agent.get("files", {})),
         isolink=_enabled(agent.get("isolink", {}), "[agent.isolink]"),
         mirror=bool(agent.get("mirror", True)),
+        app_mirror=bool(agent.get("app_mirror", True)),
         clipboard=bool(agent.get("clipboard", True)),
         clipboard_max_mb=_clipboard_max_mb(agent, "[agent]"),
         hide_cursor=bool(agent.get("hide_cursor", True)),
