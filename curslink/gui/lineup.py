@@ -68,9 +68,9 @@ class _MarkerWindow(QWidget):
         accent = th.color("accent")
         short = min(w, h)
         big, small = QFont(), QFont()
-        big.setPixelSize(max(48, round(short * 0.16)))
+        big.setPixelSize(max(40, round(short * 0.10)))
         big.setWeight(QFont.Weight.Bold)
-        small.setPixelSize(max(15, round(short * 0.028)))
+        small.setPixelSize(max(14, round(short * 0.024)))
         small.setWeight(QFont.Weight.DemiBold)
         mb, ms = QFontMetricsF(big), QFontMetricsF(small)
         lines = [s for s in self.screens if s.get("number") or s.get("title")]
@@ -80,7 +80,9 @@ class _MarkerWindow(QWidget):
             note = "Lining up: keep this screen in the photo"
             bw = max(mb.horizontalAdvance(number), ms.horizontalAdvance(title), ms.horizontalAdvance(note)) + 2 * ms.height()
             bh = mb.height() + 2.6 * ms.height() + ms.height()
-            box = QRectF((w - bw) / 2, h * 0.30 - bh / 2, bw, bh)
+            # In the middle, clear of the patterns along the edges (the top and bottom
+            # middle ones reach 0.19 of a 16:9 screen's height in).
+            box = QRectF((w - bw) / 2, (h - bh) / 2, bw, bh)
             path = QPainterPath()
             path.addRoundedRect(box, ms.height(), ms.height())
             p.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -272,6 +274,11 @@ class LineupFlow(QObject):
         self.send("lineup " + json.dumps({"devices": remote}, separators=(",", ":")))
         self.dialog.say("Take a photo of your desk", "Asking your phone…")
         self.dialog.show()
+        # In the middle of the screen, over its number: clear of its patterns.
+        area = self.dialog.screen().geometry() if self.dialog.screen() is not None else None
+        if area is not None:
+            self.dialog.adjustSize()
+            self.dialog.move(area.center() - self.dialog.rect().center())
         self.dialog.raise_()
         self.dialog.activateWindow()
         self.ask_phones()
