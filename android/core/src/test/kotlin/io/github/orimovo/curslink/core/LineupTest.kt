@@ -16,7 +16,7 @@ class LineupTest {
     @Test
     fun aPhotoGoesOutInFramesThatFit() {
         val asked = mutableListOf<Pair<String, Boolean>>()
-        val s = LineupSession { id, cancel -> asked += id to cancel }
+        val s = LineupSession { id, cancel, _ -> asked += id to cancel }
         val frames = mutableListOf<Pair<String, Map<String, JsonElement>>>()
         s.send = { t, data -> frames += t to data; Frames.encode(t, data) }
         s.handle(frame("lineup_camera", "id" to "L1"))
@@ -38,7 +38,7 @@ class LineupTest {
     @Test
     fun cancelsAndRequests() {
         val asked = mutableListOf<Pair<String, Boolean>>()
-        val s = LineupSession { id, cancel -> asked += id to cancel }
+        val s = LineupSession { id, cancel, _ -> asked += id to cancel }
         val frames = mutableListOf<String>()
         s.send = { t, _ -> frames += t }
         assertFalse(s.request())  // an older host
@@ -50,5 +50,40 @@ class LineupTest {
         assertEquals(listOf("L2" to false, "L2" to true), asked)
         s.cancel("L3")
         assertEquals(listOf("lineup_request", "lineup_photo"), frames)
+    }
+
+    @Test
+    fun liveFramesGoOutNumberedAndTheHostSaysHowItsGoing() {
+        val asked = mutableListOf<Triple<String, Boolean, Boolean>>()
+        val s = LineupSession { id, cancel, live -> asked += Triple(id, cancel, live) }
+        val frames = mutableListOf<Pair<String, Map<String, JsonElement>>>()
+        s.send = { t, data -> frames += t to data; Frames.encode(t, data) }
+        s.handle(frame("lineup_camera", "id" to "L1", "live" to true))
+        assertEquals(listOf(Triple("L1", false, true)), asked)
+        val jpeg = ByteArray(70_000) { (it * 3).toByte() }
+        s.frame("L1", 4, jpeg, 1180.5)
+        val first = Frame(frames.first().first, JsonObject(frames.first().second))
+        assertEquals("lineup_photo", first.t)
+        assertEquals(4.0, first.num("seq"))
+        assertEquals(1180.5, first.num("focal"))
+        assertEquals(70_000.0, first.num("size"))
+        assertEquals(3, frames.size - 1)  // 32 KiB at a time
+        assertEquals("L1", s.waiting)  // still going
+        s.frame("L1", 5, ByteArray(10), null)  // a camera that doesn't say
+        assertNull(frames[frames.size - 2].second["focal"])
+
+        val seen = mutableListOf<LineupStatus>()
+        s.onStatus = { seen += it }
+        s.handle(Frames.decode("""{"t":"lineup_live","id":"L1","seq":5,"progress":0.4,"hint":"Move the phone slowly in a figure of 8","screens":[[1,"locked"],[2,"placing"],["x",3]]}"""))
+        assertEquals(LineupStatus("L1", 5, 0.4, "Move the phone slowly in a figure of 8",
+            listOf(1 to "locked", 2 to "placing"), false), seen.last())
+        s.handle(Frames.decode("""{"t":"lineup_live","id":"L1","progress":1,"hint":"Lined up","screens":[],"done":true}"""))
+        assertTrue(seen.last().done)
+        assertNull(seen.last().seq)
+        assertNull(s.waiting)
+        frames.clear()
+        s.done("L1")
+        assertEquals("lineup_photo", frames.single().first)
+        assertEquals(true, Frame("x", JsonObject(frames.single().second)).bool("done"))
     }
 }

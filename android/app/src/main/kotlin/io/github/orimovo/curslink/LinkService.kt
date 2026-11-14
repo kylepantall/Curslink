@@ -128,9 +128,11 @@ class LinkService : Service() {
             mirror = Mirrors(),
             clipboard = ::copiedElsewhere,
             files = Drops.session(this),
-            lineup = { id, cancel ->
-                AppLog.i(TAG, if (cancel) "the computer doesn't need the line-up photo any more" else "the computer asks for a photo of the desk")
-                LineupActivity.ask(this, id, cancel)
+            lineup = { id, cancel, live ->
+                AppLog.i(TAG, if (cancel) "the computer doesn't need the camera for the line-up any more"
+                    else if (live) "the computer asks for the camera, to line the screens up live"
+                    else "the computer asks for a photo of the desk")
+                LineupActivity.ask(this, id, cancel, live)
             },
             pairing = { prefs.pairing },
             hello = { Hello(prefs.name, platform(), screens(), screenMm()) },
@@ -240,6 +242,21 @@ class LinkService : Service() {
     }
 
     fun lineupCancel(id: String) { link?.session?.lineup?.cancel(id) }
+
+    /** Live line-up: frame [seq] of line-up [id]. Blocks (not on the main thread). */
+    fun lineupFrame(id: String, seq: Int, jpeg: ByteArray, focal: Double?) {
+        val session = link?.session?.lineup ?: error("not linked")
+        if (state.first != LinkState.CONNECTED) error("not linked to the computer")
+        session.frame(id, seq, jpeg, focal)
+    }
+
+    /** Live line-up: the person says it'll do as it is. Blocks. */
+    fun lineupDone(id: String) { link?.session?.lineup?.done(id) }
+
+    /** Live line-up: who hears how it's going (null: nobody any more). Called on the link's thread. */
+    fun lineupStatus(listener: ((io.github.orimovo.curslink.core.LineupStatus) -> Unit)?) {
+        link?.session?.lineup?.onStatus = listener ?: {}
+    }
 
     /** Ask the computer to start a line-up (it shows the patterns and asks us for the photo). Blocks. */
     fun lineupRequest(): Boolean =

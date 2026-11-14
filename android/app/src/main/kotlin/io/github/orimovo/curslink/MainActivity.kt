@@ -135,7 +135,7 @@ class MainActivity : AppCompatActivity() {
                     val asked = runCatching { LinkService.instance?.lineupRequest() == true }.getOrDefault(false)
                     runOnUiThread {
                         Toast.makeText(this,
-                            if (asked) "Every screen shows its patterns now; the camera opens in a moment."
+                            if (asked) "Every screen shows its patterns now; the camera opens in a moment. Hold the phone up in front of your eyes."
                             else "${pairing.hostName}'s Curslink is too old to line up screens. Update it, or use Layout › Line up with camera there.",
                             Toast.LENGTH_LONG).show()
                     }

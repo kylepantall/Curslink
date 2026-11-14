@@ -158,7 +158,7 @@ class AgentSession(
             "mirror", "mirror_frame", "mirror_pointer", "mirror_ack" -> return mirror?.handle(f)
             "edge" -> EdgeCommand.parse(f)?.let { handler.edge(it) }
             "clip", "clip_data" -> clipboard?.handle(f)
-            "lineup_camera" -> lineup?.handle(f)
+            "lineup_camera", "lineup_live" -> lineup?.handle(f)
             "drag", "file_begin", "file_item", "file_data", "file_end", "file_cancel" -> return files?.handle(f)
             // Everything else (look, hint, drag_out, popups) is only sent to
             // agents that list the feature in hello, and we list none of them.
@@ -206,8 +206,8 @@ class AgentLink(
     clipboard: ((String) -> Unit)? = null,
     /** Files dragged here (see Files.kt); null leaves this phone out of file drags. */
     files: FileSession? = null,
-    /** Auto line-up: the host wants a photo of the desk (see Lineup.kt); null leaves this phone out of it. */
-    lineup: ((id: String, cancel: Boolean) -> Unit)? = null,
+    /** Auto line-up: the host wants the camera pointed at the desk (see Lineup.kt); null leaves this phone out of it. */
+    lineup: ((id: String, cancel: Boolean, live: Boolean) -> Unit)? = null,
 ) {
     val session = AgentSession(handler, mirror?.let { MirrorSession(it) }, clipboard?.let { ClipboardSession(it) }, files,
         lineup?.let { LineupSession(it) })
