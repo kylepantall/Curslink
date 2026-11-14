@@ -114,6 +114,9 @@ class HostServer:
         # (device_id, frame type, frame data): clip and clip_data, something
         # copied on that agent (see curslink.clipboard).
         self.on_clip: Callable[[str, str, dict], None] = lambda device_id, t, data: None
+        # (device_id, frame type, frame data): lineup_photo, lineup_data and
+        # lineup_request from a phone taking part in an auto line-up.
+        self.on_lineup: Callable[[str, str, dict], None] = lambda device_id, t, data: None
         # welcome.features: what this host understands (more is added when
         # turned on, e.g. "clipboard").
         self.features: list[str] = list(HOST_FEATURES)
@@ -406,6 +409,8 @@ class HostServer:
             self.on_mirror(conn.device_id, msg.t, dict(msg.data))
         elif msg.t in ("clip", "clip_data"):
             self.on_clip(conn.device_id, msg.t, dict(msg.data))
+        elif msg.t in ("lineup_photo", "lineup_data", "lineup_request"):
+            self.on_lineup(conn.device_id, msg.t, dict(msg.data))
         elif msg.t.startswith("file_"):
             reply = self.on_files(conn.device_id, msg)
             if inspect.isawaitable(reply):

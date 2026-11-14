@@ -1334,3 +1334,101 @@ def test_agent_shows_identify_cards_from_the_host(desktop, qapp):
     desktop._on_identify({"event": "identify", "screens": [{"screen": "main", "number": 3, "title": "Host"}]})
     assert desktop._identify is not None and desktop._identify.showing
     desktop._identify.hide()
+
+
+def test_line_up_with_camera_arranges_the_layout_from_a_photo(desktop, qapp, tmp_path):
+    import time
+
+    pytest.importorskip("cv2")
+    from test_lineup import photo
+
+    page, home, laptop = _host_with_laptop(desktop)
+    sent = []
+    desktop.service.send = sent.append
+    page.start_lineup()
+    flow = page.lineup
+    assert flow is not None
+    # the patterns: on this computer's monitors, and to the laptop through the host
+    assert flow.markers.showing
+    flow.markers.windows[0].grab()  # paints without error
+    marker_cmd = next(c for c in sent if c.startswith("lineup {"))
+    remote = json.loads(marker_cmd[len("lineup "):])["devices"]
+    assert remote["laptop"]["screens"][0]["markers"]
+    assert any(c.startswith("lineup_camera ") for c in sent)
+    page._on_service_event({"event": "lineup_camera", "id": flow.id,
+                            "devices": [{"id": "phone", "name": "Kyle's phone"}]})
+    assert "Kyle's phone" in flow.dialog.text.text()
+
+    # the desk: the laptop really sits to the LEFT of this computer's screen, a bit lower
+    hx, hy, hw, hh = home.layout_rect()
+    _lx, _ly, lw, lh = laptop.layout_rect()
+    desk = [(home.key, home.device_id, hw, hh, 0, 0, 600, 600 * hh / hw),
+            (laptop.key, "laptop", lw, lh, -320, 120, 300, 300 * lh / lw)]
+    data, _planned = photo(desk, planned=flow.planned)
+    path = tmp_path / "desk.jpg"
+    path.write_bytes(data)
+    page._on_service_event({"event": "lineup_photo", "id": flow.id, "device": "phone", "path": str(path)})
+    deadline = time.monotonic() + 20
+    while page.lineup is not None and time.monotonic() < deadline:
+        qapp.processEvents()
+        time.sleep(0.01)
+    assert page.lineup is None, flow.dialog.text.text()
+    assert not path.exists()  # the phone's photo is thrown away once read
+    assert not flow.markers.showing and sent[-1] == 'lineup {"hide":true}'
+    assert page.dirty
+    assert home.layout_rect()[:2] == (hx, hy)
+    x, y, *_ = laptop.layout_rect()
+    assert x == hx - lw
+    assert y == pytest.approx(hy + 120 * hw / 600, abs=30)
+    assert "Lined up 2 screens" in page.lineup_note.text()
+    page.save()
+    links = desktop.config().links()
+    assert len(links) == 1
+    assert {links[0]["a"], links[0]["b"]} == {home.key, laptop.key}
+
+
+def test_line_up_cancel_takes_the_patterns_down(desktop, qapp):
+    pytest.importorskip("cv2")
+    page, home, laptop = _host_with_laptop(desktop)
+    sent = []
+    desktop.service.send = sent.append
+    page.start_lineup()
+    flow = page.lineup
+    flow.dialog.reject()
+    assert page.lineup is None and not flow.markers.showing
+    assert any('"cancel": true' in c for c in sent if c.startswith("lineup_camera "))
+    assert not page.dirty
+
+
+def test_agent_shows_line_up_patterns_from_the_host(desktop, qapp):
+    desktop._on_lineup({"event": "lineup", "seconds": 60, "screens": [
+        {"screen": "main", "number": 2, "title": "Host", "markers": [[1234, 0.03, 0.03, 0.1, 0.17]]}]})
+    assert desktop._lineup is not None and desktop._lineup.showing
+    desktop._lineup.windows[0].grab()
+    desktop._on_lineup({"event": "lineup", "hide": True})
+    assert not desktop._lineup.showing
+
+
+def test_line_up_patterns_as_drawn_are_read_back(qapp):
+    """What the marker windows paint is what curslink.lineup looks for."""
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("cv2")
+    from PySide6.QtGui import QImage, QPainter
+
+    from curslink import lineup
+    from curslink.gui.lineup import draw_marker
+
+    w, h = 1600, 900
+    planned = lineup.plan([{"key": "a/main", "width": w, "height": h}])
+    img = QImage(w, h, QImage.Format.Format_Grayscale8)
+    img.fill(40)
+    p = QPainter(img)
+    from PySide6.QtCore import QRectF
+
+    for bits, fx, fy, fw, fh in planned["a/main"]["markers"]:
+        draw_marker(p, bits, QRectF(fx * w, fy * h, fw * w, fh * h))
+    p.end()
+    ptr = img.constBits()
+    gray = np.frombuffer(ptr, np.uint8, count=img.bytesPerLine() * h).reshape(h, img.bytesPerLine())[:, :w].copy()
+    seen = lineup.find_screens(gray, planned)
+    assert seen["a/main"].markers == lineup.PER_SCREEN
