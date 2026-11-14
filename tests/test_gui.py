@@ -1369,7 +1369,7 @@ def test_line_up_with_camera_arranges_the_layout_from_a_photo(desktop, qapp, tmp
     import time
 
     pytest.importorskip("cv2")
-    from test_lineup import photo
+    from lineup_desk import photo
 
     page, home, laptop = _host_with_laptop(desktop)
     sent = []
@@ -1383,17 +1383,19 @@ def test_line_up_with_camera_arranges_the_layout_from_a_photo(desktop, qapp, tmp
     marker_cmd = next(c for c in sent if c.startswith("lineup {"))
     remote = json.loads(marker_cmd[len("lineup "):])["devices"]
     assert remote["laptop"]["screens"][0]["markers"]
-    assert any(c.startswith("lineup_camera ") for c in sent)
+    # phones are asked for a live scan (an older app takes one photo instead, as here)
+    asked = next(c for c in sent if c.startswith("lineup_camera "))
+    assert json.loads(asked[len("lineup_camera "):]) == {"id": flow.id, "live": True}
     page._on_service_event({"event": "lineup_camera", "id": flow.id,
                             "devices": [{"id": "phone", "name": "Kyle's phone"}]})
-    assert "Kyle's phone" in flow.dialog.text.text()
+    assert "Kyle's phone" in flow.dialog.text.text() and "figure of 8" in flow.dialog.text.text()
 
     # the desk: the laptop really sits to the LEFT of this computer's screen, a bit lower
     hx, hy, hw, hh = home.layout_rect()
     _lx, _ly, lw, lh = laptop.layout_rect()
     desk = [(home.key, home.device_id, hw, hh, 0, 0, 600, 600 * hh / hw),
             (laptop.key, "laptop", lw, lh, -320, 120, 300, 300 * lh / lw)]
-    data, _planned = photo(desk, planned=flow.planned)
+    data, _cam, _pose = photo(desk, flow.planned)
     path = tmp_path / "desk.jpg"
     path.write_bytes(data)
     page._on_service_event({"event": "lineup_photo", "id": flow.id, "device": "phone", "path": str(path)})
@@ -1409,11 +1411,117 @@ def test_line_up_with_camera_arranges_the_layout_from_a_photo(desktop, qapp, tmp
     x, y, *_ = laptop.layout_rect()
     assert x == hx - lw
     assert y == pytest.approx(hy + 120 * hw / 600, abs=30)
-    assert "Lined up 2 screens" in page.lineup_note.text()
+    assert "Lined up 2 screens from the photo" in page.lineup_note.text()
     page.save()
     links = desktop.config().links()
     assert len(links) == 1
     assert {links[0]["a"], links[0]["b"]} == {home.key, laptop.key}
+
+
+def test_live_line_up_follows_the_phone_until_every_screen_is_sure(desktop, qapp, tmp_path):
+    """Frames from a phone moved about: each is answered (so the phone sends
+    the next and shows how it's going), the window shows the layout moving
+    into place, and it ends by itself once it's lined up."""
+    import time
+
+    cv2 = pytest.importorskip("cv2")
+    from lineup_desk import Desk, scan, true_solution
+
+    from curslink import lineup
+
+    page, home, laptop = _host_with_laptop(desktop)
+    sent = []
+    desktop.service.send = sent.append
+    page.start_lineup()
+    flow = page.lineup
+    hx, hy, hw, hh = home.layout_rect()
+    _lx, _ly, lw, lh = laptop.layout_rect()
+    # The laptop stands to the left, turned in 25 degrees and nearer.
+    desk = Desk([(home.key, home.device_id, hw, hh, 600, (0, 0, 0), 0, 0),
+                 (laptop.key, "laptop", lw, lh, 340, (-470, 60, -90), 25, 0)])
+    # The laptop says how big its screen is (the host got it with its hello).
+    page._on_service_event({"event": "lineup_sizes", "devices": {"laptop": [
+        {"x": 0, "y": 0, "width": lw, "height": lh, "width_mm": 340.0, "height_mm": 340.0 * lh / lw}]}})
+    assert next(s for s in flow.screens if s["key"] == laptop.key)["width_mm"] == 340.0
+    seq = 0
+    for frame in scan(desk, flow.planned, n=30, middle=(-150, 40, -900), aim=(-180, 40, 0)):
+        path = tmp_path / f"frame{seq}.jpg"
+        path.write_bytes(cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 82])[1].tobytes())
+        page._on_service_event({"event": "lineup_photo", "id": flow.id, "device": "phone", "path": str(path),
+                                "seq": seq, "focal": 1200.0})
+        # the phone waits for each frame's answer before sending the next
+        deadline = time.monotonic() + 20
+        answer = None
+        while answer is None and time.monotonic() < deadline:
+            qapp.processEvents()
+            time.sleep(0.005)
+            answer = next((json.loads(c[len("lineup_live "):]) for c in sent
+                           if c.startswith("lineup_live ") and json.loads(c[len("lineup_live "):]).get("seq") == seq),
+                          None)
+        assert answer is not None and answer["device"] == "phone" and answer["id"] == flow.id
+        assert not path.exists()
+        if seq == 0:
+            # both screens are in view: being placed, with the layout drawn in the window
+            assert sorted(n for n, _state in answer["screens"]) == [1, 2]
+            assert flow.dialog.preview.isVisibleTo(flow.dialog) and len(flow.dialog.preview.rects) == 2
+            flow.dialog.preview.grab()
+            assert flow.dialog.use_button.isVisibleTo(flow.dialog)
+        seq += 1
+        if answer.get("done"):
+            break
+    assert answer.get("done") and answer["hint"] == "Lined up" and answer["progress"] == 1
+    assert {state for _n, state in answer["screens"]} == {"locked"}
+    deadline = time.monotonic() + 5
+    while page.lineup is not None and time.monotonic() < deadline:
+        qapp.processEvents()
+        time.sleep(0.01)
+    assert page.lineup is None and not flow.markers.showing and sent[-1] == 'lineup {"hide":true}'
+    # where the desk itself puts it, seen from where the scan began
+    from lineup_desk import figure_of_eight
+
+    eye = figure_of_eight(30, (-150, 40, -900))[0][0]
+    true = lineup.arrange(flow.screens, true_solution(desk, home.key, eye))
+    x, y, *_ = laptop.layout_rect()
+    assert (x, y) == pytest.approx(true.positions[laptop.key], abs=6)
+    assert x == hx - lw
+    note = page.lineup_note.text()
+    assert "views of the desk" in note and "turned 25° to the right" in note
+    page.save()
+    assert len(desktop.config().links()) == 1
+
+
+def test_live_line_up_can_be_taken_as_it_is(desktop, qapp, tmp_path):
+    import time
+
+    cv2 = pytest.importorskip("cv2")
+    from lineup_desk import Desk, scan
+
+    page, home, laptop = _host_with_laptop(desktop)
+    sent = []
+    desktop.service.send = sent.append
+    page.start_lineup()
+    flow = page.lineup
+    # "Done" on the phone before anything was seen: not enough to go on.
+    page._on_service_event({"event": "lineup_photo", "id": flow.id, "device": "phone", "done": True})
+    assert page.lineup is flow and "Not enough" in flow.dialog.title.text()
+    hx, hy, hw, hh = home.layout_rect()
+    _lx, _ly, lw, lh = laptop.layout_rect()
+    desk = Desk([(home.key, home.device_id, hw, hh, 600, (0, 0, 0), 0, 0),
+                 (laptop.key, "laptop", lw, lh, 340, (-480, 60, 0), 0, 0)])
+    frame = next(iter(scan(desk, flow.planned, n=4, middle=(-150, 40, -900), aim=(-180, 40, 0))))
+    path = tmp_path / "frame.jpg"
+    path.write_bytes(cv2.imencode(".jpg", frame)[1].tobytes())
+    page._on_service_event({"event": "lineup_photo", "id": flow.id, "device": "phone", "path": str(path), "seq": 0})
+    deadline = time.monotonic() + 20
+    while flow.latest is None and time.monotonic() < deadline:
+        qapp.processEvents()
+        time.sleep(0.005)
+    assert flow.latest is not None
+    flow.dialog.use_button.click()
+    assert page.lineup is None and page.dirty
+    done = [json.loads(c[len("lineup_live "):]) for c in sent if c.startswith("lineup_live ")][-1]
+    assert done["done"] is True and done["device"] == "phone"
+    assert laptop.layout_rect()[0] == hx - lw
 
 
 def test_line_up_cancel_takes_the_patterns_down(desktop, qapp):
@@ -1459,8 +1567,8 @@ def test_line_up_patterns_as_drawn_are_read_back(qapp):
     p.end()
     ptr = img.constBits()
     gray = np.frombuffer(ptr, np.uint8, count=img.bytesPerLine() * h).reshape(h, img.bytesPerLine())[:, :w].copy()
-    seen = lineup.find_screens(gray, planned)
-    assert seen["a/main"].markers == lineup.PER_SCREEN
+    seen = lineup.read_frame(gray, planned, {"a/main": (w, h)}, 3.0)
+    assert seen[0].key == "a/main" and seen[0].markers == lineup.PER_SCREEN and seen[0].rms < 0.3
 
 def test_debug_console_shows_json_lines_live_and_filters(desktop, qapp):
     import logging

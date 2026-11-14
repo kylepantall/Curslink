@@ -100,9 +100,22 @@ Host -> agent
                                        hidden (screens: [{screen, os, markers,
                                        number, title}]); only to an agent whose
                                        hello.features has "lineup"
-    lineup_camera {id} | {id, cancel}  take a photo of the desk for that line-up
-                                       (or don't any more); only to an agent whose
-                                       hello.features has "lineup_camera" (a phone)
+    lineup_camera {id, live?} | {id, cancel}
+                                       point the camera at the desk for that
+                                       line-up (or don't any more); only to an
+                                       agent whose hello.features has
+                                       "lineup_camera" (a phone). live: send
+                                       frame after frame while it's moved about
+                                       (lineup_photo with a seq) until told
+                                       it's done; a phone that doesn't know
+                                       "live" takes one photo
+    lineup_live  {id, seq?, progress, hint, screens, done?}
+                                       how the live line-up is going, for the
+                                       phone's screen: seq is the frame just
+                                       read (send the next), progress 0..1,
+                                       screens [[number, state]] with state
+                                       unseen/seen/placing/locked; done: it's
+                                       lined up, stop
 
 Agent -> host
     hello        {v, device_id, name, platform, screens, auth, camera, ping_s, pointer?}
@@ -144,10 +157,14 @@ Agent -> host
                                        the share of the host's datagrams lost on the
                                        way, and the UDP round trip (see
                                        curslink.net.quality). Numbers may be null
-    lineup_photo {id, size} | {id, cancel}
+    lineup_photo {id, size, seq?, focal?} | {id, cancel} | {id, done}
                                        the photo for a lineup_camera (its JPEG
                                        bytes follow in lineup_data frames), or
-                                       none (the person backed out)
+                                       none (the person backed out). Live: one
+                                       per frame, seq counting up, focal the
+                                       camera's focal length in the frame's
+                                       pixels where the phone knows it; done:
+                                       the person says that'll do
     lineup_data  {id, data, end?}      the next bytes of it (base64)
     lineup_request {}                  the person asked for a line-up on the
                                        phone: start one (only to a host whose
@@ -217,6 +234,7 @@ MESSAGE_TYPES = frozenset(
         "clip_data",
         "lineup",
         "lineup_camera",
+        "lineup_live",
         "lineup_photo",
         "lineup_data",
         "lineup_request",
@@ -394,7 +412,7 @@ def _validate(msg: Message) -> None:
     elif t == "lineup":
         if msg.data.get("hide") is not True and not isinstance(msg.data.get("screens"), list):
             raise ProtocolError("lineup needs screens, or hide")
-    elif t in ("lineup_camera", "lineup_photo", "lineup_data"):
+    elif t in ("lineup_camera", "lineup_live", "lineup_photo", "lineup_data"):
         if not isinstance(msg.data.get("id"), str) or not msg.data["id"]:
             raise ProtocolError(f"{t}.id must be a non-empty string")
         if t == "lineup_data" and not isinstance(msg.data.get("data"), str):
