@@ -1409,17 +1409,22 @@ def receive_files(cfg: AgentConfig, session: AgentSession, overlay):
         sink.button("left", False)
 
     # A real drag needs the injected button-down and moves to drive it, which
-    # Windows' drag and drop follows; elsewhere the files go to Downloads.
+    # Windows' drag and drop follows, and a Mac's since its agent posts real
+    # mouse-dragged events (0.4.76); elsewhere the files go to Downloads.
+    # (Before 0.4.81 a Mac agent had no real drag: files from a PC only
+    # showed a card and went to Downloads, and no window came forward.)
     follow = None
-    if sys.platform == "win32":
+    real = sys.platform in ("win32", "darwin")
+    if real:
         from curslink.files.focus import FocusFollower
 
-        # Bring the window under a held drag forward, as on a Mac host.
+        # Bring the window under a held drag forward, as on a host.
         follow = FocusFollower(lambda: {overlay.pid} if getattr(overlay, "pid", None) else set(),
                                ask_helper=lambda token: overlay.command(f"focus {token}"))
     native = NativeDrop(overlay.command, receiver, popups,
-                        press=(lambda: sink.button("left", True)) if sys.platform == "win32" else None,
-                        release=lambda: sink.button("left", False), cancel=cancel_drag, follow=follow)
+                        press=(lambda: sink.button("left", True)) if real else None,
+                        release=lambda: sink.button("left", False), cancel=cancel_drag, follow=follow,
+                        end_watch=sys.platform == "darwin")
     clean_old()
 
     def on_drag(data: dict) -> None:
