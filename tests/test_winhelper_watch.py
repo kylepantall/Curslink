@@ -140,6 +140,7 @@ class Handler:
 
 def capture():
     c = PynputCapture(hide_cursor=False)
+    c._mac = False  # the helper is Windows only; on a Mac the event tap reads the wheel instead
     c._handler = Handler()
     return c
 
