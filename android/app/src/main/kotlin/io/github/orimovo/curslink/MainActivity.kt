@@ -129,6 +129,19 @@ class MainActivity : AppCompatActivity() {
             else -> "Looking for ${pairing.hostName}…" + if (detail.isNotEmpty() && detail != "not paired") "\n$detail" else ""
         }
         root.addView(text(status, 16f))
+        if (pairing != null && state == LinkState.CONNECTED) {
+            root.addView(button("Line up screens with the camera") {
+                thread(name = "curslink-lineup") {
+                    val asked = runCatching { LinkService.instance?.lineupRequest() == true }.getOrDefault(false)
+                    runOnUiThread {
+                        Toast.makeText(this,
+                            if (asked) "Every screen shows its patterns now; the camera opens in a moment."
+                            else "${pairing.hostName}'s Curslink is too old to line up screens. Update it, or use Layout › Line up with camera there.",
+                            Toast.LENGTH_LONG).show()
+                    }
+                }
+            })
+        }
         if (pairing != null) {
             root.addView(button(if (prefs.paused) "Resume" else "Pause") {
                 LinkService.setPaused(this, !prefs.paused)

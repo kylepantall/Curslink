@@ -406,6 +406,11 @@ async def run_host(cfg: HostConfig) -> None:
         await camera.pause(for_good=True)
         events.emit("calibrating", on=True)
 
+    from curslink.lineup import PhotoInbox
+
+    lineup_inbox = PhotoInbox(server, events.emit)
+    server.on_lineup = lineup_inbox.handle
+
     def command(line: str) -> None:
         if keeper.command(line):
             pass
@@ -417,6 +422,10 @@ async def run_host(cfg: HostConfig) -> None:
             hint_command(server, line[5:])
         elif line.startswith("identify "):
             identify_command(server, line[9:])
+        elif line.startswith("lineup "):
+            lineup_inbox.markers(line[7:])
+        elif line.startswith("lineup_camera "):
+            lineup_inbox.camera(line[14:])
         elif line.startswith("fit "):
             fit_command(mirror, line[4:])
         elif line == "pick on":
@@ -1321,6 +1330,7 @@ async def run_agent(cfg: AgentConfig) -> None:
         send_files_home(cfg, session, client, overlay, native, asyncio.get_running_loop())
     session.on_hint = lambda data: events.emit("hint", **data)
     session.on_identify = lambda data: events.emit("identify", **data)
+    session.on_lineup = lambda data: events.emit("lineup", **data)
     mirror = None
     if mirror_on and overlay is not None:
         from curslink.mirror import CursorPark, LatestWriter, MirrorPeer
@@ -1480,17 +1490,22 @@ def receive_files(cfg: AgentConfig, session: AgentSession, overlay):
         sink.button("left", False)
 
     # A real drag needs the injected button-down and moves to drive it, which
-    # Windows' drag and drop follows; elsewhere the files go to Downloads.
+    # Windows' drag and drop follows, and a Mac's since its agent posts real
+    # mouse-dragged events (0.4.76); elsewhere the files go to Downloads.
+    # (Before 0.4.81 a Mac agent had no real drag: files from a PC only
+    # showed a card and went to Downloads, and no window came forward.)
     follow = None
-    if sys.platform == "win32":
+    real = sys.platform in ("win32", "darwin")
+    if real:
         from curslink.files.focus import FocusFollower
 
-        # Bring the window under a held drag forward, as on a Mac host.
+        # Bring the window under a held drag forward, as on a host.
         follow = FocusFollower(lambda: {overlay.pid} if getattr(overlay, "pid", None) else set(),
                                ask_helper=lambda token: overlay.command(f"focus {token}"))
     native = NativeDrop(overlay.command, receiver, popups,
-                        press=(lambda: sink.button("left", True)) if sys.platform == "win32" else None,
-                        release=lambda: sink.button("left", False), cancel=cancel_drag, follow=follow)
+                        press=(lambda: sink.button("left", True)) if real else None,
+                        release=lambda: sink.button("left", False), cancel=cancel_drag, follow=follow,
+                        end_watch=sys.platform == "darwin")
     clean_old()
 
     def on_drag(data: dict) -> None:

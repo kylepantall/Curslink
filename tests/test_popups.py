@@ -288,6 +288,23 @@ async def test_coming_straight_back_carries_it_back_not_a_file_drag(popups):
     assert files == [] and link.opened == [("h_chat", True, True)]
 
 
+async def test_a_late_still_dragging_from_the_device_it_left_is_ignored(popups):
+    """0.4.76: carried PC -> Mac -> PC in 100 ms; the Mac's "dragging it"
+    arrived after it was carried back, and the host took it for a second
+    drag of the same chat on the Mac."""
+    handoff, router, transport, link, injected, pressed = popups
+    handoff.on_isolink("laptop", {"me": "h_me", "windows": True})
+    link.dragging = ChatDrag("h_chat", open=True)
+    router.on_pointer(3839, 500)
+    await settle()
+    router.go_home("edge")  # straight back: it opens here, then closes there
+    assert handoff.closing == {"h_chat": "laptop"}
+    handoff.on_isolink("laptop", {"me": "h_me", "windows": True, "dragging": {"chat": "h_chat", "open": True}})
+    assert handoff.devices["laptop"].dragging is None
+    await settle()
+    assert transport.of_type("popup_close") == [("laptop", "popup_close", {"chat": "h_chat"})]
+
+
 # ------------------------------------------------------------------ agent side
 async def test_agent_opens_a_carried_chat_held_and_says_so():
     link, sent, sink = FakeLink(), [], FakeSink()

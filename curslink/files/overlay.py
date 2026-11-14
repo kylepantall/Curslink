@@ -393,7 +393,9 @@ def make_drag_source(tid: str, paths: list[str], info: dict):
 
         def mousePressEvent(self, e) -> None:  # noqa: N802
             if e.button() == Qt.MouseButton.LeftButton:
-                self.start_drag()
+                # A Mac's QDrag from an injected press never got going (0.4.21);
+                # AppKit's own drag does, now with the press behind it.
+                self.start_appkit(True) if cocoa else self.start_drag()
 
         def start_drag(self) -> None:
             if self.dragging:
@@ -421,13 +423,15 @@ def make_drag_source(tid: str, paths: list[str], info: dict):
             _say(f"nativedrag-ended {tid} {op}")
             self.close()
 
-        def start_appkit(self) -> None:
-            """macOS, when no press came: an AppKit drag of its own."""
+        def start_appkit(self, pressed: bool = False) -> None:
+            """macOS: an AppKit drag of its own (``pressed``: the press
+            reached this window; otherwise none came in time)."""
             if self.dragging or not self.isVisible():
                 return
             self.dragging = True
             self.timer.stop()
-            _say("log no press reached the drag source; starting the drag without one")
+            if not pressed:
+                _say("log no press reached the drag source; starting the drag without one")
             try:
                 # Without the Mac's own mouse-down the drag image would sit
                 # still (mouse-dragged events go to whoever got the down), so
@@ -454,6 +458,13 @@ def make_drag_source(tid: str, paths: list[str], info: dict):
     w = Source()
     w.show()
     w.raise_()
+    if cocoa:
+        # Its pixels are all but transparent, and macOS hands a click on a
+        # transparent part of a window to whatever is under it: the injected
+        # press went to the desktop, which rubber-band selected while the
+        # drag started without it (Kyle, 0.4.81, PC -> Mac agent). Told not
+        # to ignore mouse events, the window takes them all.
+        mac_take_clicks(w)
     _say(f"nativedrag-ready {tid}")
     if cocoa:
         QTimer.singleShot(MAC_PRESS_WAIT_MS, w.start_appkit)
@@ -463,6 +474,22 @@ def make_drag_source(tid: str, paths: list[str], info: dict):
 MAC_PRESS_WAIT_MS = 400
 MAC_START_TRIES = 4
 MAC_RETRY_MS = 150
+
+
+def mac_take_clicks(widget) -> bool:
+    """macOS: have ``widget``'s window take clicks on its transparent
+    pixels too (the window server passes those through by default)."""
+    try:
+        import objc
+
+        window = objc.objc_object(c_void_p=int(widget.winId())).window()
+        if window is None:
+            return False
+        window.setIgnoresMouseEvents_(False)
+        return True
+    except Exception as exc:  # pragma: no cover - macOS only
+        _say(f"log couldn't make the drag source take clicks: {type(exc).__name__}: {exc}")
+        return False
 
 
 def _win_left_down() -> bool:
@@ -532,8 +559,14 @@ def mac_begin_drag(widget, paths: list[str], pixmap, done) -> bool:
         item = NSDraggingItem.alloc().initWithPasteboardWriter_(NSURL.fileURLWithPath_(p))
         item.setDraggingFrame_contents_(((local.x + 14 + 6 * i, oy), (iw, ih)), image if i == 0 else None)
         items.append(item)
-    event = NSEvent.mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure_(
-        1, at, 0, NSProcessInfo.processInfo().systemUptime(), window.windowNumber(), None, 0, 1, 1.0)  # 1: left down
+    from AppKit import NSApplication
+
+    # The real press when it came to this window (its dragged events then
+    # drive the drag); otherwise one of our own.
+    event = NSApplication.sharedApplication().currentEvent()
+    if event is None or event.type() != 1 or event.windowNumber() != window.windowNumber():
+        event = NSEvent.mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure_(
+            1, at, 0, NSProcessInfo.processInfo().systemUptime(), window.windowNumber(), None, 0, 1, 1.0)  # 1: left down
     if event is None:
         return False
     source = _mac_source_class().alloc().init()

@@ -49,13 +49,19 @@ class Curslink(QObject):
         super().__init__()
         self.prefs = prefs
         self.status = Status(self)
+        from curslink.gui.console import DebugFeed
+
+        self.debug_feed = DebugFeed(self)
+        self.console = None
         self.service = Service(self)
+        self.service.event.connect(lambda event: self.debug_feed.service_event(event, self.service.role))
         self.service.event.connect(self.status.apply)
         self.service.output.connect(lambda line: self.status.add_log("output", line))
         self.service.state_changed.connect(self._on_service_state)
         self.service.event.connect(self._on_look)
         self.service.event.connect(self._on_hint)
         self.service.event.connect(self._on_identify)
+        self.service.event.connect(self._on_lineup)
         self.calibrating = False  # host: the service gave the camera to calibration
         self.service.event.connect(self._on_calibrating)
         self.service.event.connect(self._on_paired)
@@ -63,13 +69,29 @@ class Curslink(QObject):
         self._look = None
         self._hint = None
         self._identify = None
+        self._lineup = None
         self.release: update.Release | None = None
         self.quitting = False
         self.app_filters: list = []  # app-wide event filters, removed before quitting
         self.window = None
         self.tray = None
+        self.config_changed.connect(self._name_logs)
+        self._name_logs()
         diagnostics.on_crash(lambda path: call_on_main(
             lambda: self.status.add_log("error", f"Something went wrong; a report was saved to {path}")))
+
+    def _name_logs(self) -> None:
+        diagnostics.set_identity(self.device_name() or None, self.role)
+
+    def show_console(self) -> None:
+        """Open (or bring forward) the debug console."""
+        if self.console is None:
+            from curslink.gui.console import DebugConsole
+
+            self.console = DebugConsole(self.debug_feed, save_bundle=diagnostics.write_bundle)
+        self.console.show()
+        self.console.raise_()
+        self.console.activateWindow()
 
     # -- the config file ----------------------------------------------------
     @property
@@ -314,6 +336,19 @@ class Curslink(QObject):
             return
         self.identify({k: v for k, v in event.items() if k != "event"})
 
+    def _on_lineup(self, event: dict) -> None:
+        """Agent: an auto line-up on the host puts its patterns on our monitors
+        (see curslink.gui.lineup)."""
+        if event.get("event") != "lineup":
+            return
+        if self._lineup is None:
+            if event.get("hide"):
+                return
+            from curslink.gui.lineup import Markers
+
+            self._lineup = Markers()
+        self._lineup.show({k: v for k, v in event.items() if k != "event"})
+
     def _on_calibrating(self, event: dict) -> None:
         if event.get("event") == "calibrating":
             self.calibrating = bool(event.get("on"))
@@ -546,6 +581,9 @@ class Curslink(QObject):
             # a second quit inside the first.
             return
         self.quitting = True
+        self.debug_feed.close()
+        if self.console is not None:
+            self.console.close()
         self.service.stop()
         if self.tray is not None:
             self.tray.hide()

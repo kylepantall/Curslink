@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths>
     <cache-path name="export" path="export/" />
+    <!-- The line-up photo the camera app writes (LineupActivity). -->
+    <cache-path name="lineup" path="lineup/" />
 </paths>
