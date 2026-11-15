@@ -169,6 +169,7 @@ class LineupLiveActivity : AppCompatActivity() {
         if (status.id != id || over) return
         status.seq?.let { if (it >= awaiting) awaiting = -1 }  // answered: the next frame can go
         if (status.hint.isNotEmpty()) hint.text = status.hint
+        if (status.buzz) buzz()
         bar.progress = (status.progress * 1000).roundToInt()
         if (status.screens.isNotEmpty()) {
             val line = SpannableStringBuilder()
@@ -194,6 +195,19 @@ class LineupLiveActivity : AppCompatActivity() {
             hint.text = if (status.hint.isNotEmpty()) "${status.hint}. Check the layout on your computer." else "Done. Check the layout on your computer."
             bar.progress = 1000
             preview.postDelayed({ finish() }, 1400)
+        }
+    }
+
+    /** "Got you": the phone is against a face for the last step, so it says so by shaking. */
+    private fun buzz() {
+        runCatching {
+            val vibrator = if (android.os.Build.VERSION.SDK_INT >= 31) {
+                (getSystemService(VIBRATOR_MANAGER_SERVICE) as android.os.VibratorManager).defaultVibrator
+            } else {
+                @Suppress("DEPRECATION")
+                getSystemService(VIBRATOR_SERVICE) as android.os.Vibrator
+            }
+            vibrator.vibrate(android.os.VibrationEffect.createWaveform(longArrayOf(0, 180, 120, 180), -1))
         }
     }
 

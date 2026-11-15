@@ -247,6 +247,26 @@ class SettingsPage(QStackedWidget):
             "and its frame hide, squeezed in a touch, so nothing is lost behind the frame, and the pointer "
             "crosses at the frame's outer edge. Line up with a camera measures the frame; until then it's "
             "taken as 6 mm all round."), self.bezels)
+        self.follow_seat = Toggle("Keep overlaps aimed at where I sit")
+        self.follow_seat.clicked.connect(lambda on: self.set_config("layout", "follow_seat", on))
+        self.seat_back = button("Put it back", None, lambda: self.app.service.send("seat back"))
+        self.seat_back.setToolTip("Aim the overlaps from where they were lined up again, and leave them there "
+                                  "while you sit where you are now")
+        self.follow_seat_row = self.mirror_card.add_row(text_block(
+            "Keep overlaps aimed at where I sit",
+            "A screen in front of another only lines up from where you sit. With this on, this computer's camera "
+            "notices when you've settled somewhere new for 30 seconds (further back, say) and aims the overlap "
+            "from there, once; nothing moves while you only lean about. It goes by where your face was right "
+            "after the last line-up, whose final step finds your eyes with the phone, and keeps the camera on. "
+            "Curslink tells you when it has moved the overlap; Put it back undoes that."),
+            self.seat_back, self.follow_seat)
+        self.seat_tips = Toggle("Show seat suggestions")
+        self.seat_tips.clicked.connect(lambda on: self.set_config("layout", "seat_tips", on, restart=False))
+        self.seat_tips_row = self.mirror_card.add_row(text_block(
+            "Show seat suggestions",
+            "Under the layout, where you sit is shown with what moving something would change: your eye level "
+            "against the main screen's top edge, how far back you are for the width of your screens, and what "
+            "the screen in front hides."), self.seat_tips)
         self.follow_head = Toggle("Follow my head (experimental)")
         self.follow_head.clicked.connect(lambda on: self.set_config("layout", "follow_head", on))
         self.head_home = button("Sit here", None, lambda: self.app.service.send("head home"))
@@ -510,6 +530,11 @@ class SettingsPage(QStackedWidget):
             self.mirror_fps_row.setVisible(overlap and self.mirror.isChecked())
             self.bezels.setChecked(bool(layout_raw.get("bezels", False)))
             self.bezels_row.setVisible(overlap and self.mirror.isChecked())
+            self.follow_seat.setChecked(bool(layout_raw.get("follow_seat", False)))
+            self.follow_seat_row.setVisible(overlap and self.mirror.isChecked())
+            self.seat_back.setVisible(self.follow_seat.isChecked())
+            self.seat_tips.setChecked(bool(layout_raw.get("seat_tips", True)))
+            self.seat_tips_row.setVisible(overlap)
             self.follow_head.setChecked(bool(layout_raw.get("follow_head", False)))
             self.follow_head_row.setVisible(overlap and self.mirror.isChecked())
             self.head_home.setVisible(self.follow_head.isChecked())

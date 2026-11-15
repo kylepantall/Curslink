@@ -172,6 +172,35 @@ def lineup_passed(check: dict | None) -> bool:
     return check.get("state") == "checked" or bool(seam)
 
 
+def cfg_follows(page) -> bool:
+    """Is this computer's camera kept on to follow where you sit or your head?"""
+    try:
+        cfg = page.app.config()
+        return bool(cfg.get("layout", "mirror", False)) and bool(
+            cfg.get("layout", "follow_seat", False) or cfg.get("layout", "follow_head", False))
+    except Exception:
+        return False
+
+
+def seat_note(result, follows: bool = False) -> str:
+    """A sentence on the line-up's last step: where the eyes were found (curslink.seat)."""
+    from curslink import seat
+
+    desk = getattr(result, "desk", None)
+    if desk is None or desk.get("how") != "phone":
+        return ""
+    mm = seat.mm_of(desk)
+    text = " Your overlapping screens are aimed at where you sit"
+    if mm is not None:
+        text += f", {seat.distance(desk, seat.main_screen(desk, result.fits)) * mm / 10:.0f} cm back"
+        if (desk.get("moved_mm") or 0.0) >= 5:
+            text += f" (that moved the overlap {desk['moved_mm'] / 10:.1f} cm)"
+    text += "."
+    if follows:
+        text += " Put the phone down and look at your main screen for a moment, so the camera learns your face from there."
+    return text
+
+
 def check_note(check: dict | None) -> str:
     """A sentence on how a line-up's check at the end went (curslink.lineup.Live.check_summary)."""
     if not check:
@@ -584,6 +613,15 @@ class LayoutPage(Page):
         grid.addWidget(self.edges_card, 2)
         self.add(bottom)
 
+        # Where you sit (curslink.seat): the eye point the overlaps are aimed at.
+        from curslink.gui.seatcard import SeatCard
+
+        self.seat_card = SeatCard()
+        self.seat_card.measure.connect(self.start_lineup)
+        self.seat_card.find.connect(self.find_seat)
+        self.seat_card.reset.connect(self.reset_seat)
+        self.add(self.seat_card)
+
         app.config_changed.connect(self.load_if_clean)
         self.load()
 
@@ -672,6 +710,57 @@ class LayoutPage(Page):
         self.view.fit()
         self.refresh_edges()
         self.overlaps_changed()
+        self.refresh_seat()
+
+    # -- where you sit ---------------------------------------------------------
+    def seat_names(self) -> dict[str, str]:
+        many = {d for d in {i.device_id for i in self.items} if sum(1 for i in self.items if i.device_id == d) > 1}
+        return {i.key: f"{i.device_name} ({i.screen['id']})" if i.device_id in many else str(i.device_name)
+                for i in self.items}
+
+    def refresh_seat(self) -> None:
+        """The card under the layout: the saved desk and where its overlaps are aimed from."""
+        from curslink import seat
+
+        desk = None
+        if self.app.has_config() and self.app.role == "host" and self.items:
+            desk = seat.load()
+            if desk is not None and not set(desk["screens"]) <= {i.key for i in self.items}:
+                desk = None  # (a desk with screens that have since gone)
+        try:
+            cfg = self.app.config()
+            self.seat_card.show_desk(desk, seat.config_fits(cfg) if desk is not None else [], self.seat_names(),
+                                     tips=bool(cfg.get("layout", "seat_tips", True)))
+        except Exception:
+            log.warning("couldn't show where you sit", exc_info=True)
+            self.seat_card.hide()
+
+    def aim_seat(self, eye, how: str) -> bool:
+        """Aim the saved overlaps from ``eye`` (the desk's world) and save."""
+        from curslink import seat
+
+        desk = seat.load()
+        if desk is None or self.dirty:
+            return False
+        cfg = self.app.config()
+        seat.apply(cfg, desk, eye, how)
+        self.app.config_saved()
+        self.refresh_seat()
+        return True
+
+    def reset_seat(self) -> None:
+        from curslink import seat
+
+        desk = seat.load()
+        if desk is not None and isinstance(desk.get("scan_eye"), list) and self.aim_seat(desk["scan_eye"], "scan"):
+            self._say_lineup("The overlaps are aimed from where the phone was held for the scan again.")
+
+    def find_seat(self) -> None:
+        """No phone: the Calibrate page's look-at-each-screen pass, which finds the seat too."""
+        self.app.show_window("calibrate")
+        page = self.app.window.pages.get("calibrate") if self.app.window is not None else None
+        if page is not None and getattr(page, "state", None) in ("idle", "done", "error"):
+            page.begin(seat_only=True)
 
     def current_devices(self) -> list[dict]:
         devices: dict[str, dict] = {}
@@ -1434,9 +1523,9 @@ class LayoutPage(Page):
             log.info("line-up passed its checks: saving the layout")
             self.save()
             if not self.dirty:
-                self._say_lineup(text + " It passed its checks, so it's saved.")
+                self._say_lineup(text + " It passed its checks, so it's saved." + seat_note(result, cfg_follows(self)))
                 return
-        text += " Check it and press Save layout."
+        text += seat_note(result) + " Check it and press Save layout."
         if missing:
             text += " Not in the photo, so left as they were: " + ", ".join(names.get(k, k) for k in missing) + "."
         self._say_lineup(text, "warn" if missing else "small")
@@ -1448,6 +1537,10 @@ class LayoutPage(Page):
         self.previewed = set()  # (saved: the service starts again with them)
         if result is None:
             return
+        if getattr(result, "desk", None) is not None:
+            from curslink import seat
+
+            seat.save(result.desk)  # the desk in 3D and where the overlaps are aimed from
         items = {i.key: i for i in self.items}
 
         def unmoved(key: str) -> bool:

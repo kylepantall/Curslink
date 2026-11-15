@@ -462,6 +462,10 @@ async def run_host(cfg: HostConfig) -> None:
         elif line == "head home":
             if head is not None:
                 head.follow.rehome()
+        elif line == "seat back":
+            if head is not None:
+                head.follow.put_back()
+                events.emit("seat", across=0, down=0, back=0, moved=[0, 0, 0])
         elif line == "pick on":
             # The Layout page is calibrating an edge: clicks on other computers are for it.
             router.picker = lambda data: events.emit("picked", **data)
@@ -1360,15 +1364,45 @@ def head_home_path():
     return default_dir() / "head-home.json"
 
 
+def camera_seen_from_seat(device_id: str, head) -> None:
+    """Head tracking has just taken where the head is as home. If a line-up's
+    last step found the eyes with the phone minutes ago (curslink.seat),
+    that's the face at a known place: so it says where this computer's
+    camera is, which a later "Find with the camera" goes by."""
+    from curslink import seat
+
+    desk = seat.load()
+    if desk is None or desk.get("how") != "phone":
+        return
+    try:
+        age = time.time() - time.mktime(time.strptime(str(desk.get("when")), "%Y-%m-%dT%H:%M:%S"))
+    except ValueError:
+        return
+    if not 0 <= age <= 600:
+        return
+    mine = [k for k in desk["screens"] if k.split("/", 1)[0] == device_id]
+    camera = seat.locate_camera(desk, head, mine[0] if mine else None)
+    if camera is not None:
+        desk["camera"] = camera
+        seat.save(desk)
+        log.info("where you sit: this computer's camera placed against the eye point the phone found")
+
+
 def start_head_follow(cfg: HostConfig, mirror, loop: asyncio.AbstractEventLoop, own_camera: bool):
     """``[layout] follow_head`` (experimental): overlaps stay lined up as
     your head moves, by this computer's camera. Needs mirror mode on (it's
     the mirror and the pointer through it that follow)."""
-    if not cfg.follow_head:
+    if not cfg.follow_head and not getattr(cfg, "follow_seat", False):
         return None
     if mirror is None or not cfg.layout.mirror:
         log.info("head tracking is on but mirror mode isn't: nothing to keep lined up")
         return None
+    # ``[layout] follow_seat`` alone: slowly, once you've settled somewhere new.
+    slow = not cfg.follow_head
+
+    def seat_moved(was, now) -> None:
+        events.emit("seat", across=round(now[0]), down=round(now[1]), back=round(now[2]),
+                    moved=[round(n - w) for n, w in zip(now, was)])
     try:
         from curslink.gaze import tracker as tracking
         from curslink.headfollow import HeadFollow
@@ -1377,7 +1411,8 @@ def start_head_follow(cfg: HostConfig, mirror, loop: asyncio.AbstractEventLoop, 
         return None
     follow = HeadFollow(cfg.layout, cfg.device_id, mirror.refresh,
                         busy=lambda: mirror.tuning is not None or mirror.held is not None,
-                        home_path=head_home_path())
+                        home_path=head_home_path(), slow=slow, moved=seat_moved if slow else None,
+                        home_set=lambda at: camera_seen_from_seat(cfg.device_id, at))
     tracking.head_listener = lambda t, at: loop.call_soon_threadsafe(follow.sample, t, at)
     head = HeadCamera(follow, None, None)
 
@@ -1889,6 +1924,7 @@ class Calibrator:
             from curslink.gaze.tracker import HeadPoseTracker as tracker_factory
         self._lock = threading.Lock()
         self._samples: list[tuple[float, float, float]] = []
+        self._heads: list[tuple[float, float, float]] = []  # where the head's been before the camera, mm
         self.latest: tuple[float, float] | None = None
         self.calibration = Calibration()
         self.tracker = tracker_factory(self._on_sample, camera=camera)
@@ -1898,13 +1934,40 @@ class Calibrator:
             self._samples.append((t, yaw, pitch))
             self.latest = (yaw, pitch)
 
+    def _on_head(self, _t: float, head: tuple[float, float, float]) -> None:
+        with self._lock:
+            self._heads = self._heads[-1999:] + [head]
+
+    def head(self) -> tuple[float, float, float] | None:
+        """Where the head has been before the camera, in the middle of all
+        the sightings (curslink.headfollow.mediapipe_head: right, down,
+        away, in mm), or None if it was hardly seen. For curslink.seat."""
+        with self._lock:
+            heads = list(self._heads)
+        if len(heads) < MIN_SAMPLES:
+            return None
+        return tuple(sorted(h[k] for h in heads)[len(heads) // 2] for k in range(3))
+
     def start(self) -> None:
         log.info("calibration: starting camera")
+        try:
+            from curslink.gaze import tracker as tracking
+
+            tracking.head_listener = self._on_head
+        except ImportError:  # (a test's stand-in tracker, without the gaze extra)
+            pass
         self.tracker.start()
 
     def stop(self) -> None:
         log.info("calibration: stopping camera")
         self.tracker.stop()
+        try:
+            from curslink.gaze import tracker as tracking
+
+            if tracking.head_listener == self._on_head:
+                tracking.head_listener = None
+        except ImportError:
+            pass
 
     def wait_for_face(self, timeout: float = 15.0) -> bool:
         deadline = time.monotonic() + timeout
@@ -1919,6 +1982,30 @@ class Calibrator:
             log.warning("calibration: no face within %.0fs", timeout)
         return self.latest is not None
 
+    def _watch(self, seconds: float, settle: float, patience: float) -> list[tuple[float, float]]:
+        """The head's (yaw, pitch) over the next ``seconds`` (longer, up to
+        ``patience`` more, while too few are in)."""
+        start = time.monotonic()
+        with self._lock:
+            self._samples.clear()
+        time.sleep(seconds)
+        deadline = start + seconds + patience
+        while True:
+            with self._lock:
+                samples = [(y, p) for t, y, p in self._samples if t >= start + settle]
+            if len(samples) >= GOOD_SAMPLES or time.monotonic() >= deadline:
+                return samples
+            time.sleep(0.1)
+
+    def look(self, seconds: float = 1.5, settle: float = 0.2, patience: float = 3.0) -> tuple[float, float] | None:
+        """Like :meth:`Calibrator.record`, for something that isn't a screen
+        (the camera itself, for curslink.seat): the head's (yaw, pitch) while
+        looking at it, kept out of the calibration. None if too few samples."""
+        samples = self._watch(seconds, settle, patience)
+        if len(samples) < MIN_SAMPLES:
+            return None
+        return (sum(y for y, _p in samples) / len(samples), sum(p for _y, p in samples) / len(samples))
+
     def record(self, target: Target, seconds: float = 1.5, settle: float = 0.2,
                patience: float = 3.0) -> tuple[float, float] | None:
         """Sample for ``seconds`` while the user looks at ``target``; returns
@@ -1929,16 +2016,7 @@ class Calibrator:
         then, so if too few samples are in after ``seconds`` it keeps going
         for up to ``patience`` more before giving up."""
         start = time.monotonic()
-        with self._lock:
-            self._samples.clear()
-        time.sleep(seconds)
-        deadline = start + seconds + patience
-        while True:
-            with self._lock:
-                samples = [(y, p) for t, y, p in self._samples if t >= start + settle]
-            if len(samples) >= GOOD_SAMPLES or time.monotonic() >= deadline:
-                break
-            time.sleep(0.1)
+        samples = self._watch(seconds, settle, patience)
         if len(samples) < MIN_SAMPLES:
             log.warning("calibration: only %d samples for %s in %.1fs, not recorded", len(samples), target,
                         time.monotonic() - start)

@@ -1890,6 +1890,7 @@ def test_live_line_up_joins_a_pattern_across_an_overlap(desktop, qapp, tmp_path)
     flow.check_settle = 0.0
     flow.check_hold = 0.0
     flow.seam_hold = 0.6  # (5 s for a person to look at the joined blocks: here just long enough to see it happen)
+    flow.seat_step = False  # (the last step, where you sit, has a test of its own)
     _hx, _hy, hw, hh = home.layout_rect()
     _lx, _ly, lw, lh = laptop.layout_rect()
     desk = Desk([(home.key, home.device_id, hw, hh, 600, (0, 0, 0), 0, 0),
@@ -2039,3 +2040,273 @@ def test_layout_page_draws_a_leaning_screen(desktop, qapp):
     laptop.setSelected(True)
     page.spins["x"].setValue(hx + hw + 50)
     assert laptop.lean is None
+
+
+def test_live_line_up_ends_by_finding_where_you_sit(desktop, qapp, tmp_path):
+    """After the pattern step the patterns stay up, the phone goes to the
+    eyes of someone sitting back, and the overlap is aimed from there: saved,
+    with the desk, and shown on the Layout page's card."""
+    import time
+
+    cv2 = pytest.importorskip("cv2")
+    import numpy as np
+    from lineup_desk import Camera, Desk, figure_of_eight, render, true_solution
+
+    from curslink import lineup, seat
+
+    page, home, laptop = _host_with_laptop(desktop)
+    assert page.seat_card.isHidden()  # (no line-up yet)
+    sent = []
+    desktop.service.send = sent.append
+    page.start_lineup()
+    flow = page.lineup
+    flow.check_settle = 0.0
+    flow.check_hold = 0.0
+    flow.seam_hold = 0.3
+    _hx, _hy, hw, hh = home.layout_rect()
+    _lx, _ly, lw, lh = laptop.layout_rect()
+    desk = Desk([(home.key, home.device_id, hw, hh, 600, (0, 0, 0), 0, 0),
+                 (laptop.key, "laptop", lw, lh, 340, (40, 160, -240), 0, 15)])
+    home_key, laptop_key = home.key, laptop.key
+    page._on_service_event({"event": "lineup_sizes", "devices": {
+        home.device_id: [{"x": 0, "y": 0, "width": hw, "height": hh, "width_mm": 600.0, "height_mm": 600.0 * hh / hw}],
+        "laptop": [{"x": 0, "y": 0, "width": lw, "height": lh, "width_mm": 340.0, "height_mm": 340.0 * lh / lw}]}})
+    places = figure_of_eight(30, (0, 0, -900), reach=(15, 10, 8), aim=(0, 60, 0))
+    lens = np.array((-20.0, -30.0, -1230.0))  # sitting back, the phone on the bridge of the nose
+    rng = np.random.default_rng(5)
+    cam = Camera()
+    titles, hints, answer, seated_at = [], [], None, None
+    for seq in range(200):
+        at, target, roll = places[seq % len(places)]
+        if flow.seat_shown:
+            seated_at = seated_at if seated_at is not None else seq
+            # (a second or so getting there, then held)
+            k = min(1.0, (seq - seated_at) / 4)
+            at = np.array(at) + (lens - np.array(at)) * k + rng.normal(0, 2, 3) * (k == 1.0)
+            showing, lines, patterns = lineup.check_plan(flow.planned), None, None
+        else:
+            after = flow.sent_lines is not None or flow.sent_patterns is not None
+            showing = flow.seam_showing or (lineup.check_plan(flow.planned) if after else flow.planned)
+            lines, patterns = None if flow.sent_patterns is not None else flow.sent_lines, flow.sent_patterns
+        frame = render(desk, showing, cam, cam.look(at, target, roll), seed=seq, shown=seq, lines=lines,
+                       patterns=patterns)
+        path = tmp_path / f"frame{seq}.jpg"
+        path.write_bytes(cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])[1].tobytes())
+        page._on_service_event({"event": "lineup_photo", "id": flow.id, "device": "phone", "path": str(path),
+                                "seq": seq, "focal": 1200.0})
+        deadline = time.monotonic() + 20
+        answer = None
+        while answer is None and time.monotonic() < deadline:
+            qapp.processEvents()
+            time.sleep(0.005)
+            answer = next((json.loads(c[len("lineup_live "):]) for c in sent
+                           if c.startswith("lineup_live ") and json.loads(c[len("lineup_live "):]).get("seq") == seq),
+                          None)
+        assert answer is not None
+        titles.append(flow.dialog.title.text())
+        hints.append(answer["hint"])
+        if seated_at is not None and seq == seated_at + 1:
+            # the last step, which can be left out
+            assert flow.dialog.use_button.text() == "Skip this step" and "4 Your seat" in flow.dialog.steps.text()
+            assert "✓ Pattern" in flow.dialog.steps.text()
+            assert not answer.get("done") and not answer.get("buzz")
+            time.sleep(0.05)
+        if answer.get("done"):
+            break
+        if seated_at is not None:
+            time.sleep(0.12)  # (a phone's frame rate: held still for a second is a few frames)
+    assert seated_at is not None and answer.get("done") and answer.get("buzz")
+    assert "Now show me where you sit" in titles and titles.index("Now show me where you sit") > titles.index(
+        "Joining up the overlap")
+    assert any("bridge of your nose" in h for h in hints)
+    # the phone is told how far back that is: 1230 mm to the lens and 20 more to the eyes
+    assert answer["hint"].startswith("Got you: 12") and answer["hint"].endswith("cm from screen 1")
+    # the screens went back to their check patterns alone for it
+    told = [json.loads(c[len("lineup "):]) for c in sent if c.startswith("lineup {") and '"devices"' in c]
+    entry = told[-1]["devices"]["laptop"]["screens"][0]
+    assert entry["lines"] == [] and "pattern" not in entry
+    found = flow.live.seat
+    assert found.moved and found.eye is not None
+    deadline = time.monotonic() + 30
+    while page.lineup is not None and time.monotonic() < deadline:
+        qapp.processEvents()
+        time.sleep(0.01)
+    assert page.lineup is None and not page.dirty
+    note = page.lineup_note.text()
+    assert "so it's saved" in note and "aimed at where you sit, 12" in note and "cm back" in note
+    # saved: the desk, and the overlap as seen from the seat, not from where the phone was held for the scan
+    saved = seat.load()
+    assert saved["how"] == "phone" and saved["moved_mm"] > 20
+    ref = desk.screens[home_key]
+    eye_mm = ref["r"] @ (np.array(saved["eye"]) * ref["mm"]) + ref["t"]
+    assert eye_mm == pytest.approx(lens - (0, 0, seat.LENS_TO_EYE_MM), abs=25)
+    fit, = desktop.config().fits()
+    truth = lineup._Desk(true_solution(desk, home_key, eye_mm)).lean(home_key, laptop_key)
+    scan = lineup._Desk(true_solution(desk, home_key, places[0][0])).lean(home_key, laptop_key)
+    quad = np.array([float(v) for v in fit["quad"]])
+    assert np.abs(quad - truth["quad"]).max() < 15 < np.abs(quad - scan["quad"]).max()
+    # and the card under the layout says so
+    card = page.seat_card
+    assert not card.isHidden() and "Measured with your phone" in card.source.text()
+    assert card.summary["distance"][0] in ("124 cm", "125 cm", "126 cm")
+    assert "further back than where the phone was held" in card.summary["distance"][1]
+    assert card.tiles["moved"][0].isVisibleTo(card) and not card.reset_button.isHidden()
+    card.side.grab()  # the side view paints
+    assert card.side.shape["front"] is not None and card.side.shape["scan"] is not None
+    # "Aim from the scan again" puts it back, and says so
+    card.reset_button.click()
+    qapp.processEvents()
+    assert seat.load()["how"] == "scan" and "aimed from where the phone was held" in page.lineup_note.text()
+    back = np.array([float(v) for v in desktop.config().fits()[0]["quad"]])
+    assert np.abs(back - scan["quad"]).max() < 15
+    assert page.seat_card.reset_button.isHidden() and "Not measured yet" in page.seat_card.source.text()
+
+
+def _saved_desk(desktop, how="scan"):
+    """A layout with a laptop in front of the host's screen, and the desk a line-up would have left for it."""
+    from lineup_desk import Desk, true_solution
+
+    from curslink import lineup, seat
+
+    page, home, laptop = _host_with_laptop(desktop)
+    _hx, _hy, hw, hh = home.layout_rect()
+    _lx, _ly, lw, lh = laptop.layout_rect()
+    desk = Desk([(home.key, home.device_id, hw, hh, 600, (0, 0, 0), 0, 0),
+                 (laptop.key, "laptop", lw, lh, 340, (40, 160, -240), 0, 15)])
+    layout = [{"key": i.key, "device": i.device_id, "x": i.layout_rect()[0], "y": i.layout_rect()[1],
+               "width": i.layout_rect()[2], "height": i.layout_rect()[3],
+               "width_mm": desk.sizes()[i.key][0], "height_mm": desk.sizes()[i.key][1]} for i in (home, laptop)]
+    result = lineup.arrange(layout, true_solution(desk, home.key, (0, 0, -700)))
+    page.apply_lineup(result)
+    page.save()
+    assert not page.dirty and seat.load() is not None
+    if how != "scan":
+        d = seat.load()
+        seat.save({**d, "how": how})
+    return desktop.window.pages["layout"], desk, home.key, laptop.key
+
+
+def test_the_seat_card_and_its_settings(desktop, qapp):
+    pytest.importorskip("cv2")
+    from curslink import seat
+
+    page, _desk, home_key, _laptop_key = _saved_desk(desktop)
+    card = page.seat_card
+    assert not card.isHidden() and "Not measured yet" in card.source.text() and card.reset_button.isHidden()
+    assert card.summary["main"] == home_key and card.summary["distance"][0] == "70 cm"
+    assert card.tips.count() >= 1 and not card.tips_title.isHidden()
+    settings = desktop.window.pages["settings"]
+    cfg = desktop.config()
+    cfg.set("layout", "mirror", True)
+    cfg.save()
+    desktop.config_saved(restart=False)
+    settings.load()
+    assert not settings.seat_tips_row.isHidden() and settings.seat_tips.isChecked()
+    assert not settings.follow_seat_row.isHidden() and not settings.follow_seat.isChecked()
+    assert settings.seat_back.isHidden()
+    settings.seat_tips.click()
+    qapp.processEvents()
+    assert desktop.config().get("layout", "seat_tips") is False
+    assert page.seat_card.tips.count() == 0 and page.seat_card.tips_title.isHidden() and not page.seat_card.isHidden()
+    settings.follow_seat.click()
+    qapp.processEvents()
+    assert desktop.config().get("layout", "follow_seat") is True
+    settings.load()
+    assert not settings.seat_back.isHidden()
+    from curslink.config import _follow_head
+
+    assert _follow_head(desktop.config().raw().get("layout", {}), "follow_seat") is True
+    sent = []
+    desktop.service.send = sent.append
+    settings.seat_back.click()
+    assert sent == ["seat back"]
+    # the host says it re-aimed: a note from the tray, with how far you moved
+    said = []
+    desktop.tray.say = lambda title, text: said.append((title, text))
+    desktop.service.event.emit({"event": "seat", "across": 0, "down": 0, "back": 140, "moved": [0, 0, 140]})
+    desktop.service.event.emit({"event": "seat", "across": 0, "down": 0, "back": 0, "moved": [0, 0, -140]})  # put back
+    assert len(said) == 1 and said[0][0] == "You've moved back 14 cm" and "Put it back" in said[0][1]
+    # a desk whose screens have since gone isn't shown
+    d = seat.load()
+    seat.save({**d, "screens": {**d["screens"], "gone/main": d["screens"][home_key]}})
+    page.refresh_seat()
+    assert page.seat_card.isHidden()
+
+
+def test_calibrating_finds_where_you_sit_without_a_phone(desktop, qapp, monkeypatch):
+    """A desk from a line-up adds a first step to calibration, looking at the
+    camera; the pass then says where you sit and aims the overlaps from there."""
+    pytest.importorskip("cv2")
+    import math
+
+    from curslink import seat
+    from curslink.gaze.zones import Calibration, Target
+    from curslink.gui.pages import calibrate
+
+    page_l, desk, home_key, laptop_key = _saved_desk(desktop)
+    page = desktop.window.pages["calibrate"]
+    monkeypatch.setattr(calibrate, "in_background", lambda *a, **k: None)  # (no camera here)
+    page.begin()
+    assert page.desk is not None and page.targets[0][1] == calibrate.CAMERA_NAME and len(page.targets) == 3
+    page.state = "ready"
+    page.show_state()
+    assert page.prompt.text() == "Look straight at the camera" and "point your nose" in page.prompt_detail.text()
+    assert page.list_card.rows.count() == 3
+    page.cancel()
+    page.begin()
+    assert [n for _t, n in page.targets].count(calibrate.CAMERA_NAME) == 1  # (not added twice)
+    page.cancel()
+
+    d = seat.load()
+    mm = d["mm"]
+    camera = seat.assumed_camera(d, home_key)
+    ref = desk.screens[home_key]
+    eye = list(ref["r"].T @ ([-20.0, -30.0, -1100.0] - ref["t"]) / ref["mm"])
+    head = tuple(sum(camera["r"][a][i] * (eye[i] - camera["at"][i]) for i in range(3)) * mm for a in range(3))
+
+    def look(target):
+        v = [target[i] - eye[i] for i in range(3)]
+        n = math.sqrt(sum(c * c for c in v))
+        return math.degrees(math.atan2(v[0], v[2])), math.degrees(math.asin(v[1] / n))
+
+    class FakeCal:
+        calibration = Calibration()
+
+        def head(self):
+            return head
+
+    for key in (home_key, laptop_key):
+        yaw, pitch = look(seat.centre(d["screens"][key]))
+        for _ in range(5):
+            FakeCal.calibration.add(Target(*key.split("/", 1)), yaw, pitch)
+    before = [float(v) for v in desktop.config().fits()[0]["quad"]]
+    page.begin(seat_only=True)
+    assert page.seat_only and page.desk is not None
+    page.results[calibrate.CAMERA_NAME] = look(camera["at"])
+    said = page.finish_seat(FakeCal())
+    assert said.startswith("You sit about 1") and "aimed from there now" in said and "rougher than the phone" in said
+    new = seat.load()
+    assert new["how"] == "camera" and math.dist(new["eye"], eye) * mm < 60
+    assert [float(v) for v in desktop.config().fits()[0]["quad"]] != pytest.approx(before, abs=5)
+    page.cancel()
+    desktop.config_changed.emit()
+    assert "Found with this computer's camera" in page_l.seat_card.source.text()
+    # no face seen: nothing found, nothing changed
+    page.desk = seat.load()
+
+    class NoFace(FakeCal):
+        def head(self):
+            return None
+
+    assert "wasn't found" in page.finish_seat(NoFace())
+    # once the phone has found the eyes this pass places the camera against them instead
+    seat.save({**seat.load(), "how": "phone"})
+    page.desk = seat.load()
+    assert "already measured with the phone" in page.finish_seat(FakeCal())
+    kept = seat.load()
+    assert kept["how"] == "phone" and kept["eye"] == new["eye"] and kept["camera"]["how"] == "found"
+    assert kept["camera"]["at"] == pytest.approx([new["eye"][i] - (eye[i] - camera["at"][i]) for i in range(3)], abs=1e-3)
+    # with no line-up to go by, "Find with the camera" says what's needed first
+    seat.seat_path().unlink()
+    page.begin(seat_only=True)
+    assert page.state == "error" and "Line up your screens with the phone camera first" in page.message

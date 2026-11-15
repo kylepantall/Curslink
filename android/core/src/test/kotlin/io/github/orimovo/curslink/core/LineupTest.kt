@@ -81,6 +81,10 @@ class LineupTest {
         assertTrue(seen.last().done)
         assertNull(seen.last().seq)
         assertNull(s.waiting)
+        assertTrue(!seen.last().buzz)
+        // The last step ("where you sit"): the phone is at a face, so it's told to shake when it's found.
+        s.handle(Frames.decode("""{"t":"lineup_live","id":"L1","progress":1,"hint":"Got you: 95 cm from screen 1","screens":[],"buzz":true,"done":true}"""))
+        assertTrue(seen.last().buzz && seen.last().done)
         frames.clear()
         s.done("L1")
         assertEquals("lineup_photo", frames.single().first)

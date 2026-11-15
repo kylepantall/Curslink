@@ -162,6 +162,31 @@ the Layout page measures it (`curslink/lineup.py`, `lineup_scene.py`,
 - **A line-up that passed is saved** (`LayoutPage.apply_lineup`,
   `lineup_passed`): the joins agreed and every overlap's pattern joined,
   nothing was missing and nothing else was waiting to be saved.
+- **Where you sit (`curslink/seat.py`).** A live line-up's `Result.desk`
+  is the solved desk as plain data (each screen's pose in the reference's
+  pixels, a unit's size in mm, the eye the fits are aimed from), saved as
+  `seat.json` beside the pairing files when the layout is. The scan takes
+  the phone's first place for the eye; the last step (`Live.start_seat`,
+  `seat.PhoneSeat`) leaves the check patterns up and places the phone
+  again (`Check.locate`) once it's been held still somewhere new for a
+  second (or where it was for six), 20 mm behind the lens. `seat.reaim`
+  moves each fit by the *change* in how the desk says its front screen is
+  seen (`_Desk.lean` from the old eye and the new), so what the pattern
+  step corrected stays corrected; without numpy it falls back on
+  `Fit.seen_from` (flat only). `seat.summary` is the Layout page's card
+  (`gui/seatcard.py`): distances and suggestions from placeholder targets
+  (top edge at eye level or a little below, the setup within 35 degrees
+  each side, a curved screen's centre line, what the front screen hides).
+  Without a phone the Calibrate page adds a first step, looking at the
+  camera: `seat.from_looks` places the eye along the camera's line to the
+  face (MediaPipe's distance, from the face's size) by how far the head
+  turns between the camera and each screen, less a fitted share (eyes
+  turn too). The camera is taken to be at the top of this computer's
+  screen unless a phone-found eye point has placed it
+  (`seat.locate_camera`, noted when head tracking first takes home after a
+  line-up). `[layout] follow_seat` is `HeadFollow(slow=True)`: no live
+  following, but 30 s settled somewhere new aims the fits from there once
+  (a `seat` event, the tray says so; `seat back` puts it back).
 - **Head tracking (experimental, `[layout] follow_head`).** The fit also
   records `eye` (where it was seen from, in the screen behind's pixels and
   that far in front of it), `depth` (how far in front each corner is) and

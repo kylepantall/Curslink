@@ -124,8 +124,27 @@ head with this computer's camera and keeps the overlap lined up as you
 move.) The pattern step also measures the frame (bezel) round the screen
 in front: with **Settings > Overlapping screens > Allow for the frame round
 the screen in front** on, that screen shows everything it and its frame
-hide of the one behind, so a line of text never runs under the frame. A
-line-up that passes these checks is saved by itself; one that doesn't
+hide of the one behind, so a line of text never runs under the frame.
+
+The very last step finds **where you sit**. The phone was held out in front
+of you for the scan, and with a big setup you sit further back than that,
+so the overlap would be aimed at the wrong place. The patterns stay up a
+few seconds longer: sit back the way you normally sit and rest the top of
+the phone on the bridge of your nose, camera facing the screens. It buzzes
+when it has found you, and every overlap is aimed from your eyes instead
+(**Skip this step** leaves them as scanned). Under the layout, a **Where
+you sit** card then shows how far back you are, your eye level against the
+main screen's top edge, how much the screen in front hides, and what moving
+something would change (switch the suggestions off under **Settings >
+Overlapping screens**). No phone to hand? **Find with the camera…** on that
+card looks for you with this computer's camera instead: look at the camera,
+then at each screen (it's the gaze calibration pass, with one step added);
+that's rougher than the phone. **Settings > Overlapping screens > Keep
+overlaps aimed at where I sit** has the camera notice when you've settled
+somewhere new for half a minute and aims the overlap from there, telling
+you when it does.
+
+A line-up that passes these checks is saved by itself; one that doesn't
 (or a single photo) is left for you to check and press **Save layout**.
 Without the
 app, take one photo of the desk with any camera and choose it there: that
