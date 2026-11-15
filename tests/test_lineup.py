@@ -196,11 +196,31 @@ def test_marker_bits_match_opencv():
 def test_plan_gives_each_screen_its_own_markers():
     planned = lineup.plan([{"key": "a/main", "width": 1920, "height": 1080},
                            {"key": "b/main", "width": 1080, "height": 1920}])
-    assert planned["a/main"]["slot"] == 0 and planned["b/main"]["slot"] == 1
+    assert planned["a/main"]["slot"] == 0 and planned["b/main"]["slot"] == len(planned["a/main"]["sets"])
     assert len(planned["a/main"]["markers"]) == lineup.PER_SCREEN
-    for p in planned.values():
-        for _bits, x, y, w, h in p["markers"]:
-            assert 0 <= x and x + w <= 1 and 0 <= y and y + h <= 1
+    assert planned["a/main"]["sets"][0] == planned["a/main"]["markers"]
+    bits = set()
+    for key, p in planned.items():
+        wide, high = (1920, 1080) if key == "a/main" else (1080, 1920)
+        assert 2 <= len(p["sets"]) <= lineup.MAX_SETS
+        for k, markers in enumerate(p["sets"]):
+            assert len(markers) == lineup.PER_SCREEN
+            boxes = []
+            for b, x, y, w, h in markers:
+                assert 0 <= x and x + w <= 1 and 0 <= y and y + h <= 1
+                bits.add(b)
+                # with its white border, in pixels
+                boxes.append((x * wide - w * wide / 6, y * high - h * high / 6, w * wide * 4 / 3, h * high * 4 / 3))
+            # No two of a set touch (they show together).
+            for i, (ax, ay, aw, ah) in enumerate(boxes):
+                for bx, by, bw, bh in boxes[i + 1:]:
+                    assert ax + aw <= bx or bx + bw <= ax or ay + ah <= by or by + bh <= ay, (key, k)
+        # After the first, the sets reach the middle of the screen too.
+        assert any(0.3 < x + w / 2 < 0.7 and 0.3 < y + h / 2 < 0.7 for m in p["sets"][1:] for _b, x, y, w, h in m)
+    assert len(bits) == sum(len(p["sets"]) for p in planned.values()) * lineup.PER_SCREEN  # every one its own
+    # Many screens: fewer sets each, never more ids than there are.
+    many = lineup.plan([{"key": f"s{i}", "width": 1920, "height": 1080} for i in range(12)])
+    assert sum(len(p["sets"]) for p in many.values()) <= lineup.MAX_SCREENS
     # Square on the screen itself.
     _b, _x, _y, w, h = planned["a/main"]["markers"][0]
     assert w * 1920 == pytest.approx(h * 1080, rel=1e-3)
@@ -222,7 +242,7 @@ def test_live_scan_lines_up_an_angled_desk():
         if live.aligned:
             break
     assert live.aligned and live.hint() == "Lined up" and live.progress() == 1
-    assert "Move the phone slowly in a figure of 8" in hints
+    assert "Hold the phone steady: the patterns are measuring each screen" in hints
     assert set(live.states().values()) == {"locked"}
     assert result.views >= lineup.MIN_VIEWS
     # The same layout as the desk itself gives, seen from where the scan began.
@@ -271,11 +291,101 @@ def test_live_scan_with_a_real_phones_noise_still_ends_soon(monkeypatch):
             break
     assert live.aligned, (frames, live.result.errors if live.result else None)
     assert frames <= 45
-    # Less sure than a clean scan, and it says so; but still the desk's layout.
-    assert max(live.result.errors.values()) > lineup.ALIGNED * 1440
+    # Still the desk's layout.
     true = lineup.arrange(layout, true_solution(DESK3D, "host/main", places[0][0]))
     for key, (x, y) in true.positions.items():
         assert live.result.positions[key] == pytest.approx((x, y), abs=40), key
+
+
+# Kyle's desk: a curved 34" ultrawide in the middle, a 16" laptop (the host)
+# in front of its bottom left corner and turned in, a MacBook in front of its
+# right end.
+CURVED_DESK = Desk([
+    ("pc/main", "pc", 2880, 1620, 345, (-430, 170, -250), 25, 20),
+    ("mac/screen2", "mac", 3440, 1440, 800, (0, 0, 0), 0, 0, 0.53),
+    ("mac/main", "mac", 1512, 982, 302, (440, 130, -200), -20, 15),
+])
+
+
+def test_a_phone_held_nearly_still_lines_up_a_desk_with_a_curved_monitor(monkeypatch):
+    """The patterns move about each screen, so a phone that only wobbles in
+    the hand gets points all over every screen: enough, with the monitors'
+    sizes, to place them and to find the ultrawide's curve."""
+    import numpy as np
+
+    from lineup_desk import Camera, render
+
+    layout = CURVED_DESK.layout()
+    for s in layout:
+        s["width_mm"], s["height_mm"] = CURVED_DESK.sizes()[s["key"]]
+    planned = lineup.plan([{"key": s["key"], "width": s["width"], "height": s["height"]} for s in layout])
+    rng = np.random.default_rng(5)
+    find = lineup.find_markers
+    monkeypatch.setattr(lineup, "find_markers",
+                        lambda gray, thorough=True: {k: q + rng.normal(0, 1.0, q.shape) for k, q in find(gray, thorough).items()})
+    live = lineup.Live(layout, planned, "pc/main")
+    places = figure_of_eight(30, (0, -60, -900), reach=(12, 8, 6), aim=(0, 120, -50), seed=0)
+    hints = set()
+    for n in range(60):
+        at, target, roll = places[n % len(places)]
+        cam = Camera(focal=1180 * (1 + rng.normal(0, 0.006)), k1=0.04, k2=-0.02, centre=(812, 588))
+        live.frame(render(CURVED_DESK, planned, cam, cam.look(at, target, roll), blur=1.2, seed=n, shown=n), 1180)
+        live.update()
+        hints.add(live.hint())
+        if live.aligned:
+            break
+    assert live.aligned, (n, live.result.errors if live.result else None)
+    assert n < 40
+    assert "Move the phone slowly from side to side" not in hints  # every monitor said its size
+    result = live.result
+    assert live.scene.bends["mac/screen2"] == pytest.approx(0.53, abs=0.03)
+    assert abs(live.scene.bends["mac/main"]) < 0.08
+    true = lineup.arrange(layout, true_solution(CURVED_DESK, "pc/main", places[0][0]))
+    for key, (x, y) in true.positions.items():
+        assert result.positions[key] == pytest.approx((x, y), abs=30), key
+    assert [(f["behind"], f["front"]) for f in result.fits] == [("mac/screen2", "pc/main")]
+    assert result.fits[0]["scale"] == pytest.approx(true.fits[0]["scale"], rel=0.02)
+    assert (result.fits[0]["x"], result.fits[0]["y"]) == pytest.approx((true.fits[0]["x"], true.fits[0]["y"]), abs=30)
+
+
+def test_a_curved_monitor_taken_for_flat_comes_out_wrong(monkeypatch):
+    """What 0.4.91 did: without the bend, the same desk doesn't fit."""
+    from curslink import lineup_scene
+    from lineup_desk import Camera, render
+
+    layout = CURVED_DESK.layout()
+    for s in layout:
+        s["width_mm"], s["height_mm"] = CURVED_DESK.sizes()[s["key"]]
+    planned = lineup.plan([{"key": s["key"], "width": s["width"], "height": s["height"]} for s in layout])
+    places = figure_of_eight(8, (0, -60, -900), reach=(200, 110, 90), aim=(0, 120, -50), seed=0)
+    cam = Camera()
+    frames = [render(CURVED_DESK, planned, cam, cam.look(at, target, roll), seed=n, shown=n)
+              for n, (at, target, roll) in enumerate(places)]
+
+    def fit(sigma):
+        monkeypatch.setattr(lineup_scene, "BEND_SIGMA", sigma)
+        live = lineup.Live(layout, planned, "pc/main")
+        for frame in frames:
+            live.frame(frame, 1180)
+            live.update()
+        return live.result.rms
+
+    assert fit(1e-6) > 3 * fit(0.1)
+
+
+def test_seen_against_a_curved_screen():
+    """A point on a curved screen's glass is seen at that point of it, from anywhere in front."""
+    import numpy as np
+
+    from curslink.lineup_scene import ScreenPose, project_from
+
+    sp = ScreenPose("s", 3440, 1440, np.eye(3), np.array([100.0, 50.0, 20.0]), 1.5, bend=0.6)
+    uv = np.array([(0, 0), (3440, 1440), (1720, 700), (400, 1300), (3000, 100)], float)
+    for eye in ((2000.0, 500.0, -4000.0), (-800.0, -900.0, -2500.0)):
+        assert project_from(np.array(eye), sp, sp.at(uv)) == pytest.approx(uv, abs=0.5)
+    # Its middle is behind the line between its side edges, by the sagitta.
+    assert sp.at([(1720, 0)])[0][2] - 20.0 == pytest.approx(1.5 * 3440 / 0.6 * (1 - np.cos(0.3)), rel=1e-6)
+    assert sp.at([(0, 0)])[0] == pytest.approx([100.0, 50.0, 20.0])
 
 
 def test_live_scan_says_which_screen_is_missing():

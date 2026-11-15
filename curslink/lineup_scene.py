@@ -8,8 +8,11 @@ a small screen that's near from a big one that's far.
 
 So this is the measuring done properly, as a camera calibration is:
 
-* Each screen is a flat rectangle somewhere in space: a rotation, a place
-  and a size (how big one of its pixels is, against the reference screen's).
+* Each screen is a rectangle somewhere in space: a rotation, a place, a
+  size (how big one of its pixels is, against the reference screen's) and
+  a bend (a curved monitor is an arc of a cylinder about an upright axis;
+  0 for a flat one). The bend is found like everything else: a curved
+  ultrawide taken for flat puts its middle 5 cm from where it is.
   The reference screen is the world: its top left is the origin, x runs
   along its top edge, y down its left edge, z into it, in its own pixels.
 * The camera is a pinhole with a focal length, a principal point and two
@@ -21,7 +24,7 @@ So this is the measuring done properly, as a camera calibration is:
   they were seen: a bundle adjustment (Levenberg-Marquardt with a Huber
   loss, so a misread corner pulls like a far smaller one).
 
-Why moving the camera matters (the figure of 8): seen from one place, a
+Why moving the camera matters (where a monitor doesn't say its size): seen from one place, a
 screen twice the size and twice as far looks the same. Seen from two, the
 nearer one shifts more against the others (parallax), which fixes how far
 each screen is and so how big; and the tilted views are what fix the
@@ -38,7 +41,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-MAX_FRAMES = 40  # views kept; beyond this the least different one makes way
+MAX_FRAMES = 48  # views kept; beyond this the least different one makes way
 MIN_MARKERS = 2  # patterns of a screen that must agree for it to count in a frame
 # A frame is a new view when the screens' corners moved this far (a share of
 # the frame's diagonal) from every view kept so far.
@@ -50,6 +53,28 @@ SIZE_SIGMA = 0.03
 # Without a size or any parallax, a screen is taken to stand near the
 # reference screen's plane: within about this many reference widths.
 DEPTH_SIGMA = 0.6
+# A screen is taken to be flat until its patterns say otherwise. The bend is
+# the angle its width curves through, in radians: a 34" 1500R monitor's is
+# about 0.53, a 1000R one's 0.8.
+BEND_SIGMA = 0.1
+# Patterns on a curved screen don't lie on one homography: seen from above
+# or below, the ones in the middle are off the line between the corners, by
+# up to this share of the frame's long side.
+CURVED = 0.03
+
+
+def bent(t: np.ndarray, bend: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """A curved screen's shape: for points ``t`` of the way across it (0 to
+    1) and the angle ``bend`` its width curves through, how far along the
+    line between its side edges and how far back from it each point is, as
+    shares of the screen's width along the glass. Flat: ``(t, 0)``. A
+    positive bend curves the sides towards the person in front."""
+    t = np.asarray(t, np.float64) - 0.5
+    c = np.asarray(bend, np.float64)
+    x = 0.5 * np.sinc(c / 2 / np.pi) + t * np.sinc(t * c / np.pi)
+    a, b = (0.5 + t) / 2, (0.5 - t) / 2
+    z = 2 * c * a * b * np.sinc(c * a / np.pi) * np.sinc(c * b / np.pi)
+    return x, z
 
 
 # -- rotations ------------------------------------------------------------------
@@ -132,9 +157,10 @@ class Sighting:
     markers: int  # how many patterns those corners are of (4 corners each)
     h: np.ndarray  # the homography uv -> xy that fits them
     rms: float  # how well, in the frame's pixels
+    sets: frozenset = frozenset()  # which of the screen's sets of patterns these are (they change)
 
 
-def sight(key: str, marker_uv: list, marker_xy: list, tolerance: float) -> Sighting | None:
+def sight(key: str, marker_uv: list, marker_xy: list, tolerance: float, curved: float = 0.0) -> Sighting | None:
     """A screen's sighting from its patterns read in a frame, without the
     ones that don't agree with the rest (a misread pattern, a reflection).
 
@@ -142,7 +168,8 @@ def sight(key: str, marker_uv: list, marker_xy: list, tolerance: float) -> Sight
     the screen and in the frame. Every pair of patterns proposes where the
     screen is (a homography from their 8 corners); the proposal most patterns
     agree with, to within ``tolerance`` px, wins. None if fewer than
-    :data:`MIN_MARKERS` agree.
+    :data:`MIN_MARKERS` agree. ``curved``: how far off a flat fit the
+    patterns of a curved screen may be (px).
     """
     n = len(marker_uv)
     if n < MIN_MARKERS:
@@ -179,6 +206,13 @@ def sight(key: str, marker_uv: list, marker_xy: list, tolerance: float) -> Sight
         if again == best:
             break
         best = again
+    if len(best) < n and curved > tolerance and h_all is not None:
+        # A curved screen's patterns agree only roughly on a flat fit: take
+        # all that do (the solve works out the curve, and a misread corner
+        # among them pulls little there).
+        rough = [i for i in range(n) if np.abs(apply_homography(h_all, uv[i]) - xy[i]).max() <= curved]
+        if len(rough) > len(best):
+            best = rough
     a, b = np.concatenate([uv[i] for i in best]), np.concatenate([xy[i] for i in best])
     h = fit_homography(a, b)
     if h is None:
@@ -239,7 +273,10 @@ class Frame:
 @dataclass
 class ScreenPose:
     """Where a screen is: a point (u, v) of it, in its pixels, is at
-    ``r @ (scale * (u, v, 0)) + t`` in the world (the reference's pixels)."""
+    ``r @ (scale * (u, v, 0)) + t`` in the world (the reference's pixels),
+    if it's flat. A curved one (``bend``, see :func:`bent`) has its four
+    corners in that same plane, ``t`` its top left one, and its middle
+    behind it."""
 
     key: str
     width: float
@@ -249,10 +286,20 @@ class ScreenPose:
     scale: float
     views: int = 0  # the frames it was seen in
     error: float = 0.0  # how unsure its place still is, in reference pixels (1 sigma)
+    bend: float = 0.0  # the angle its width curves through (0: flat)
 
     def at(self, uv) -> np.ndarray:
         uv = np.atleast_2d(np.asarray(uv, np.float64))
-        return (uv * self.scale) @ self.r[:, :2].T + self.t
+        if not self.bend:
+            return (uv * self.scale) @ self.r[:, :2].T + self.t
+        x, z = bent(uv[:, 0] / self.width, self.bend)
+        local = np.column_stack([x * self.width, uv[:, 1], z * self.width]) * self.scale
+        return local @ self.r.T + self.t
+
+    @property
+    def chord(self) -> float:
+        """Its width in a straight line from side to side, in its pixels."""
+        return self.width * float(np.sinc(self.bend / 2 / np.pi))
 
     def corners(self) -> np.ndarray:
         """Top left, top right, bottom right, bottom left, in the world."""
@@ -312,6 +359,7 @@ class Scene:
         self.frames: list[Frame] = []
         self.intr: np.ndarray | None = None  # f, cx, cy, k1, k2
         self.poses: dict[str, tuple[np.ndarray, np.ndarray, float]] = {}
+        self.bends: dict[str, float] = {}
         self.cov: dict[str, np.ndarray] = {}
         self.sigma = 1.0
         self.dropped = 0
@@ -327,24 +375,31 @@ class Scene:
         """How far a pattern may be from where the others put it, in frame px."""
         return max(2.5, 0.004 * self.long_side)
 
+    @property
+    def curved(self) -> float:
+        """...and how far the patterns of a curved screen may be off a flat fit."""
+        return CURVED * self.long_side
+
     def _signature(self, frame: Frame) -> dict[str, np.ndarray]:
         out = {}
         for key, s in frame.sightings.items():
             w, h = self.dims[key]
-            out[key] = apply_homography(s.h, np.array([(0, 0), (w, 0), (w, h), (0, h)], np.float64))
+            out[key] = (apply_homography(s.h, np.array([(0, 0), (w, 0), (w, h), (0, h)], np.float64)), s.sets)
         return out
 
     def _distance(self, a: dict, b: dict) -> float:
         common = [k for k in a if k in b]
         if not common or set(a) != set(b):
             return 1.0  # other screens in view: another view altogether
+        if any(a[k][1] != b[k][1] for k in common):
+            return 1.0  # the same place, but the screens are showing other patterns: more to go on
         diag = float(np.hypot(*self.image_size))
-        return float(np.mean([np.linalg.norm(a[k] - b[k], axis=1).mean() for k in common])) / diag
+        return float(np.mean([np.linalg.norm(a[k][0] - b[k][0], axis=1).mean() for k in common])) / diag
 
     def add(self, sightings: list[Sighting]) -> bool:
         """Take a frame's sightings; True if it was kept as a new view."""
         ok = {s.key: s for s in sightings
-              if s.key in self.dims and s.markers >= MIN_MARKERS and s.rms <= self.tolerance}
+              if s.key in self.dims and s.markers >= MIN_MARKERS and s.rms <= max(self.tolerance, self.curved / 2)}
         if not ok:
             return False
         frame = Frame(ok, first=not self.frames and not self.started)
@@ -509,10 +564,13 @@ class Scene:
         return keys, frames, np.concatenate(fi), np.concatenate(si), np.concatenate(uv), np.concatenate(xy)
 
     @staticmethod
-    def _project(intr, rc, tc, rs, ts, ss, fi, si, uv):
+    def _project(intr, rc, tc, rs, ts, ss, bs, ws, fi, si, uv):
         r = rs[si]
         s = ss[si]
-        xw = r[:, :, 0] * (uv[:, :1] * s[:, None]) + r[:, :, 1] * (uv[:, 1:] * s[:, None]) + ts[si]
+        w = ws[si]
+        x, z = bent(uv[:, 0] / w, bs[si])
+        xw = (r[:, :, 0] * (x * w * s)[:, None] + r[:, :, 1] * (uv[:, 1:] * s[:, None])
+              + r[:, :, 2] * (z * w * s)[:, None] + ts[si])
         xc = np.einsum("nij,nj->ni", rc[fi], xw) + tc[fi]
         z = np.where(xc[:, 2] < 1e-6, 1e-6, xc[:, 2])
         x, y = xc[:, 0] / z, xc[:, 1] / z
@@ -520,7 +578,7 @@ class Scene:
         d = 1 + intr[3] * r2 + intr[4] * r2 * r2
         return np.column_stack([intr[0] * d * x + intr[1], intr[0] * d * y + intr[2]])
 
-    def _priors(self, keys, intr, rs, ts, ss):
+    def _priors(self, keys, intr, rs, ts, ss, bs):
         """What's believed before looking, as residuals (each already over its sigma)."""
         w, h = self.image_size
         long = self.long_side
@@ -544,6 +602,7 @@ class Scene:
                 wk, hk = self.dims[k]
                 mid = rs[i] @ (ss[i] * np.array([wk / 2, hk / 2, 0.0])) + ts[i]
                 out.append(mid[2] / (DEPTH_SIGMA * ref_w))
+        out.extend(bs / BEND_SIGMA)
         return np.array(out)
 
     def _adjust(self, rounds: int = 25) -> tuple[float, np.ndarray, list, list]:
@@ -555,9 +614,12 @@ class Scene:
         rs = np.array([self.poses[k][0] for k in keys])
         ts = np.array([self.poses[k][1] for k in keys])
         ss = np.array([self.poses[k][2] for k in keys])
+        bs = np.array([self.bends.get(k, 0.0) for k in keys])
+        ws = np.array([self.dims[k][0] for k in keys])
         huber = HUBER * self.long_side / 1600
         cam0, scr0 = 5, 5 + 6 * nf
-        size = scr0 + 7 * (ns - 1)
+        bend0 = scr0 + 7 * (ns - 1)
+        size = bend0 + ns
         rows = np.arange(n)
         free = si > 0  # the reference screen isn't moved
 
@@ -567,17 +629,17 @@ class Scene:
             rc2 = exp_so3(dc[:, :3]) @ rc
             tc2 = tc + dc[:, 3:]
             ds = np.zeros((ns, 7))
-            ds[1:] = dx[scr0:].reshape(ns - 1, 7)
+            ds[1:] = dx[scr0:bend0].reshape(ns - 1, 7)
             rs2 = exp_so3(ds[:, :3]) @ rs
             ts2 = ts + ds[:, 3:6]
             ss2 = ss * np.exp(ds[:, 6])
-            return i2, rc2, tc2, rs2, ts2, ss2
+            return i2, rc2, tc2, rs2, ts2, ss2, bs + dx[bend0:]
 
         def residuals(st):
-            return self._project(st[0], st[1], st[2], st[3], st[4], st[5], fi, si, uv) - xy
+            return self._project(st[0], st[1], st[2], st[3], st[4], st[5], st[6], ws, fi, si, uv) - xy
 
         def priors(st):
-            return self._priors(keys, st[0], st[3], st[4], st[5])
+            return self._priors(keys, st[0], st[3], st[4], st[5], st[6])
 
         # Steps for the numeric derivatives, per kind of unknown.
         span = float(np.abs(ts).max() + np.abs(tc).max() + 1.0)
@@ -605,7 +667,7 @@ class Scene:
                 if ns < 2:
                     break
                 dx = np.zeros(size)
-                dx[scr0 + k::7] = step_s[k]
+                dx[scr0 + k:bend0:7] = step_s[k]
                 st = state(dx)
                 d = (residuals(st) - r0) / step_s[k]
                 cols = scr0 + 7 * (si[free] - 1) + k
@@ -615,6 +677,14 @@ class Scene:
                 dp = (priors(st) - p0) / step_s[k]
                 for i in range(1, ns):
                     j[2 * n + 5 + (i - 1), scr0 + 7 * (i - 1) + k] = dp[5 + (i - 1)]
+            # every screen's bend at once
+            dx = np.zeros(size)
+            dx[bend0:] = 1e-6
+            d = (residuals(state(dx)) - r0) / 1e-6
+            j[2 * rows, bend0 + si] = d[:, 0]
+            j[2 * rows + 1, bend0 + si] = d[:, 1]
+            for i in range(ns):
+                j[2 * n + 5 + (ns - 1) + i, bend0 + i] = 1.0 / BEND_SIGMA
             return j
 
         def weights(r):
@@ -653,7 +723,7 @@ class Scene:
                 c2 = cost(r2, p2)
                 if np.isfinite(c2) and c2 < c:
                     gain = (c - c2) / max(c, 1e-12)
-                    intr, rc, tc, rs, ts, ss = st2
+                    intr, rc, tc, rs, ts, ss, bs = st2
                     st, r, p, c = st2, r2, p2, c2
                     lam = max(lam / 4, 1e-9)
                     moved = True
@@ -668,6 +738,7 @@ class Scene:
             fr.rms = float(np.sqrt((r[mine] ** 2).sum(1).mean())) if mine.any() else 0.0
         for i, k in enumerate(keys):
             self.poses[k] = (rs[i], ts[i], float(ss[i]))
+            self.bends[k] = float(bs[i])
         # How sure: the noise that's really there, through the same equations.
         e = np.abs(r).ravel()
         sigma = max(0.05, 1.4826 * float(np.median(e)))
@@ -726,6 +797,7 @@ class Scene:
     def _forget(self) -> None:
         self.intr = None
         self.poses = {}
+        self.bends = {}
         self.cov = {}
         for fr in self.frames:
             fr.r = fr.t = None
@@ -740,7 +812,10 @@ class Scene:
         screens = {}
         for k, (r, t, s) in self.poses.items():
             w, h = self.dims[k]
-            screens[k] = ScreenPose(k, w, h, r.copy(), t.copy(), float(s), counts.get(k, 0))
+            bend = self.bends.get(k, 0.0)
+            # (Under a degree or two of curve is a flat screen and the noise.)
+            screens[k] = ScreenPose(k, w, h, r.copy(), t.copy(), float(s), counts.get(k, 0),
+                                    bend=bend if abs(bend) >= 0.04 else 0.0)
         sol = Solution(self.reference, screens, eye, float(self.intr[0]), (float(self.intr[1]), float(self.intr[2])),
                        (float(self.intr[3]), float(self.intr[4])), rms, len(frames), cams)
         for k, sp in screens.items():
@@ -748,26 +823,29 @@ class Scene:
         return sol
 
     def _error(self, sol: Solution, sp: ScreenPose) -> float:
-        """How unsure a screen's place is, as seen from the eye against the
-        reference screen: 1 sigma of its corners there, in reference pixels."""
+        """How unsure a screen's place is, as the person sees it: 1 sigma of
+        where its corners are seen from the eye, in its own pixels (measured
+        across its own face, so a screen far off to the side of the
+        reference, or turned away from it, isn't made out to be worse)."""
         if sp.key == sol.reference:
             return 0.0
         cov = self.cov.get(sp.key)
         if cov is None:
             return float("inf")
-        ref = sol.screens[sol.reference]
+        face = ScreenPose(sp.key, sp.width, sp.height, sp.r, sp.t, sp.scale)
 
         def corners(d):
             moved = ScreenPose(sp.key, sp.width, sp.height, exp_so3(d[:3]) @ sp.r, sp.t + d[3:6],
                                sp.scale * float(np.exp(d[6])))
-            q = project_from(sol.eye, ref, moved.corners())
+            q = project_from(sol.eye, face, moved.corners())
             return None if q is None else q.ravel()
 
+        doubt = float(np.sqrt(np.trace(cov[3:6, 3:6]))) / sp.scale
         base = corners(np.zeros(7))
         if base is None:
-            # Not in front of the reference from here: its middle's own doubt will do.
-            return float(np.sqrt(np.trace(cov[3:6, 3:6])))
-        span = float(np.abs(sp.t).max() + ref.width)
+            # Seen from behind or edge on from here: its middle's own doubt will do.
+            return doubt
+        span = float(np.abs(sp.t).max() + sp.width * sp.scale)
         steps = np.array([1e-6] * 3 + [1e-6 * span] * 3 + [1e-6])
         g = np.zeros((8, 7))
         for i in range(7):
@@ -775,16 +853,17 @@ class Scene:
             d[i] = steps[i]
             c = corners(d)
             if c is None:
-                return float(np.sqrt(np.trace(cov[3:6, 3:6])))
+                return doubt
             g[:, i] = (c - base) / steps[i]
         var = np.diag(g @ cov @ g.T)
         return float(np.sqrt(max(0.0, var.max())))
 
 
 def project_from(eye: np.ndarray, onto: ScreenPose, points: np.ndarray) -> np.ndarray | None:
-    """Where ``points`` (n, 3, in the world) are seen against the plane of
-    the screen ``onto`` from ``eye``, in that screen's pixels (n, 2). None if
-    any isn't in front of the eye, looking at that screen's face."""
+    """Where ``points`` (n, 3, in the world) are seen against the screen
+    ``onto`` from ``eye``, in that screen's pixels (n, 2): on its glass,
+    carried on past its edges in the plane of its corners. None if any
+    isn't in front of the eye, looking at that screen's face."""
     e = (onto.r.T @ (np.asarray(eye, np.float64) - onto.t)) / onto.scale
     p = ((np.asarray(points, np.float64) - onto.t) @ onto.r) / onto.scale
     if e[2] >= -1e-9:
@@ -793,4 +872,25 @@ def project_from(eye: np.ndarray, onto: ScreenPose, points: np.ndarray) -> np.nd
     if np.any(den >= -1e-9 * abs(e[2])):
         return None  # level with the eye or behind it
     lam = e[2] / den
-    return e[:2] + lam[:, None] * (p[:, :2] - e[:2])
+    flat = e[:2] + lam[:, None] * (p[:, :2] - e[:2])
+    if not onto.bend:
+        return flat
+    # A curved screen: where each line of sight meets the glass, which is
+    # behind the plane of its corners by an amount that depends on where
+    # across it that is. Some rounds of "how deep is it there; so where
+    # does the line get that deep" settle it.
+    w, c = onto.width, onto.bend
+    chord = onto.chord
+    out = flat.copy()
+    t = np.clip(flat[:, 0] / chord, 0.0, 1.0)
+    for _ in range(25):
+        _x, z = bent(t, c)
+        lam = (z * w - e[2]) / (p[:, 2] - e[2])
+        out = e[:2] + lam[:, None] * (p[:, :2] - e[:2])
+        # across the glass from along the chord (off its ends: straight on)
+        edge = abs(np.sin(c / 2))
+        s = np.clip((out[:, 0] / w - 0.5 * np.sinc(c / 2 / np.pi)) * c, -edge, edge)
+        t = np.clip(0.5 + np.arcsin(s) / c, 0.0, 1.0)
+    x, _z = bent(t, c)
+    u = t * w + (out[:, 0] - x * w)  # past the edges, by the plain distance
+    return np.column_stack([u, out[:, 1]])

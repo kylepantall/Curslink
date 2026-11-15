@@ -50,7 +50,7 @@ import kotlin.math.roundToInt
 /**
  * Live auto line-up (see curslink/lineup.py and lineup_scene.py on the
  * computer): every screen shows its patterns, and this streams what the
- * camera sees while the phone is moved in a figure of 8. The computer reads
+ * camera sees while the phone is held up at the screens. The computer reads
  * each frame, works out where every screen stands, and says how it's going
  * (which screens are locked, what to do next), which is shown over the
  * camera's picture. It ends by itself when everything is lined up.

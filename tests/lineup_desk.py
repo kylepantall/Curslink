@@ -2,9 +2,11 @@
 (turned in, nearer, lower), and a phone camera moved about in front of them.
 
 Lengths are in mm. A screen is ``(key, device, pixels w, h, width_mm, where
-its middle is (x, y, z), yaw, pitch in degrees)``: x to the right, y down, z
-away from the person; yaw turns it about the vertical (positive: it turns to face
-right, its left edge coming nearer), pitch tips its top back.
+its middle is (x, y, z), yaw, pitch in degrees[, bend])``: x to the right, y
+down, z away from the person; yaw turns it about the vertical (positive: it
+turns to face right, its left edge coming nearer), pitch tips its top back.
+``bend``: the angle a curved monitor's width curves through, in radians
+(``width_mm`` is along the glass, the middle is that of its four corners).
 """
 
 import numpy as np
@@ -23,19 +25,25 @@ def rot_x(deg):
 class Desk:
     def __init__(self, screens):
         self.screens = {}
-        for key, device, w, h, width_mm, mid, yaw, pitch in screens:
+        for key, device, w, h, width_mm, mid, yaw, pitch, *more in screens:
+            bend = float(more[0]) if more else 0.0
             pitch_mm = width_mm / w
             r = rot_y(-yaw) @ rot_x(-pitch)
-            top_left = np.array(mid, float) - r @ np.array([w / 2 * pitch_mm, h / 2 * pitch_mm, 0])
-            self.screens[key] = {"key": key, "device": device, "w": w, "h": h, "mm": pitch_mm, "r": r, "t": top_left}
+            chord = w * float(np.sinc(bend / 2 / np.pi))
+            top_left = np.array(mid, float) - r @ np.array([chord / 2 * pitch_mm, h / 2 * pitch_mm, 0])
+            self.screens[key] = {"key": key, "device": device, "w": w, "h": h, "mm": pitch_mm, "r": r, "t": top_left,
+                                 "bend": bend}
 
     def keys(self):
         return list(self.screens)
 
     def point(self, key, uv):
         s = self.screens[key]
+        from curslink.lineup_scene import bent
+
         uv = np.atleast_2d(np.asarray(uv, float))
-        return (uv * s["mm"]) @ s["r"][:, :2].T + s["t"]
+        x, z = bent(uv[:, 0] / s["w"], s["bend"])
+        return (np.column_stack([x * s["w"], uv[:, 1], z * s["w"]]) * s["mm"]) @ s["r"].T + s["t"]
 
     def sizes(self):
         return {k: (s["w"] * s["mm"], s["h"] * s["mm"]) for k, s in self.screens.items()}
@@ -118,9 +126,10 @@ def draw_screen(w: int, h: int, markers: list, cells: int = 6):
 
 
 def render(desk: Desk, planned: dict, cam: Camera, pose, blur: float = 0.8, noise: float = 2.0,
-           glare=None, motion: int = 0, seed: int = 0):
+           glare=None, motion: int = 0, seed: int = 0, shown: int = 0):
     """The grey frame ``cam`` takes of ``desk`` from ``pose``, every screen
-    in ``planned`` showing its patterns. ``glare``: ``[(key, u, v, radius
+    in ``planned`` showing its patterns (its set number ``shown``, as they
+    change through the scan). ``glare``: ``[(key, u, v, radius
     in screen widths)]`` reflections; ``motion``: pixels of smear."""
     import cv2
 
@@ -135,16 +144,27 @@ def render(desk: Desk, planned: dict, cam: Camera, pose, blur: float = 0.8, nois
             continue
         iw = 1100
         ih = round(iw * s["h"] / s["w"])
-        img = draw_screen(iw, ih, planned[s["key"]]["markers"]).astype(np.float32)
+        sets = planned[s["key"]].get("sets") or [planned[s["key"]]["markers"]]
+        img = draw_screen(iw, ih, sets[shown % len(sets)]).astype(np.float32)
         for key, u, v, rad in glare or []:
             if key == s["key"]:
                 yy, xx = np.mgrid[0:ih, 0:iw]
                 img += 230 * np.exp(-(((xx - u * iw) ** 2 + (yy - v * ih) ** 2) / (2 * (rad * iw) ** 2)))
         step = s["mm"] * s["w"] / iw
-        hm = k @ np.column_stack([r @ s["r"][:, 0] * step, r @ s["r"][:, 1] * step, r @ s["t"] + t])
-        warped = cv2.warpPerspective(img, hm, (w, h), flags=cv2.INTER_LINEAR)
-        mask = cv2.warpPerspective(np.ones((ih, iw), np.float32), hm, (w, h), flags=cv2.INTER_LINEAR)
-        out = out * (1 - mask) + warped * mask
+        # A curved screen is drawn as upright strips, each as good as flat.
+        strips = 24 if s["bend"] else 1
+        for i in range(strips):
+            a0, a1 = round(i * iw / strips), round((i + 1) * iw / strips)
+            p0 = desk.point(s["key"], [(a0 * s["w"] / iw, 0)])[0]
+            p1 = desk.point(s["key"], [(a1 * s["w"] / iw, 0)])[0]
+            across = (p1 - p0) / (a1 - a0)
+            # strip pixel (x, y) is at p0 + (x - a0) * across + y * down
+            hm = k @ np.column_stack([r @ across, r @ s["r"][:, 1] * step, r @ (p0 - a0 * across) + t])
+            part = np.zeros((ih, iw), np.float32)
+            part[:, a0:a1] = 1
+            warped = cv2.warpPerspective(img * part, hm, (w, h), flags=cv2.INTER_LINEAR)
+            mask = cv2.warpPerspective(part, hm, (w, h), flags=cv2.INTER_LINEAR)
+            out = out * (1 - mask) + warped
     if cam.k1 or cam.k2:
         # Where each pixel of the lens's picture comes from in the ideal one.
         yy, xx = np.mgrid[0:h, 0:w].astype(np.float64)
@@ -216,6 +236,6 @@ def true_solution(desk: Desk, reference: str, eye_mm):
     screens = {}
     for k, s in desk.screens.items():
         screens[k] = ScreenPose(k, s["w"], s["h"], ref["r"].T @ s["r"], ref["r"].T @ (s["t"] - ref["t"]) / ref["mm"],
-                                s["mm"] / ref["mm"], 9)
+                                s["mm"] / ref["mm"], 9, bend=s["bend"])
     eye = ref["r"].T @ (np.asarray(eye_mm, float) - ref["t"]) / ref["mm"]
     return Solution(reference, screens, eye, 1000.0, (0.0, 0.0), (0.0, 0.0), 0.0, 9)

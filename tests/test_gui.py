@@ -1388,7 +1388,7 @@ def test_line_up_with_camera_arranges_the_layout_from_a_photo(desktop, qapp, tmp
     assert json.loads(asked[len("lineup_camera "):]) == {"id": flow.id, "live": True}
     page._on_service_event({"event": "lineup_camera", "id": flow.id,
                             "devices": [{"id": "phone", "name": "Kyle's phone"}]})
-    assert "Kyle's phone" in flow.dialog.text.text() and "figure of 8" in flow.dialog.text.text()
+    assert "Kyle's phone" in flow.dialog.text.text() and "patterns move around each screen" in flow.dialog.text.text()
 
     # the desk: the laptop really sits to the LEFT of this computer's screen, a bit lower
     hx, hy, hw, hh = home.layout_rect()
@@ -1471,6 +1471,11 @@ def test_live_line_up_follows_the_phone_until_every_screen_is_sure(desktop, qapp
             break
     assert answer.get("done") and answer["hint"] == "Lined up" and answer["progress"] == 1
     assert {state for _n, state in answer["screens"]} == {"locked"}
+    # The laptop was told its screen is measured (it shows a green edge), with the same patterns.
+    told = [json.loads(c[len("lineup "):]) for c in sent if c.startswith("lineup {") and '"state":"locked"' in c]
+    assert told and told[-1]["devices"]["laptop"]["screens"][0]["sets"] == flow.planned[laptop.key]["sets"]
+    assert flow.markers.windows[0].screens[0]["state"] == "locked"
+    flow.markers.windows[0].grab()
     deadline = time.monotonic() + 5
     while page.lineup is not None and time.monotonic() < deadline:
         qapp.processEvents()
@@ -1594,3 +1599,33 @@ def test_debug_console_shows_json_lines_live_and_filters(desktop, qapp):
     console.level.setCurrentIndex(2)  # warnings and errors
     assert "quiet" in console.view.toPlainText()
     console.close()
+
+
+def test_line_up_patterns_change_and_show_when_a_screen_is_measured(qapp):
+    """The patterns on a screen go from set to set, and the same payload
+    again with a state only updates what's there."""
+    from curslink import lineup
+    from curslink.gui.lineup import Markers
+
+    geo = qapp.primaryScreen().geometry()
+    planned = lineup.plan([{"key": "a/main", "width": geo.width(), "height": geo.height()}])["a/main"]
+    assert len(planned["sets"]) > 1
+    entry = {"screen": "main", "os": [geo.x(), geo.y(), geo.width(), geo.height()], "number": 1, "title": "This one",
+             "markers": planned["markers"], "sets": planned["sets"]}
+    markers = Markers()
+    assert markers.show({"screens": [entry], "seconds": 30, "period": 200}) == 1
+    window = markers.windows[0]
+    assert markers.cycle.isActive() and markers.cycle.interval() == 200
+    first = window.grab().toImage()
+    markers._step()
+    assert window.shown == 1 and window.grab().toImage() != first
+    # the state alone: the same window, still on its second set
+    assert markers.show({"screens": [{**entry, "state": "locked"}], "seconds": 30, "period": 200}) == 1
+    assert markers.windows[0] is window and window.shown == 1 and window.screens[0]["state"] == "locked"
+    window.grab()
+    # an older host's payload (no sets) stays as it was: one set, no cycling
+    old = {k: v for k, v in entry.items() if k != "sets"}
+    markers.show({"screens": [old], "seconds": 30})
+    assert markers.windows[0] is not window and not markers.cycle.isActive()
+    markers.hide()
+    assert not markers.showing and not markers.cycle.isActive()

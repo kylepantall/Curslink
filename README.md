@@ -98,11 +98,14 @@ menu bar.
 **Line up with camera…**. Every screen (on every linked computer) shows a
 few square patterns. With the Curslink Android app the camera opens by
 itself (or tap **Line up screens with the camera** in the app): sit where
-you usually sit, hold the phone up in front of your eyes, and move it
-slowly in a figure of 8. Curslink reads the patterns in every frame and
-works out where each screen really stands (how far away, at what angle, how
-big), and the layout on the computer keeps adjusting until every screen is
-lined up to within a millimetre or so; then it stops by itself. Without the
+you usually sit and hold the phone up in front of your eyes with every
+screen in the picture. The patterns move around each screen a few times a
+second, so the camera measures each screen's whole face from where it is:
+how far away it stands, at what angle, how big, and how curved if it's a
+curved monitor. A screen shows a green edge once it's measured, the layout
+on the computer keeps adjusting, and it stops by itself when every screen
+is lined up, usually in a few seconds. (A monitor that doesn't report its
+size needs the phone moved a little from side to side; the phone says so.) Without the
 app, take one photo of the desk with any camera and choose it there: that
 works too, but one photo can't tell how far away each screen is. Check the
 result and press **Save layout**.

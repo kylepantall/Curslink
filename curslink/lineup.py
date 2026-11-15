@@ -79,20 +79,69 @@ def marker_boxes(width: float, height: float) -> list[tuple[float, float, float,
     return out
 
 
-def plan(screens: list[dict]) -> dict[str, dict]:
-    """What each screen shows: ``{key: {"slot": n, "markers": [[bits, x, y, w, h], ...]}}``
-    for ``screens`` (``{"key", "width", "height"}``), in the order given.
+# The patterns don't stay put: after the first set (the corners and edges,
+# which is all an older Curslink shows) each screen shows set after set in
+# other places, a few times a second, until its whole face has been covered.
+# Every set has its own marker ids, so a frame says by itself which set it
+# caught: nothing to keep in time. That's some 40 measured points across a
+# screen instead of 8 round its edge, from wherever the phone is held: what
+# shows a curved monitor's curve, and what's left of a screen partly hidden
+# behind another one.
+MAX_SETS = 6  # per screen, the first included
+PERIOD_MS = 320  # how long each set shows
+SPACING = 0.25  # between the middles of neighbouring places, in shorter sides
 
-    Marker ids ``slot * 8 .. slot * 8 + 7``; at most :data:`MAX_SCREENS` screens.
+
+def marker_grid(width: float, height: float) -> list[tuple[float, float, float, float]]:
+    """Every place a screen ``width`` x ``height`` can show a marker without
+    two of them touching: ``(x, y, w, h)`` as shares of its width and height,
+    in an order that jumps about (so any run of them is spread out)."""
+    short = min(width, height)
+    side, margin = MARKER * short, MARGIN * short
+    cols = max(2, min(9, int((width - side - 2 * margin) / (SPACING * short)) + 1))
+    rows = max(2, min(9, int((height - side - 2 * margin) / (SPACING * short)) + 1))
+    cells = []
+    for r in range(rows):
+        for c in range(cols):
+            x = margin + c / (cols - 1) * (width - side - 2 * margin)
+            y = margin + r / (rows - 1) * (height - side - 2 * margin)
+            cells.append((x / width, y / height, side / width, side / height))
+    n = len(cells)
+    stride = max(1, round(n * 0.618))
+    while _gcd(stride, n) != 1:
+        stride += 1
+    return [cells[(i * stride) % n] for i in range(n)]
+
+
+def _gcd(a: int, b: int) -> int:
+    while b:
+        a, b = b, a % b
+    return a
+
+
+def plan(screens: list[dict]) -> dict[str, dict]:
+    """What each screen shows: ``{key: {"slot": n, "markers": [[bits, x, y, w, h], ...],
+    "sets": [markers, markers, ...]}}`` for ``screens`` (``{"key", "width",
+    "height"}``), in the order given. ``markers`` is the first set (the
+    corners and edges), ``sets`` all of them in the order they show.
+
+    A screen's sets take slots ``slot, slot + 1, ...``; a set's marker ids
+    are ``its slot * 8 .. + 7``. At most :data:`MAX_SCREENS` slots in all,
+    so many screens get fewer sets each.
     """
+    screens = screens[:MAX_SCREENS]
+    grids = [marker_grid(float(s["width"]), float(s["height"])) for s in screens]
+    most = max(1, min(MAX_SETS, MAX_SCREENS // max(1, len(screens))))
     out = {}
-    for slot, s in enumerate(screens[:MAX_SCREENS]):
-        boxes = marker_boxes(float(s["width"]), float(s["height"]))
-        out[s["key"]] = {
-            "slot": slot,
-            "markers": [[marker_bits(slot * PER_SCREEN + i), *(round(v, 5) for v in box)]
-                        for i, box in enumerate(boxes)],
-        }
+    slot = 0
+    for s, grid in zip(screens, grids):
+        sets = [marker_boxes(float(s["width"]), float(s["height"]))]
+        for k in range(min(most - 1, -(-len(grid) // PER_SCREEN))):
+            sets.append([grid[(k * PER_SCREEN + i) % len(grid)] for i in range(PER_SCREEN)])
+        coded = [[[marker_bits((slot + k) * PER_SCREEN + i), *(round(v, 5) for v in box)]
+                  for i, box in enumerate(boxes)] for k, boxes in enumerate(sets)]
+        out[s["key"]] = {"slot": slot, "markers": coded[0], "sets": coded}
+        slot += len(sets)
     return out
 
 
@@ -166,7 +215,7 @@ def find_markers(gray, thorough: bool = True) -> dict[int, "object"]:
 
 
 def read_frame(gray, planned: dict[str, dict], sizes: dict[str, tuple[float, float]], tolerance: float,
-               thorough: bool = True) -> list:
+               thorough: bool = True, curved: float = 0.0) -> list:
     """The screens of ``planned`` (as :func:`plan` gives) seen in ``gray``:
     a curslink.lineup_scene.Sighting for each with at least two patterns
     that agree. ``sizes``: ``{key: (width, height)}`` in pixels."""
@@ -174,26 +223,31 @@ def read_frame(gray, planned: dict[str, dict], sizes: dict[str, tuple[float, flo
 
     from curslink.lineup_scene import sight
 
-    by_slot = {p["slot"]: (key, p) for key, p in planned.items()}
-    per_screen: dict[str, tuple[list, list]] = {}
+    by_slot = {}
+    for key, p in planned.items():
+        for k, markers in enumerate(p.get("sets") or [p["markers"]]):
+            by_slot[p["slot"] + k] = (key, markers, k)
+    per_screen: dict[str, tuple[list, list, set]] = {}
     for marker_id, quad in find_markers(gray, thorough).items():
         slot, index = divmod(marker_id, PER_SCREEN)
         if slot not in by_slot:
             continue  # not one of ours: something on the desk that looks like a pattern
-        key, p = by_slot[slot]
+        key, markers, which = by_slot[slot]
         if key not in sizes:
             continue
         sw, sh = sizes[key]
-        _bits, x, y, w, h = p["markers"][index]
+        _bits, x, y, w, h = markers[index]
         # As ArUco orders a marker's corners: clockwise from its top left.
         uv = np.array([(x, y), (x + w, y), (x + w, y + h), (x, y + h)], np.float64) * (sw, sh)
-        on, at = per_screen.setdefault(key, ([], []))
+        on, at, sets = per_screen.setdefault(key, ([], [], set()))
         on.append(uv)
         at.append(quad)
+        sets.add(which)
     out = []
-    for key, (on, at) in per_screen.items():
-        s = sight(key, on, at, tolerance)
+    for key, (on, at, sets) in per_screen.items():
+        s = sight(key, on, at, tolerance, curved)
         if s is not None:
+            s.sets = frozenset(sets)
             out.append(s)
     return out
 
@@ -564,7 +618,7 @@ def line_up(photo: bytes, screens: list[dict], planned: dict[str, dict], referen
     gray = load_photo(photo)
     dims = {s["key"]: (float(s["width"]), float(s["height"])) for s in screens if s["key"] in planned}
     scene = Scene(dims, reference, _sizes_mm(screens), (gray.shape[1], gray.shape[0]))
-    scene.add(read_frame(gray, planned, dims, scene.tolerance))
+    scene.add(read_frame(gray, planned, dims, scene.tolerance, curved=scene.curved))
     if not scene.frames:
         raise LineupError("Curslink couldn't find the patterns in that photo. Get every screen in the picture, "
                           "close enough that the patterns are sharp, and try again")
@@ -629,8 +683,14 @@ class Live:
 
     @property
     def tolerance(self) -> float:
-        """What "lined up" asks of each screen's place, in the reference's pixels."""
+        """What "lined up" asks of the reference screen's place, in its pixels."""
         return max(3.0, ALIGNED * self.short_side)
+
+    def asked(self, key: str, share: float = ALIGNED) -> float:
+        """What "lined up" asks of a screen's place, in its own pixels (which
+        is what its error is in)."""
+        w, h = self.dims.get(key) or (1920.0, 1080.0)
+        return max(3.0, share * min(w, h))
 
     @property
     def settled(self) -> bool:
@@ -656,7 +716,8 @@ class Live:
             self.history = []
             self.placed_at = None
         self.frames += 1
-        sightings = read_frame(gray, self.planned, self.dims, self.scene.tolerance, thorough=False)
+        sightings = read_frame(gray, self.planned, self.dims, self.scene.tolerance, thorough=False,
+                               curved=self.scene.curved)
         self.last_seen = [s.key for s in sightings]
         kept = self.scene.add(sightings)
         self.fresh = self.fresh or kept
@@ -694,12 +755,11 @@ class Live:
         that's placed), "placing" or "locked"."""
         seen = self.scene.seen() if self.scene is not None else {}
         out = {}
-        tol = self.tolerance
         enough = self.result is not None and self.result.views >= MIN_VIEWS
-        rough = max(tol, ROUGH * self.short_side) if enough and self.settled and self.steady() else tol
+        share = ROUGH if enough and self.settled and self.steady() else ALIGNED
         for k in self.wanted:
             if self.result is not None and k in self.result.errors:
-                out[k] = "locked" if enough and self.result.errors[k] <= rough else "placing"
+                out[k] = "locked" if enough and self.result.errors[k] <= self.asked(k, share) else "placing"
             else:
                 out[k] = "seen" if k in seen else "unseen"
         return out
@@ -732,7 +792,7 @@ class Live:
                 sure = 1.0
             else:
                 # Either the doubt comes down to what's asked, or the scan settles.
-                sure = max(0.0, min(1.0, tol / err)) if err > 0 else 1.0
+                sure = max(0.0, min(1.0, self.asked(k) / err)) if err > 0 else 1.0
                 if self.placed_at is not None:
                     sure = max(sure, min(0.95, (self.frames - self.placed_at) / SETTLED_FRAMES))
             total += 0.3 + 0.7 * views * sure
@@ -764,8 +824,13 @@ class Live:
         if loose:
             return f"Get {name(loose)} in the picture together with the screen next to it"
         if all(v == "locked" for v in states.values()):
-            return "Nearly there: keep moving"
-        return "Move the phone slowly in a figure of 8"
+            return "Nearly there: hold it there"
+        # A monitor that doesn't say how big it is can't be told from a
+        # bigger one further off without seeing it from somewhere else.
+        sized = self.scene is not None and all(k in self.scene.pitch for k in self.wanted)
+        if not sized and self.result is not None and self.result.views >= MIN_VIEWS:
+            return "Move the phone slowly from side to side"
+        return "Hold the phone steady: the patterns are measuring each screen"
 
 
 # -- the host's end: asking phones, taking their photos -------------------------
@@ -812,7 +877,8 @@ class PhotoInbox:
                 self._send(device_id, "lineup", hide=True)
             else:
                 seconds = entry.get("seconds", 300)
-                self._send(device_id, "lineup", screens=entry["screens"], seconds=seconds)
+                more = {"period": entry["period"]} if isinstance(entry.get("period"), (int, float)) else {}
+                self._send(device_id, "lineup", screens=entry["screens"], seconds=seconds, **more)
                 mm = getattr(self.server.connections[device_id], "screen_mm", None)
                 if mm:
                     sizes[device_id] = list(mm)

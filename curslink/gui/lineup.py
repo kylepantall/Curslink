@@ -18,8 +18,16 @@ view, so less sure.
 A marker payload (one computer's) is::
 
     {"screens": [{"screen": "main", "os": [0, 0, 1920, 1080], "number": 1,
-                  "title": "Kyle's Mac", "markers": [[bits, x, y, w, h], ...]}],
-     "seconds": 300}
+                  "title": "Kyle's Mac", "markers": [[bits, x, y, w, h], ...],
+                  "sets": [markers, markers, ...], "state": "placing"}],
+     "seconds": 300, "period": 320}
+
+``sets`` (newer hosts): the patterns change, set after set every ``period``
+ms, so the camera gets points all over the screen from wherever it's held
+(``markers`` is the first set, all an older Curslink shows). ``state``:
+how the scan is going for that screen ("locked": it's measured, shown as a
+tick). The same payload sent again with only the states changed updates
+the windows in place.
 """
 
 from __future__ import annotations
@@ -70,16 +78,41 @@ class _MarkerWindow(QWidget):
         self.setGeometry(qscreen.geometry())
         # Normally one; an agent reporting one monitor as two shows both sets.
         self.screens = screens
+        self.shown = 0  # which set of patterns is up
+
+    def step(self) -> None:
+        """On to the next set of patterns."""
+        self.shown += 1
+        self.update()
+
+    def set_states(self, screens: list[dict]) -> None:
+        for mine, new in zip(self.screens, screens):
+            mine["state"] = new.get("state")
+        self.update()
 
     def paintEvent(self, _e) -> None:
         p = QPainter(self)
         w, h = self.width(), self.height()
         # Dark behind, so the white around each pattern stands out in the photo.
         p.fillRect(self.rect(), QColor(16, 18, 24, 235))
+        first = True
         for screen in self.screens:
-            for marker in screen["markers"]:
+            sets = screen.get("sets") or [screen["markers"]]
+            first = first and self.shown % len(sets) == 0
+            for marker in sets[self.shown % len(sets)]:
                 bits, fx, fy, fw, fh = marker
                 draw_marker(p, int(bits), QRectF(fx * w, fy * h, fw * w, fh * h))
+        locked = bool(self.screens) and all(s.get("state") == "locked" for s in self.screens)
+        if locked:
+            # Measured: a green edge all round, seen from across the desk.
+            edge = max(6, round(min(w, h) * 0.012))
+            p.setPen(QPen(STATE_COLOURS["locked"], edge))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRect(QRectF(edge / 2, edge / 2, w - edge, h - edge))
+        if not first:
+            # The other sets use the middle too: the number waits for the first one.
+            p.end()
+            return
         th = theme.current()
         accent = th.color("accent")
         short = min(w, h)
@@ -93,7 +126,7 @@ class _MarkerWindow(QWidget):
         if lines:
             s = lines[0]
             number, title = str(s.get("number") or ""), str(s.get("title") or "")[:80]
-            note = "Lining up: keep these patterns in the camera's view"
+            note = ("Measured \u2713" if locked else "Lining up: keep these patterns in the camera's view")
             bw = max(mb.horizontalAdvance(number), ms.horizontalAdvance(title), ms.horizontalAdvance(note)) + 2 * ms.height()
             bh = mb.height() + 2.6 * ms.height() + ms.height()
             # In the middle, clear of the patterns along the edges (the top and bottom
@@ -113,7 +146,7 @@ class _MarkerWindow(QWidget):
             p.setFont(small)
             p.setPen(QColor(255, 255, 255))
             p.drawText(QRectF(box.left(), y, bw, ms.height() * 1.3), Qt.AlignmentFlag.AlignCenter, title)
-            p.setPen(QColor(255, 255, 255, 170))
+            p.setPen(STATE_COLOURS["locked"] if locked else QColor(255, 255, 255, 170))
             p.drawText(QRectF(box.left(), y + ms.height() * 1.3, bw, ms.height() * 1.3),
                        Qt.AlignmentFlag.AlignCenter, note)
         p.end()
@@ -146,7 +179,15 @@ def screens_of(payload: dict) -> list[tuple[object, dict]]:
         qscreen = find_qscreen(entry["screen"], os_rect)
         if qscreen is None:
             continue
-        out.append((qscreen, {"markers": markers, "number": entry.get("number"), "title": entry.get("title")}))
+        sets = []
+        if isinstance(entry.get("sets"), list):
+            for one in entry["sets"][:16]:
+                good = [m for m in one if _numbers(m, 5)] if isinstance(one, list) else []
+                if good:
+                    sets.append(good)
+        out.append((qscreen, {"markers": markers, "sets": sets or [markers], "number": entry.get("number"),
+                              "title": entry.get("title"),
+                              "state": entry.get("state") if isinstance(entry.get("state"), str) else None}))
     return out
 
 
@@ -158,14 +199,30 @@ class Markers:
         self.timer = QTimer()
         self.timer.setSingleShot(True)
         self.timer.timeout.connect(self.hide)
+        self.cycle = QTimer()  # on to each screen's next set of patterns
+        self.cycle.timeout.connect(self._step)
+        self.what = None  # what's showing, without the states
+
+    def _step(self) -> None:
+        for window in self.windows:
+            window.step()
 
     def show(self, payload: dict) -> int:
-        self.hide()
         if payload.get("hide"):
+            self.hide()
             return 0
+        found = screens_of(payload)
         by_screen: dict[int, tuple[object, list[dict]]] = {}
-        for qscreen, screen in screens_of(payload):
+        for qscreen, screen in found:
             by_screen.setdefault(id(qscreen), (qscreen, []))[1].append(screen)
+        what = [(id(q), [{k: v for k, v in s.items() if k != "state"} for s in ss]) for q, ss in by_screen.values()]
+        if self.windows and what == self.what:
+            # The same patterns, only how it's going has changed: no need to start again.
+            for window, (_q, screens) in zip(self.windows, by_screen.values()):
+                window.set_states(screens)
+            return len(self.windows)
+        self.hide()
+        self.what = what
         for qscreen, screens in by_screen.values():
             window = _MarkerWindow(qscreen, screens)
             window.show()
@@ -177,11 +234,20 @@ class Markers:
             seconds = SECONDS
         if self.windows:
             self.timer.start(round(max(5.0, min(MAX_SECONDS, seconds)) * 1000))
-            log.info("line-up patterns on %d monitor(s)", len(self.windows))
+            most = max(len(s.get("sets") or [1]) for w in self.windows for s in w.screens)
+            if most > 1:
+                try:
+                    period = float(payload.get("period", 320))
+                except (TypeError, ValueError):
+                    period = 320.0
+                self.cycle.start(round(max(120.0, min(5000.0, period))))
+            log.info("line-up patterns on %d monitor(s), %d set(s) each at most", len(self.windows), most)
         return len(self.windows)
 
     def hide(self) -> None:
         self.timer.stop()
+        self.cycle.stop()
+        self.what = None
         for window in self.windows:
             window.hide()
             window.deleteLater()
@@ -381,6 +447,10 @@ class LineupFlow(QObject):
         self.latest = None  # the last Result it gave
         self.live_device: str | None = None
         self.ending = False
+        self.shown_local: list[dict] = []
+        self.shown_remote: dict[str, dict] = {}
+        self.locked: set[str] = set()
+        self.period = 320
 
     def start(self) -> bool:
         from curslink import lineup
@@ -396,12 +466,16 @@ class LineupFlow(QObject):
             if p is None:
                 continue
             entry = {"screen": s["screen"], "os": s["os"], "number": s.get("number"),
-                     "title": s.get("title", ""), "markers": p["markers"]}
+                     "title": s.get("title", ""), "markers": p["markers"], "sets": p.get("sets") or [p["markers"]],
+                     "key": s["key"]}
             if s.get("local"):
                 local.append(entry)
             else:
-                remote.setdefault(s["device"], {"screens": [], "seconds": SECONDS})["screens"].append(entry)
+                remote.setdefault(s["device"], {"screens": [], "seconds": SECONDS,
+                                                "period": lineup.PERIOD_MS})["screens"].append(entry)
         import json
+
+        self.shown_local, self.shown_remote = local, remote
 
         # This computer's monitors' real sizes (the others' come with lineup_sizes).
         try:
@@ -410,7 +484,7 @@ class LineupFlow(QObject):
             self.take_sizes({s["device"]: physical_sizes() for s in shown if s.get("local")})
         except Exception:  # noqa: BLE001 - only a help to the sums
             log.debug("couldn't read this computer's monitor sizes", exc_info=True)
-        self.markers.show({"screens": local, "seconds": SECONDS})
+        self.markers.show({"screens": local, "seconds": SECONDS, "period": lineup.PERIOD_MS})
         self.send("lineup " + json.dumps({"devices": remote}, separators=(",", ":")))
         self.dialog.say("Scan your desk with your phone", "Asking your phone…")
         self.dialog.show()
@@ -420,6 +494,29 @@ class LineupFlow(QObject):
         self.dialog.activateWindow()
         self.ask_phones()
         return True
+
+    def show_states(self, states: dict[str, str]) -> None:
+        """Each screen shows how the scan is going for it (a tick once it's
+        measured): the same patterns again with the states, to the computers
+        whose screens' states changed."""
+        import json
+
+        locked = {k for k, v in states.items() if v == "locked"}
+        if locked == self.locked:
+            return
+        changed = locked ^ self.locked
+        self.locked = locked
+
+        def with_states(entries: list[dict]) -> list[dict]:
+            return [{**e, "state": "locked" if e.get("key") in locked else "placing"} for e in entries]
+
+        if any(e.get("key") in changed for e in self.shown_local):
+            self.markers.show({"screens": with_states(self.shown_local), "seconds": SECONDS,
+                               "period": self.period})
+        remote = {d: {**p, "screens": with_states(p["screens"])} for d, p in self.shown_remote.items()
+                  if any(e.get("key") in changed for e in p["screens"])}
+        if remote:
+            self.send("lineup " + json.dumps({"devices": remote}, separators=(",", ":")))
 
     def centre_dialog(self) -> None:
         area = self.dialog.screen().geometry() if self.dialog.screen() is not None else None
@@ -483,9 +580,10 @@ class LineupFlow(QObject):
         if self.phones:
             names = ", ".join(str(d.get("name") or d.get("id")) for d in self.phones)
             self.dialog.say("Scan your desk with your phone",
-                            f"The camera is opening on {names}. Sit where you usually sit, hold the phone up in "
-                            "front of your eyes pointing at your screens, then move it slowly in a figure of 8. "
-                            "The layout appears here and keeps adjusting until every screen is lined up.\n\n"
+                            f"The camera is opening on {names}. Sit where you usually sit and hold the phone up in "
+                            "front of your eyes with every screen in the picture. The patterns move around each "
+                            "screen to measure it; a screen shows a green edge once it's done. The layout appears "
+                            "here and keeps adjusting until every screen is lined up.\n\n"
                             "No Curslink on your phone? Take a photo of the desk with any camera and choose it here.",
                             again=True)
         else:
@@ -599,6 +697,7 @@ class LineupFlow(QObject):
             how = describe(result, {s["key"]: f"screen {s.get('number')}" for s in self.screens})
             if how:
                 detail += ". " + how[:1].upper() + how[1:] + "."
+        self.show_states(states)
         self.dialog.say("Lined up" if aligned else "Scanning your desk", status.get("hint") or "Reading the patterns…")
         self.dialog.show_live(status.get("progress", 0.0), rects, detail, bool(status.get("usable")) and not aligned)
         if aligned and self.latest is not None:
