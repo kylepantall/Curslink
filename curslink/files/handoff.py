@@ -59,7 +59,7 @@ from curslink.layout import Layout
 from curslink.files.native import NativeDrop
 from curslink.files.popups import ReceivePopups
 from curslink.files.transfer import FileReceiver
-from curslink.protocol import DROP_FEATURE, FILE_ACK_FEATURE, FILES_FEATURE, FILES_OUT_FEATURE
+from curslink.protocol import DROP_FEATURE, FILE_ACK_FEATURE, FILES_FEATURE, FILES_OUT_FEATURE, PREFETCH_FEATURE
 from curslink.router import Router, SwitchEvent
 from curslink.files.dragdebug import trace
 
@@ -69,9 +69,17 @@ DRAG_START_PX = 8        # a press that moves this far is a drag
 PROBE_WAIT_S = 0.6       # how long the shield waits to hear of a drag
 SHIELD_LINGER_S = 1.0    # after a drop, before taking the shield down
 # File bytes in flight to an agent (sent, not yet acknowledged) once a drag
-# is dropped there. Nothing is sent while it's only carried: it may yet go
-# on to another device.
+# is dropped there.
 DROPPED_WINDOW = 512 * 1024
+# While a drag is only carried over an agent (it may yet go on, or back),
+# its files start going there already, so the drop is instant (Kyle,
+# 0.4.100: "we know when a file is dragged onto another device... load
+# things pre-emptively"). Gently: little in flight, so the pointer's moves
+# never queue behind file data, and only up to PREFETCH_MAX bytes; bigger
+# drags still start sending on the drop. Taken elsewhere, it's cancelled
+# and the agent throws away what came.
+CARRIED_WINDOW = 128 * 1024
+PREFETCH_MAX = 256 * 1024 * 1024
 # Passing an agent's files on to another: if that one takes no more for this
 # long, give up (the first agent's frames wait meanwhile).
 RELAY_STALL_S = 5.0
@@ -330,10 +338,23 @@ class DragHandoff:
         if not self.server.supports(device_id, DROP_FEATURE):
             self.server.send(device_id, "drag", card=card(self.items))  # older agent: sent on the drop
             return
-        # Only the card for now: the files go when it's let go of here, and
-        # not at all if it goes on to another device.
         self.carry_id = new_id()
         self.server.send(device_id, "drag", card=card(self.items), id=self.carry_id)
+        self._prefetch(device_id, self.carry_id)
+
+    def _prefetch(self, device_id: str, tid: str) -> None:
+        """Start sending the carried files to ``device_id`` before the drop."""
+        total = sum(i.size for i in self.items)
+        if total > PREFETCH_MAX or not (self.server.supports(device_id, FILE_ACK_FEATURE)
+                                        and self.server.supports(device_id, PREFETCH_FEATURE)):
+            return  # (a phone saves what arrives, dropped or not; older agents showed a failure)
+        log.info("drag: sending %s to %s ahead of the drop", human_size(total), device_id)
+        trace("prefetch", to=device_id, bytes=total)
+        out = Outgoing(tid, device_id, list(self.items))
+        out.window = CARRIED_WINDOW
+        out.prefetch = True
+        self.outgoing[out.id] = out
+        out.task = asyncio.get_running_loop().create_task(self._send(out))
 
     def _cancel_carry(self) -> None:
         tid, self.carry_id = self.carry_id, None
@@ -342,6 +363,9 @@ class DragHandoff:
         log.info("drag: passed over %s without being dropped", self.carrying)
         trace("not-dropped", on=self.carrying)
         self.server.send(self.carrying, "drag", hide=True, id=tid)
+        out = self.outgoing.pop(tid, None)
+        if out is not None and out.task is not None and not out.task.done():
+            out.task.cancel()  # its file_cancel tells the agent to throw it away
 
     # ---------------------------------------------------------------- drop
     def drop(self) -> None:
@@ -353,11 +377,22 @@ class DragHandoff:
         if tid is not None:
             log.info("drag: dropped on %s; sending", device_id)
             self.server.send(device_id, "drag", drop=True, id=tid)
-            out = Outgoing(tid, device_id, items)
-            if self.server.supports(device_id, FILE_ACK_FEATURE):
-                out.window = DROPPED_WINDOW
-            self.outgoing[out.id] = out
-            out.task = loop.create_task(self._send(out))
+            out = self.outgoing.get(tid)
+            if out is not None and out.prefetch:
+                # On its way already (or there): only faster now.
+                log.info("drag: %s of %s there already", human_size(out.acked), human_size(out.total))
+                out.prefetch = False
+                out.set_window(DROPPED_WINDOW)
+                self.emit("file", state="sending", id=out.id, to=device_id,
+                          names=", ".join(i.name for i in out.items[:3]))
+                if out.result is not None:
+                    self.on_result(device_id, out.result)
+            else:
+                out = Outgoing(tid, device_id, items)
+                if self.server.supports(device_id, FILE_ACK_FEATURE):
+                    out.window = DROPPED_WINDOW
+                self.outgoing[out.id] = out
+                out.task = loop.create_task(self._send(out))
         else:
             log.info("drag: dropped on %s; sending", device_id)
             self.server.send(device_id, "drag", hide=True)
@@ -381,13 +416,21 @@ class DragHandoff:
     async def _send(self, out: Outgoing) -> None:
         out.on_slow = self._slow_read
         names = ", ".join(i.name for i in out.items[:3])
-        self.emit("file", state="sending", id=out.id, to=out.device_id, names=names)
+        if not out.prefetch:  # (ahead of a drop: nothing to say unless it's dropped)
+            self.emit("file", state="sending", id=out.id, to=out.device_id, names=names)
         try:
             await send_files(self.server.bulk_sender(out.device_id), out, self.local_name)
             log.info("sent %s (%s) to %s", names, human_size(out.total), out.device_id)
         except asyncio.CancelledError:
             return
         except Exception as exc:
+            if out.prefetch:
+                # Not dropped yet: the drop sends it again from the start.
+                log.info("drag: sending %s ahead of the drop stopped (%s); it goes on the drop",
+                         names, out.refused or exc)
+                if self.outgoing.get(out.id) is out:
+                    self.outgoing.pop(out.id, None)
+                return
             self.outgoing.pop(out.id, None)
             log.warning("couldn't send %s to %s: %s", names, out.device_id, out.refused or exc)
             self.emit("file", state="failed", id=out.id, to=out.device_id, error=out.refused or str(exc))
@@ -407,6 +450,9 @@ class DragHandoff:
             return
         out = self.outgoing.get(str(data.get("id")))
         if out is None or out.device_id != device_id:
+            return
+        if out.prefetch:
+            out.result = data  # all there ahead of the drop: said when it's dropped
             return
         if data.get("ok") is True:
             self.outgoing.pop(out.id, None)

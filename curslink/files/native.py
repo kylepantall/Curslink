@@ -386,6 +386,10 @@ class NativeDrop:
     def _end(self, drop: Drop) -> None:
         self.receiver.targets.pop(drop.id, None)
         self.popups.quiet.discard(drop.id)
+        self.popups.toasts.pop(drop.id, None)
+        if not drop.done and drop.id in self.receiver.active:
+            # Its files were coming ahead of the drop: the rest is cancelled.
+            self.popups.ignored.add(drop.id)
         if drop.phase in ("starting", "dragging") and drop.native:
             self.helper("nativedrag cancel")
             self.helper("card hide")

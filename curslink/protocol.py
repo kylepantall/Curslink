@@ -298,6 +298,9 @@ PREPARE_FEATURE = "popup_prepare"
 # when file_begin asks for it), so the host keeps only a little in flight
 # while a drag is carried and the pointer and the drop never wait behind it.
 FILE_ACK_FEATURE = "file_ack"
+# Takes files sent ahead of a drop while a drag is only carried over it, and
+# throws them away quietly if the drag goes elsewhere (0.4.104).
+PREFETCH_FEATURE = "prefetch"
 # An agent that takes part in mirror mode (mirror, mirror_frame,
 # mirror_pointer, mirror_ack): it can capture part of its screens and show
 # part of another's (see curslink.mirror).
