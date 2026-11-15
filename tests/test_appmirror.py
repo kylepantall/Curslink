@@ -212,10 +212,14 @@ def test_the_pointer_goes_through_the_mirror_to_the_app_and_comes_back_out():
     # Moving in it moves on the Mac (same size here: one for one).
     router.on_motion(10, 0)
     assert transport.of("move", "mac")[-1] == {"x": 510, "y": 350}
-    # Out past its left side: back on the PC, just outside the mirror.
+    # Out past its left side: back on the PC, on the mirror's own edge
+    # (where it's resized from)...
     router.on_motion(-500, 0)
     assert router.active_device == "pc"
-    assert router.x < 500 and router.y == pytest.approx(688)
+    assert 500 <= router.x < 500 + GRIP and router.y == pytest.approx(688)
+    # ...and on, past it (this computer's own mouse, here).
+    router.on_pointer(480, 688)
+    assert router.active_device == "pc" and router.x == 480 and apps.through is None
 
 
 def test_going_in_and_out_of_the_mirror_keeps_mirror_mode_on_the_screen_showing_it():
@@ -673,3 +677,44 @@ def test_helper_mirror_says_its_screens_scaling_and_draws_the_pointer(qapp):
     window = helper.windows[show["id"]]
     assert window.pointer == (0.5, 0.5)
     window.grab()  # paints, pointer and all
+
+
+def test_helper_mirror_is_solid_and_its_tag_fills_the_screen_with_it_and_back(qapp):
+    from PySide6.QtCore import QPointF, Qt
+
+    from curslink.mirror.helper import MirrorHelper
+
+    out = []
+    helper = MirrorHelper(out.append)
+    show = {"id": "app:mac:7:1", "app": True, "screen": "main", "os": [100, 100, 400, 300], "ratio": 4 / 3,
+            "label": "Safari · MacBook", "edges": [], "hover": True, "corner": 10, "raise": 0, "carried": True}
+    helper.handle("mirror " + json.dumps({"captures": [], "shows": [show]}))
+    helper.handle("mirror_image " + json.dumps({"id": show["id"], "jpg": jpeg(40, 30), "w": 40, "h": 30}))
+    window = helper.windows[show["id"]]
+    # Never see-through, carried or not, nor while it first shows.
+    assert not window.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+    assert window.windowOpacity() == 1.0
+    window.tick()
+    assert window.windowOpacity() == 1.0
+    helper.handle("mirror " + json.dumps({"captures": [], "shows": [{**show, "carried": False}]}))
+    tag = window.tag
+    assert tag is not None and tag.isVisible()
+
+    class Ev:
+        def __init__(self, local):
+            self._l = QPointF(*local)
+
+        def position(self):
+            return self._l
+
+    # Its tag's box: the mirror fills its screen, and the app is asked to.
+    box = tag.max_box().center()
+    tag.mousePressEvent(Ev((box.x(), box.y())))
+    full = window.screen().availableGeometry()
+    assert window.geometry() == full and window.maxed is not None
+    view = json.loads([ln for ln in out if ln.startswith("app_view ")][-1].partition(" ")[2])
+    assert view["os"][2:] == [full.width(), full.height()]
+    # Again: back where it was.
+    tag.mousePressEvent(Ev((box.x(), box.y())))
+    view = json.loads([ln for ln in out if ln.startswith("app_view ")][-1].partition(" ")[2])
+    assert view["os"] == [100, 100, 400, 300] and window.maxed is None

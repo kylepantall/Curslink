@@ -26,7 +26,8 @@ import sys
 import time
 
 from PySide6.QtCore import QPointF, QRect, QRectF, Qt, QTimer
-from PySide6.QtGui import QColor, QCursor, QFont, QFontMetricsF, QGuiApplication, QImage, QLinearGradient, QPainter, QPainterPath, QPen
+from PySide6.QtGui import (QColor, QCursor, QFont, QFontMetricsF, QGuiApplication, QImage, QLinearGradient, QPainter,
+                           QPainterPath, QPen, QRegion)
 from PySide6.QtWidgets import QWidget
 
 from curslink.appmirror import GRIP
@@ -39,6 +40,7 @@ log = logging.getLogger(__name__)
 # PrintWindow is work for the app being captured: never more than this a second.
 WIN_APP_FPS = 60
 MAC_APP_FPS = 60
+STATS_S = 15.0  # how often a capture says how it's keeping up
 POPUP_CHECK_S = 0.25  # how often to look for the app's menus, while it's in use
 TAG_H = 26
 
@@ -220,7 +222,9 @@ class AppCapture(Capture):
         self.shape_key: str | None = None  # the pointer's look last sent
         self.popups: list = []  # the app's menus showing, as last found
         self.popups_at = 0.0
-        super().__init__(spec, out)
+        self.stats = {"since": time.monotonic(), "frames": 0, "busy": 0.0, "bytes": 0}
+        self.raw_out = out
+        super().__init__(spec, self._out)
 
     def grab(self) -> None:
         if self.spec.get("pointer"):
@@ -228,7 +232,26 @@ class AppCapture(Capture):
                 self.send_shape()
             except Exception:  # pragma: no cover - platform trouble
                 log.debug("app mirror: couldn't send the pointer's look", exc_info=True)
+        t0 = time.monotonic()
+        sent = self.stats["bytes"]
         super().grab()
+        took = time.monotonic() - t0
+        st = self.stats
+        if st["bytes"] != sent:
+            st["frames"] += 1
+            st["busy"] += took
+        if t0 - st["since"] >= STATS_S:
+            # How it's keeping up, in the log: frames a second sent, the time
+            # each took here (capture, scale, encode) and the link it took.
+            span = max(1e-3, t0 - st["since"])
+            if st["frames"]:
+                log.info("app mirror: %s: %.0f fps of %d asked, %.0f ms each here, %.0f KB/s", self.id,
+                         st["frames"] / span, self.fps(), 1000 * st["busy"] / st["frames"], st["bytes"] / 1024 / span)
+            self.stats = {"since": t0, "frames": 0, "busy": 0.0, "bytes": 0}
+
+    def _out(self, line: str) -> None:
+        self.stats["bytes"] += len(line)
+        self.raw_out(line)
 
     def send_shape(self) -> None:
         """The pointer's look, when it changed while it's over the window
@@ -398,8 +421,9 @@ class AppCapture(Capture):
 
 # -------------------------------------------------------------------- showing
 class AppTag(QWidget):
-    """The small glass tag by a mirror: the app's name and where it runs,
-    and an x that closes the mirror."""
+    """The small glass tag by a mirror: the app's name and where it runs, a
+    box that makes the mirror fill its screen (and back), and an x that
+    closes it."""
 
     def __init__(self, owner: "AppWindow"):
         flags = (Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint
@@ -413,13 +437,13 @@ class AppTag(QWidget):
         self.font_ = QFont()
         self.font_.setPixelSize(12)
         self.font_.setWeight(QFont.Weight.DemiBold)
-        self.hot = False
+        self.hot: str | None = None  # "close" or "max": the button the pointer is on
         self.setMouseTracking(True)
 
     def place(self, text: str, r: QRect) -> None:
         self.text = text
         m = QFontMetricsF(self.font_)
-        w = round(m.horizontalAdvance(text) + 18 + 30 + 14)
+        w = round(m.horizontalAdvance(text) + 18 + 30 + 14 + TAG_H)
         x = r.right() - w
         y = r.top() - TAG_H - 6
         screen = self.owner.screen().geometry() if self.owner.screen() is not None else None
@@ -431,19 +455,36 @@ class AppTag(QWidget):
     def close_box(self) -> QRectF:
         return QRectF(self.width() - TAG_H, 0, TAG_H, TAG_H).adjusted(4, 4, -4, -4)
 
+    def max_box(self) -> QRectF:
+        return QRectF(self.width() - 2 * TAG_H, 0, TAG_H, TAG_H).adjusted(4, 4, -4, -4)
+
+    def _hit(self, pos) -> str | None:
+        if self.close_box().adjusted(-2, -4, 4, 4).contains(pos):
+            return "close"
+        if self.max_box().adjusted(-4, -4, 2, 4).contains(pos):
+            return "max"
+        return None
+
     def mouseMoveEvent(self, e) -> None:  # noqa: N802
-        hot = self.close_box().contains(e.position())
+        hot = self._hit(e.position())
         if hot != self.hot:
             self.hot = hot
             self.update()
 
     def leaveEvent(self, _e) -> None:  # noqa: N802
-        self.hot = False
+        self.hot = None
         self.update()
 
     def mousePressEvent(self, e) -> None:  # noqa: N802
-        if self.close_box().adjusted(-6, -4, 4, 4).contains(e.position()):
+        hit = self._hit(e.position())
+        if hit == "close":
             self.owner.closed()
+        elif hit == "max":
+            self.owner.toggle_max()
+
+    def mouseDoubleClickEvent(self, e) -> None:  # noqa: N802
+        if self._hit(e.position()) is None:
+            self.owner.toggle_max()
 
     def paintEvent(self, _e) -> None:  # noqa: N802
         p = QPainter(self)
@@ -460,16 +501,31 @@ class AppTag(QWidget):
         p.drawEllipse(QPointF(13, r.center().y()), 3.2, 3.2)
         p.setFont(self.font_)
         p.setPen(QColor("white"))
-        p.drawText(QRectF(22, 0, self.width() - 22 - TAG_H, self.height()),
+        p.drawText(QRectF(22, 0, self.width() - 22 - 2 * TAG_H, self.height()),
                    Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self.text)
+        pen = QPen(QColor("white"), 1.6)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        # Fill the screen (or back): a square, or two overlapping when it does.
+        box = self.max_box()
+        if self.hot == "max":
+            p.setBrush(QColor(255, 255, 255, 60))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.drawEllipse(box)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(pen)
+        c, k = box.center(), 3.4
+        if self.owner.maxed is None:
+            p.drawRoundedRect(QRectF(c.x() - k, c.y() - k, 2 * k, 2 * k), 1.2, 1.2)
+        else:
+            p.drawRoundedRect(QRectF(c.x() - k, c.y() - k + 1.6, 2 * k - 1.6, 2 * k - 1.6), 1.0, 1.0)
+            p.drawLine(QPointF(c.x() - k + 1.6, c.y() - k), QPointF(c.x() + k, c.y() - k))
+            p.drawLine(QPointF(c.x() + k, c.y() - k), QPointF(c.x() + k, c.y() + k - 1.6))
         box = self.close_box()
-        if self.hot:
+        if self.hot == "close":
             p.setBrush(QColor(255, 80, 80, 220))
             p.setPen(Qt.PenStyle.NoPen)
             p.drawEllipse(box)
         c, k = box.center(), 3.6
-        pen = QPen(QColor("white"), 1.6)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         p.setPen(pen)
         p.drawLine(c + QPointF(-k, -k), c + QPointF(k, k))
         p.drawLine(c + QPointF(-k, k), c + QPointF(k, -k))
@@ -490,7 +546,15 @@ class AppWindow(MirrorWindow):
         flags = (Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool | Qt.WindowType.WindowDoesNotAcceptFocus
                  | Qt.WindowType.NoDropShadowWindowHint)
         self.setWindowFlags(flags)
+        # Solid: no see-through window (on Windows a see-through window is
+        # redrawn by the processor, every frame), and its round corners cut
+        # out by a mask instead.
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, False)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+        self.maxed: QRect | None = None  # filling its screen: where it was before
+        self._masked: tuple | None = None
         self.setMouseTracking(True)
         self.tag = AppTag(self)
         if self.ok:
@@ -507,8 +571,7 @@ class AppWindow(MirrorWindow):
             self._raised = spec.get("raise", 0)
             self._carried = carried
             self._to_front()
-        self.setWindowOpacity(0.88 if spec.get("carried") and self.isVisible() else
-                              (1.0 if self.isVisible() and time.monotonic() - self.shown_at > FADE_S else self.windowOpacity()))
+        self._mask()
         self._place_tag()
         return ok
 
@@ -555,10 +618,44 @@ class AppWindow(MirrorWindow):
             self.tag = None
         super().close_soon()
 
-    def tick(self) -> None:
-        super().tick()
-        if self.spec.get("carried"):
-            self.setWindowOpacity(min(self.windowOpacity(), 0.88))
+    def setWindowOpacity(self, _level: float) -> None:  # noqa: N802
+        """Never see-through (mirror mode's mirrors fade in and out; an app
+        doesn't): it would make Windows draw it the slow way."""
+
+    def _mask(self) -> None:
+        """Round corners like the app's own, cut out of the solid window."""
+        corner = float(self.spec.get("corner") or 0)
+        key = (self.width(), self.height(), round(corner, 1))
+        if key == self._masked:
+            return
+        self._masked = key
+        if corner <= 0:
+            self.clearMask()
+            return
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(self.rect()), corner, corner)
+        self.setMask(QRegion(path.toFillPolygon().toPolygon()))
+
+    def resizeEvent(self, e) -> None:  # noqa: N802
+        super().resizeEvent(e)
+        self._mask()
+
+    def toggle_max(self) -> None:
+        """Fill its screen (as much as apps get: not the taskbar or the menu
+        bar), or back to where it was; the app itself takes the size."""
+        sc = self.screen()
+        if sc is None:
+            return
+        if self.maxed is None:
+            self.maxed = self.geometry()
+            g = sc.availableGeometry()
+        else:
+            g, self.maxed = self.maxed, None
+        self.setGeometry(g)
+        self._place_tag()
+        if self.tag is not None:
+            self.tag.update()
+        self._tell_view(os=logical_to_os(self.spec, g.x(), g.y(), g.width(), g.height()))
 
     def _tell_view(self, **data) -> None:
         if self.app_out is not None:
@@ -619,6 +716,7 @@ class AppWindow(MirrorWindow):
         if self.pixmap is None and not whole:
             return
         p = QPainter(self)
+        p.fillRect(self.rect(), QColor(0, 0, 0))  # solid: what the picture doesn't cover
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         pic = QRectF(self.canvas.rect()) if whole else QRectF(self.pixmap.rect())
