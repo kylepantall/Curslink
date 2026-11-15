@@ -287,13 +287,21 @@ class ConfigFile:
         return list(self.raw().get("layout", {}).get("fit", []))
 
     def set_fit(self, behind: str, front: str, x: float, y: float, scale: float, quad=None, eye=None,
-                depth=None, mm: float | None = None, keep_lean: bool = False) -> None:
+                depth=None, mm: float | None = None, keep_lean: bool = False, bezel=None) -> None:
         """Calibrate where screen ``front`` really stands on ``behind``
         ("device/screen", see curslink.layout.Fit); replaces an earlier one.
         ``quad``, ``eye``, ``depth``, ``mm``: how it leans and where it's
         seen from, as a live line-up measures them. ``keep_lean``: the
         earlier one's lean is kept, moved and resized along with it (the
-        mirror dragged into place by hand)."""
+        mirror dragged into place by hand), and its ``bezel`` (the frame
+        round the front screen, in its pixels) either way unless one is given."""
+        if bezel is None:
+            for t in self.fits():
+                if (t.get("behind"), t.get("front")) == (behind, front) and "bezel" in t:
+                    try:
+                        bezel = [float(v) for v in t["bezel"]]
+                    except (TypeError, ValueError):
+                        bezel = None
         if keep_lean and quad is None:
             for t in self.fits():
                 if (t.get("behind"), t.get("front")) != (behind, front) or "quad" not in t:
@@ -321,6 +329,8 @@ class ConfigFile:
                 t["depth"] = [round(float(v), 1) for v in depth]
                 if mm:
                     t["mm"] = round(float(mm), 5)
+        if bezel is not None and len(bezel) == 4 and any(float(v) > 0 for v in bezel):
+            t["bezel"] = [round(max(0.0, float(v)), 1) for v in bezel]
         layout["fit"].append(t)
 
     def remove_fit(self, behind: str, front: str) -> bool:

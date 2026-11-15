@@ -238,6 +238,15 @@ class SettingsPage(QStackedWidget):
             "needs a 120 Hz screen. Auto goes up to 120 while the network is quick and drops to 30 or 15 "
             "when it's busy or slow."),
             self.mirror_fps)
+        self.bezels = Toggle("Allow for the frame round the screen in front")
+        self.bezels.clicked.connect(lambda on: self.set_config("layout", "bezels", on))
+        self.bezels_row = self.mirror_card.add_row(text_block(
+            "Allow for the frame round the screen in front",
+            "The frame (bezel) round a screen in front hides a little more of the screen behind than its glass "
+            "does, so a line of text can run under it. With this on, the screen in front shows everything it "
+            "and its frame hide, squeezed in a touch, so nothing is lost behind the frame, and the pointer "
+            "crosses at the frame's outer edge. Line up with a camera measures the frame; until then it's "
+            "taken as 6 mm all round."), self.bezels)
         self.follow_head = Toggle("Follow my head (experimental)")
         self.follow_head.clicked.connect(lambda on: self.set_config("layout", "follow_head", on))
         self.head_home = button("Sit here", None, lambda: self.app.service.send("head home"))
@@ -499,6 +508,8 @@ class SettingsPage(QStackedWidget):
             fps = layout_raw.get("mirror_fps", "auto")
             self.mirror_fps.set_value(str(fps) if str(fps) in ("30", "60", "120") else "auto")
             self.mirror_fps_row.setVisible(overlap and self.mirror.isChecked())
+            self.bezels.setChecked(bool(layout_raw.get("bezels", False)))
+            self.bezels_row.setVisible(overlap and self.mirror.isChecked())
             self.follow_head.setChecked(bool(layout_raw.get("follow_head", False)))
             self.follow_head_row.setVisible(overlap and self.mirror.isChecked())
             self.head_home.setVisible(self.follow_head.isChecked())

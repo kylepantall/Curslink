@@ -1366,7 +1366,6 @@ def start_head_follow(cfg: HostConfig, mirror, loop: asyncio.AbstractEventLoop, 
         return None
     try:
         from curslink.gaze import tracker as tracking
-        from curslink.gaze.cameras import resolve
         from curslink.headfollow import HeadFollow
     except ImportError as exc:  # pragma: no cover - the gaze extra is missing
         log.error("head tracking needs the gaze extra (pip install curslink[gaze]): %s", exc)
@@ -1379,13 +1378,15 @@ def start_head_follow(cfg: HostConfig, mirror, loop: asyncio.AbstractEventLoop, 
 
     def camera_if_needed() -> None:
         # Gaze switching is off, so nothing else has the camera open. Only
-        # once there's an overlap to follow: the camera (and loading OpenCV)
-        # for nothing froze Kyle's PC host in 0.4.98/0.4.99 (``import cv2``
-        # sat in a DLL load for minutes, and no thread could start meanwhile).
+        # once there's an overlap to follow, and in a process of its own
+        # (curslink.headcamera): loading OpenCV on a thread here froze
+        # Kyle's PC host in 0.4.98 to 0.4.100 (``import cv2`` sat in a DLL
+        # load for minutes, and no thread could start meanwhile).
         if own_camera and head.tracker is None and follow.wanted():
+            from curslink.headcamera import HeadCameraProcess
+
             log.info("head tracking: an overlap to follow, so starting this computer's camera")
-            head.tracker = tracking.HeadPoseTracker(lambda *_sample: None,
-                                                    camera=resolve(cfg.gaze.camera, cfg.gaze.camera_name))
+            head.tracker = HeadCameraProcess(cfg.gaze.camera, tracking.head_listener, cfg.gaze.camera_name)
             head.tracker.start()
 
     async def tick() -> None:

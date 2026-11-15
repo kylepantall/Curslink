@@ -133,6 +133,12 @@ class Patch:
     band: tuple[float, float, float, float]
     strip: tuple[float, float, float, float]
     out: float | None = None  # the break last read here, in the back screen's pixels (None: not read)
+    # For the frame round the front screen (its bezel): which of its edges
+    # this is at ("left", "top", "right", "bottom"), that edge's two ends in
+    # the back screen's pixels, and which way is out across it (-1 or 1).
+    edge: str = ""
+    ends: tuple = ()
+    way: int = 0
 
 
 @dataclass
@@ -150,6 +156,9 @@ class Join:
     read: int = 0  # frames it's been read in
     moved: float = 0.0
     wants: list = field(default_factory=list)  # the fit each frame read asked for: (x, y, scale)
+    # How wide the frame round the front screen was seen to be at each edge,
+    # frame by frame, in the back screen's pixels: {"top": [..], ...}
+    frames: dict = field(default_factory=dict)
 
 
 def _move(fit: dict, x: float, y: float, scale: float) -> None:
@@ -248,11 +257,11 @@ class Seam:
         # Each edge of the front screen with the back one showing beyond it:
         # (is it a top/bottom edge, its two ends, which way is out, the strip
         # along it on the front screen).
-        edges = [(True, tl, tr, -1, (0.0, 0.0, F.width, deep_f)),
-                 (True, bl, br, 1, (0.0, F.height - deep_f, F.width, F.height)),
-                 (False, tl, bl, -1, (0.0, 0.0, deep_f, F.height)),
-                 (False, tr, br, 1, (F.width - deep_f, 0.0, F.width, F.height))]
-        for flat, p0, p1, way, strip_area in edges:
+        edges = [(True, tl, tr, -1, (0.0, 0.0, F.width, deep_f), "top"),
+                 (True, bl, br, 1, (0.0, F.height - deep_f, F.width, F.height), "bottom"),
+                 (False, tl, bl, -1, (0.0, 0.0, deep_f, F.height), "left"),
+                 (False, tr, br, 1, (F.width - deep_f, 0.0, F.width, F.height), "right")]
+        for flat, p0, p1, way, strip_area, name in edges:
             i, o = (0, 1) if flat else (1, 0)  # along the edge, and across it
             limit, length = (B.height, B.width) if flat else (B.width, B.height)
             if abs(p1[i] - p0[i]) < 1:
@@ -284,7 +293,7 @@ class Seam:
                 m = 0.5 * cell
                 if hit((band[0] - m, band[1] - m, band[2] + m, band[3] + m), on_b):
                     continue
-                found.append(Patch(band, strip))
+                found.append(Patch(band, strip, edge=name, ends=(p0, p1), way=way))
             if not found:
                 continue
             patches.extend(found)
@@ -343,7 +352,117 @@ class Seam:
         return out
 
     def fits(self) -> list[dict]:
-        return [dict(j.fit) for j in self.joins]
+        """The fits as they now are, each with the frame round its front
+        screen where that was seen (``"bezel"``: left, top, right, bottom, in
+        the front screen's pixels; an edge it wasn't seen at, as the others)."""
+        out = []
+        for j in self.joins:
+            fit = dict(j.fit)
+            bezel = self.bezel(j)
+            if bezel is not None:
+                fit["bezel"] = bezel
+            out.append(fit)
+        return out
+
+    # ---- the frame round the front screen ----
+    def _frame_width(self, gray, join: Join, patches: list[Patch], view, shift, cam) -> float | None:
+        """How far out from the front screen's edge the back screen's pattern
+        first shows, at the edge these ``patches`` are along: the width of
+        the frame there (and of any gap the camera sees past it), in the back
+        screen's pixels. The band is drawn right up to and under that edge,
+        so where the camera doesn't see the pattern it should, something's in
+        the way. ``shift``: how far out the laying-out is (as the band was
+        read). ``cam``: where the camera is (the edge is where the fit says
+        from the eye; from the camera it's seen a little off that, by the
+        desk as solved). None if it can't be told."""
+        import numpy as np
+
+        from curslink.lineup_check import _project
+        from curslink.lineup_scene import project_from
+
+        r, t = view
+        F, B = self.sol.screens[join.front], self.sol.screens[join.behind]
+        shape = _fit_of(join.fit)
+        cell = join.cell
+        step = cell / SAMPLES
+        out_to = GAP * min(B.width, B.height) + DEEP * cell
+        ds = np.arange(step / 2, out_to, step)
+        seen_rows, want_rows, inside_rows = [], [], []
+        for p in patches:
+            flat = p.edge in ("top", "bottom")
+            i, o = (0, 1) if flat else (1, 0)
+            (a0, a1) = (p.band[0], p.band[2]) if flat else (p.band[1], p.band[3])
+            along = np.arange(a0 + step / 2, a1, step)
+            p0, p1 = p.ends
+            edge = p0[o] + (p1[o] - p0[o]) * (along - p0[i]) / (p1[i] - p0[i])  # where the edge is, all along
+            mid = [0.0, 0.0]
+            mid[i], mid[o] = float(along.mean()), float(edge.mean())
+            there = F.at([shape.to_front((F.width, F.height), *mid)])
+            from_cam, from_eye = project_from(cam, B, there), project_from(self.sol.eye, B, there)
+            if from_cam is not None and from_eye is not None:
+                edge = edge + float(from_cam[0][o] - from_eye[0][o])
+            pts = np.zeros((len(ds), len(along), 2))
+            pts[..., i] = along[None, :]
+            pts[..., o] = edge[None, :] + p.way * ds[:, None]
+            seen = _sample(gray, _project(self.intr, r, t, B.at((pts + np.asarray(shift)).reshape(-1, 2)))
+                           .reshape(len(ds), len(along), 2))
+            ci = np.floor(pts[..., 0] / cell).astype(np.int64)
+            cj = np.floor(pts[..., 1] / cell).astype(np.int64)
+            h = (ci * 73856093 ^ cj * 19349663 ^ join.seed * 83492791) & 0xFFFFFFFF
+            h ^= h >> 13
+            h = (h * 0x5BD1E995) & 0xFFFFFFFF
+            h ^= h >> 15
+            # (Not where two blocks meet: the camera's blur mixes them there.)
+            fx, fy = (pts[..., 0] / cell) % 1.0, (pts[..., 1] / cell) % 1.0
+            inside_rows.append((fx > 0.2) & (fx < 0.8) & (fy > 0.2) & (fy < 0.8))
+            seen_rows.append(seen)
+            want_rows.append((h & 1).astype(np.float64))
+        seen, want = np.concatenate(seen_rows, axis=1), np.concatenate(want_rows, axis=1)
+        inside = np.concatenate(inside_rows, axis=1)
+        if np.isnan(seen).mean() > 0.02:
+            return None
+        seen = np.nan_to_num(seen, nan=float(np.nanmean(seen)))
+        # Black and white as the far end of the band shows them (nothing's in the way out there).
+        far = ds > out_to - 1.5 * cell
+        if not (far[:, None] & inside).any() or want[far[:, None] & inside].std() < 0.2:
+            return None
+        there = far[:, None] & inside
+        white, black = seen[there & (want > 0.5)].mean(), seen[there & (want < 0.5)].mean()
+        if not white - black > 25:
+            return None
+        # How much of each line along the edge shows what it should.
+        right = np.abs((seen - black) / (white - black) - want) < 0.4
+        count = inside.sum(axis=1)
+        share = (right & inside).sum(axis=1) / np.maximum(1, count)
+        # (A line along where blocks meet, or with too few white blocks in
+        # it to tell from a dark frame, says nothing.)
+        whites = (inside & (want > 0.5)).sum(axis=1)
+        telling = (count >= 0.25 * inside.shape[1]) & (whites >= 0.15 * np.maximum(1, count))
+        ok = np.where(telling, share > 0.8, True)
+        if not telling[far].any() or not ok[far].all():
+            return None
+        clear = len(ds)
+        while clear > 0 and ok[clear - 1]:
+            clear -= 1
+        while clear < len(ds) and not telling[clear]:
+            clear += 1  # (lines that can't tell don't count as seen)
+        if clear >= len(ds) - 1:
+            return None
+        return float(ds[clear] - step / 2)
+
+    def bezel(self, join: Join) -> list[float] | None:
+        """The frame round ``join``'s front screen (left, top, right,
+        bottom) in that screen's own pixels: the middle of what the frames
+        read said at each edge, an edge never read as the middle of those
+        that were. None if none was."""
+        import numpy as np
+
+        read = {e: float(np.median(v)) for e, v in join.frames.items() if len(v) >= 3}
+        if not read:
+            return None
+        rest = float(np.median(list(read.values())))
+        s = join.fit["scale"]
+        return [round(max(0.0, read.get(e, rest)) / s, 1) for e in ("left", "top", "right", "bottom")]
 
     # ---- a frame ----
     def _ideal(self, join: Join, rect, step: float):
@@ -419,9 +538,12 @@ class Seam:
             cam = -(both[0].T @ both[1])
             centres, breaks = [], []
             shape = _fit_of(join.fit)
+            bands: dict[str, list] = {}
             for patch in join.patches:
                 band = self._shift(gray, join, patch.band, view)
                 strip = self._shift(gray, join, patch.strip, view) if band is not None else None
+                if band is not None:
+                    bands.setdefault(patch.edge, []).append((patch, band))
                 if band is None or strip is None:
                     patch.out = None
                     continue
@@ -439,6 +561,11 @@ class Seam:
                 patch.out = float(np.linalg.norm(d))
                 centres.append(((patch.strip[0] + patch.strip[2]) / 2, (patch.strip[1] + patch.strip[3]) / 2))
                 breaks.append(d)
+            for edge, read in bands.items():
+                shift = np.median(np.array([b for _p, b in read]), axis=0)
+                wide = self._frame_width(gray, join, [p for p, _b in read], view, shift, cam)
+                if wide is not None:
+                    join.frames.setdefault(edge, []).append(wide)
             if not breaks:
                 join.out = None
                 continue

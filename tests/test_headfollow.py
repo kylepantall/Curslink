@@ -225,8 +225,8 @@ def test_the_host_follows_the_head_with_a_camera_of_its_own_when_gaze_is_off(mon
     started = []
 
     class FakeTracker:
-        def __init__(self, on_sample, camera=0):
-            self.camera, self.stopped = camera, False
+        def __init__(self, camera, on_head, name=None):
+            self.camera, self.on_head, self.stopped = camera, on_head, False
             started.append(self)
 
         def start(self):
@@ -235,7 +235,10 @@ def test_the_host_follows_the_head_with_a_camera_of_its_own_when_gaze_is_off(mon
         def stop(self):
             self.stopped = True
 
-    monkeypatch.setattr(tracking, "HeadPoseTracker", FakeTracker)
+    # (A process of its own, not a thread of the host's: curslink.headcamera.)
+    import curslink.headcamera as headcamera
+
+    monkeypatch.setattr(headcamera, "HeadCameraProcess", FakeTracker)
     monkeypatch.setattr(app, "head_home_path", lambda: tmp_path / "head-home.json")
 
     async def go():
@@ -245,6 +248,7 @@ def test_the_host_follows_the_head_with_a_camera_of_its_own_when_gaze_is_off(mon
         cfg, mirror = FakeConfig(), FakeMirror()
         head = app.start_head_follow(cfg, mirror, loop, own_camera=True)
         assert len(started) == 1 and tracking.head_listener is not None
+        assert started[0].on_head is tracking.head_listener
         # What a tracker's thread says goes to the loop, and on to the overlaps.
         t = 50.0
         for at in ((10.0, -40.0, 600.0), (45.0, -40.0, 600.0)):
@@ -271,3 +275,61 @@ def test_follow_head_is_read_from_the_layout_table():
     assert _follow_head({}) is False and _follow_head({"follow_head": True}) is True
     with pytest.raises(ConfigError):
         _follow_head({"follow_head": "yes"})
+
+
+def test_the_head_camera_is_a_process_of_its_own_that_the_host_only_reads_lines_from(monkeypatch):
+    """On a Windows host, loading the camera's libraries on one of the
+    host's own threads held the whole host up for minutes: they're loaded
+    in a child, which prints where the head is."""
+    import sys
+    import time
+
+    from curslink import headcamera
+
+    assert headcamera.parse("h 12.5 -40.0 610.2\n") == (12.5, -40.0, 610.2)
+    assert headcamera.parse("h 1 2") is None and headcamera.parse("x 1 2 3") is None
+    assert headcamera.parse("h a b c") is None
+    assert headcamera.command(1, "FHD cam")[-3:] == ["curslink.headcamera", "1", "FHD cam"]
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    assert headcamera.command(2)[1:] == ["_head-camera", "2"]
+    monkeypatch.undo()
+    # A child that says where the head is twice, then waits to be stopped.
+    script = ("import sys\nprint('h 10.0 -20.0 600.0', flush=True)\nprint('nonsense', flush=True)\n"
+              "print('h 11.0 -20.0 601.0', flush=True)\nprint('camera 0: open', file=sys.stderr, flush=True)\n"
+              "sys.stdin.read()\n")
+    monkeypatch.setattr(headcamera, "command", lambda camera, name=None: [sys.executable, "-c", script])
+    seen = []
+    proc = headcamera.HeadCameraProcess(0, lambda t, at: seen.append((t, at)))
+    proc.start()
+    deadline = time.monotonic() + 20
+    while len(seen) < 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert [at for _t, at in seen] == [(10.0, -20.0, 600.0), (11.0, -20.0, 601.0)]
+    assert abs(seen[0][0] - time.monotonic()) < 20 and proc.alive()
+    child = proc._proc
+    proc.stop()
+    assert child.poll() is not None and not proc.alive()  # closing its stdin was enough
+
+
+def test_a_head_camera_that_dies_is_started_again_a_few_times(monkeypatch):
+    import sys
+    import time
+
+    from curslink import headcamera
+
+    starts = []
+
+    def command(camera, name=None):
+        starts.append(camera)
+        return [sys.executable, "-c", "raise SystemExit(3)"]
+
+    monkeypatch.setattr(headcamera, "command", command)
+    monkeypatch.setattr(headcamera, "RESTART_AFTER_S", 0.01)
+    proc = headcamera.HeadCameraProcess(4, lambda t, at: None)
+    proc.start()
+    deadline = time.monotonic() + 30
+    while len(starts) < headcamera.RESTARTS + 1 and time.monotonic() < deadline:
+        time.sleep(0.02)
+    time.sleep(0.3)
+    assert len(starts) == headcamera.RESTARTS + 1 and "exit code 3" in proc.error
+    proc.stop()
