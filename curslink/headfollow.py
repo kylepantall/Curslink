@@ -140,6 +140,16 @@ class HeadFollow:
         self.base = {(f.behind, f.front): f for f in self.layout.fits if f.follows and self._mm(f)}
         self._mine = self.layout.fits
 
+    def wanted(self) -> bool:
+        """Is there an overlap to follow (one through a live line-up)? Looks
+        again if the layout's fits changed since."""
+        if self.layout.fits is not self._mine:
+            self._take()
+            self._load_home()
+            if self.home is None:
+                self._settling = []
+        return bool(self.base)
+
     def _mm(self, fit: Fit) -> float | None:
         """The size of one of the screen behind's pixels."""
         if fit.mm:

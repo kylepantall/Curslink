@@ -316,11 +316,17 @@ def parse_layout(raw: dict[str, Any]) -> Layout:
     if not isinstance(mirror, bool) or not isinstance(mirror_pointer, bool):
         raise ConfigError("[layout].mirror and mirror_pointer must be true or false")
     mirror = mirror and allow_overlap
+    bezels = raw.get("layout", {}).get("bezels", False)
+    if not isinstance(bezels, bool):
+        raise ConfigError("[layout].bezels must be true or false")
     try:
-        return Layout.from_devices(devices, allow_overlap, links, pointer_through=mirror and mirror_pointer,
-                                   mirror=mirror, fits=parse_fits(raw.get("layout", {}).get("fit", []), devices),
-                                   mirror_joined=parse_mirror_joined(raw.get("layout", {}).get("mirror_joined", {}),
-                                                                     devices))
+        layout = Layout.from_devices(devices, allow_overlap, links, pointer_through=mirror and mirror_pointer,
+                                     mirror=mirror, fits=parse_fits(raw.get("layout", {}).get("fit", []), devices),
+                                     mirror_joined=parse_mirror_joined(raw.get("layout", {}).get("mirror_joined", {}),
+                                                                       devices))
+        # Count the frame round a screen in front as part of it (Layout.seen_fit).
+        layout.bezels = bezels
+        return layout
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
 
@@ -404,7 +410,8 @@ def parse_fits(value: Any, devices: list[Device]) -> list[Fit]:
 
     A live line-up also writes how the screen in front leans (``quad``: its
     four corners on the screen behind) and where it was seen from (``eye``,
-    ``depth``, ``mm``): see curslink.layout.Fit.
+    ``depth``, ``mm``), and how wide the frame round it is (``bezel``: left,
+    top, right, bottom, in its own pixels): see curslink.layout.Fit.
 
     One naming a screen no longer in the layout is skipped."""
     if not isinstance(value, list):
@@ -424,7 +431,7 @@ def parse_fits(value: Any, devices: list[Device]) -> list[Fit]:
         if not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in nums) or not nums[2] > 0:
             raise ConfigError(f"[[layout.fit]] #{i + 1}: x and y must be numbers and scale more than 0")
         more = {}
-        for k, n in (("quad", 8), ("eye", 3), ("depth", 4)):
+        for k, n in (("quad", 8), ("eye", 3), ("depth", 4), ("bezel", 4)):
             if k in t:
                 v = t[k]
                 if not isinstance(v, list) or len(v) != n \

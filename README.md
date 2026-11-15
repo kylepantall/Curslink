@@ -121,10 +121,15 @@ rectangle: the line-up measures that shape, and the mirror and the pointer
 go by it. (What lines up still depends on where you look from. **Settings >
 Overlapping screens > Follow my head** is an experiment that watches your
 head with this computer's camera and keeps the overlap lined up as you
-move.) Without the
+move.) The pattern step also measures the frame (bezel) round the screen
+in front: with **Settings > Overlapping screens > Allow for the frame round
+the screen in front** on, that screen shows everything it and its frame
+hide of the one behind, so a line of text never runs under the frame. A
+line-up that passes these checks is saved by itself; one that doesn't
+(or a single photo) is left for you to check and press **Save layout**.
+Without the
 app, take one photo of the desk with any camera and choose it there: that
-works too, but one photo can't tell how far away each screen is. Check the
-result and press **Save layout**.
+works too, but one photo can't tell how far away each screen is.
 
 **From the command line:**
 

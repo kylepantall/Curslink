@@ -479,6 +479,17 @@ class HostServer:
             await asyncio.sleep(TUNE_EVERY_S)
             self.retune(conn)
 
+    def _our_end(self, conn: AgentConnection) -> dict | None:
+        """Our interface on this connection, briefly (``{kind, name, cable?}``)."""
+        if conn.relay:
+            return None
+        from curslink.net.check import brief, interface_for
+
+        try:
+            return brief(interface_for(_sockname(conn.writer), _iface_cache().get()))
+        except Exception:  # noqa: BLE001 - it's only for the Network page
+            return None
+
     async def _ping(self, conn: AgentConnection) -> None:
         loop = asyncio.get_running_loop()
         n = 0
@@ -496,7 +507,22 @@ class HostServer:
                 stats = conn.rtt.stats()
                 extra = {"rtt_ms": stats["p50_ms"], "p95_ms": stats["p95_ms"], "jitter_ms": stats["jitter_ms"],
                          "tuning": conn.tuning.reason}
+                iface = self._our_end(conn)
+                if iface:
+                    extra["iface"] = iface  # so the agent can say how the two are linked
             self.send(conn.device_id, "ping", n=n, ts=round(time.monotonic() * 1000.0, 2), **extra)
+
+
+_IFACES = None
+
+
+def _iface_cache():
+    global _IFACES
+    if _IFACES is None:
+        from curslink.net.check import InterfaceCache
+
+        _IFACES = InterfaceCache()
+    return _IFACES
 
 
 def _ping_interval(value) -> float:

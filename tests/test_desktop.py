@@ -7,6 +7,7 @@ import io
 import json
 import plistlib
 import sys
+import time
 
 import pytest
 
@@ -872,7 +873,7 @@ def _pc_capture(monkeypatch):
     capture._mac = False
     capture._hider = None
     restarts = []
-    capture._restart = lambda: restarts.append(1)
+    capture._restart = lambda *a, **k: restarts.append(1) or True
     keys = []
 
     class Handler:
@@ -939,7 +940,7 @@ def test_windows_puts_dropped_hooks_back_and_gives_up_if_they_keep_going(monkeyp
         if checks["n"] > 12:
             capture._closed = True
 
-    capture._restart = lambda: restarts.append(1)
+    capture._restart = lambda *a, **k: restarts.append(1) or True
     monkeypatch.setattr(pb.time, "sleep", sleep)
     capture._watch_hooks()
     assert capture.hooks_lost >= 1 and restarts
@@ -1005,3 +1006,142 @@ def test_the_windows_host_and_agent_work_in_physical_pixels(monkeypatch):
     monkeypatch.setattr(cli.sys, "platform", "darwin")
     cli.windows_dpi_aware()
     assert calls == [per_monitor_v2]
+
+
+class _FakeHook:
+    def __init__(self, suppress=False):
+        self._suppress = suppress
+        self.running = True
+
+    def is_alive(self):
+        return True
+
+
+def test_windows_switches_by_flipping_the_hooks_it_has_not_by_starting_new_ones(monkeypatch):
+    # 0.4.99: a switch to the Mac made new hooks (new threads), and a thread
+    # couldn't start while `import cv2` held Windows' loader lock: the host
+    # stuck mid-switch with the old hooks out and the cursor blank.
+    pb, capture, _, restarts = _pc_capture(monkeypatch)
+    monkeypatch.setattr(pb.sys, "platform", "win32")
+    mouse, keys = _FakeHook(), _FakeHook()
+    capture._mouse_listener, capture._key_listener = mouse, keys
+    restarts.clear()
+    capture.set_grab(True)
+    assert mouse._suppress and keys._suppress and not restarts
+    capture.set_grab(False)
+    assert not mouse._suppress and not keys._suppress and not restarts
+    mouse.running = False                       # a hook that's gone: new ones, as before
+    capture.set_grab(True)
+    assert restarts == [1]
+
+
+def test_the_safety_nets_need_no_new_thread_and_dont_wait_behind_a_stuck_switch(monkeypatch):
+    import threading
+
+    pb, capture, _, _ = _pc_capture(monkeypatch)
+    monkeypatch.undo()  # the real _take_back_soon (the helper made it call take_back directly)
+    monkeypatch.setattr(pb, "key_to_name", lambda key: key)
+    monkeypatch.setattr(pb, "RESTART_WAIT_S", 0.05)
+    started = []
+    real_start = threading.Thread.start
+    monkeypatch.setattr(threading.Thread, "start", lambda self: started.append(self.name) or real_start(self))
+    worker = threading.Thread(target=capture._take_back_worker, daemon=True)
+    real_start(worker)
+    shown = []
+
+    class Hider:
+        def show(self):
+            shown.append(1)
+
+    capture._hider = Hider()
+    capture._grabbed = True
+    # Another thread is stuck putting the hooks back (the switch, in 0.4.99).
+    del capture._restart
+    capture._restart_lock.acquire()
+    try:
+        for _ in range(3):
+            capture._on_key("esc", True, False)
+        for _ in range(100):
+            if capture.took_back and not capture._grabbed:
+                break
+            time.sleep(0.01)
+        assert capture.took_back and not capture._grabbed and shown
+        assert started == []                       # no thread started for it
+    finally:
+        capture._restart_lock.release()
+        capture._closed = True
+        capture._take_back_wake.set()
+
+
+def test_the_hooks_watchdog_takes_input_back_when_the_loop_is_stuck_even_with_no_hooks(monkeypatch):
+    pb, capture, _, _ = _pc_capture(monkeypatch)
+    capture._grabbed = True
+    capture.loop_alive = lambda: False
+    monkeypatch.setattr(pb.time, "sleep", lambda _s: setattr(capture, "_closed", capture.took_back))
+    capture._watch_hooks()
+    assert capture.took_back and not capture._grabbed
+
+
+def test_the_app_puts_the_cursor_back_and_restarts_a_child_that_stops_beating(monkeypatch):
+    pytest.importorskip("PySide6")
+    import curslink.cursorhide as cursorhide
+    from curslink.gui import service as svc
+
+    restored = []
+    monkeypatch.setattr(cursorhide, "restore_windows", lambda: restored.append(1))
+
+    class Proc:
+        pid = 42
+        killed = False
+
+        def poll(self):
+            return None
+
+        def kill(self):
+            self.killed = True
+
+    s = svc.Service.__new__(svc.Service)  # no QObject (no Qt app here): just the watchdog's state
+    s.role, s._stopping, s._proc = "host", False, Proc()
+    s._beat_at, s._cursor_put_back, s._killed_stuck = None, False, None
+    s._watched_at = 0.0
+    for t in range(1, 30):
+        s._watch(float(t))
+    assert not restored and not s._proc.killed      # never beat (an older version): not watched
+    s.beat(30.0)
+    s._watch(31.0)
+    s._watch(32.0)
+    s._watch(33.0)
+    assert not restored
+    s._watch(34.0)
+    assert restored == [1] and not s._proc.killed
+    s._watch(35.0)
+    assert restored == [1]                          # once per stall
+    s.beat(36.0)
+    assert not s._cursor_put_back
+    for t in range(37, 49):
+        s._watch(float(t))
+    assert s._proc.killed and s._killed_stuck is s._proc
+
+
+def test_the_app_doesnt_count_time_it_was_asleep_against_the_child(monkeypatch):
+    pytest.importorskip("PySide6")
+    from curslink.gui import service as svc
+
+    class Proc:
+        pid = 42
+        killed = False
+
+        def poll(self):
+            return None
+
+        def kill(self):
+            self.killed = True
+
+    s = svc.Service.__new__(svc.Service)
+    s.role, s._stopping, s._proc = "host", False, Proc()
+    s._beat_at, s._cursor_put_back, s._killed_stuck = None, False, None
+    s._watched_at = 100.0
+    s.beat(100.0)
+    s._watch(400.0)                                 # the computer slept
+    s._watch(401.0)
+    assert not s._proc.killed and not s._cursor_put_back

@@ -252,6 +252,24 @@ class HostRelays:
 
 LOOP_STALL_S = 1.5   # the loop that forwards input stuck this long: input goes home
 LOOP_BEAT_S = 0.2
+APP_BEAT_S = 1.0     # a "beat" event to the app this often, so it can tell this process is stuck
+
+
+def beat_to_app() -> asyncio.Task | None:
+    """Tell the app (``--events``) every APP_BEAT_S that the loop is going.
+    The app (curslink.gui.service) is a process of its own: if the beats
+    stop, it puts the cursor back and, stuck long enough, starts this
+    process again. Nothing in here can do that once the loop and the
+    threads are stuck (0.4.99)."""
+    if not events.channel.enabled:
+        return None
+
+    async def run() -> None:
+        while True:
+            events.emit("beat")
+            await asyncio.sleep(APP_BEAT_S)
+
+    return asyncio.get_running_loop().create_task(run())
 
 
 def watch_input_loop(capture, router) -> asyncio.Task:
@@ -390,6 +408,7 @@ async def run_host(cfg: HostConfig) -> None:
         active=router.active_device, screen=router.screen.id,
         gaze=tracker is not None or (cfg.gaze.enabled and router.gaze_paused), gaze_paused=router.gaze_paused,
     )
+    beat_to_app()
     camera = HostCamera(tracker, lambda: start_gaze(cfg, arbiter, loop) if cfg.gaze.enabled else None,
                         lambda: arbiter.set_camera(cfg.device_id, False), loop)
 
@@ -1328,7 +1347,8 @@ class HeadCamera:
         from curslink.gaze import tracker as tracking
 
         tracking.head_listener = None
-        self.ticker.cancel()
+        if self.ticker is not None:
+            self.ticker.cancel()
         if self.tracker is not None:
             self.tracker.stop()
         self.follow.stop()
@@ -1351,7 +1371,6 @@ def start_head_follow(cfg: HostConfig, mirror, loop: asyncio.AbstractEventLoop, 
         return None
     try:
         from curslink.gaze import tracker as tracking
-        from curslink.gaze.cameras import resolve
         from curslink.headfollow import HeadFollow
     except ImportError as exc:  # pragma: no cover - the gaze extra is missing
         log.error("head tracking needs the gaze extra (pip install curslink[gaze]): %s", exc)
@@ -1360,18 +1379,30 @@ def start_head_follow(cfg: HostConfig, mirror, loop: asyncio.AbstractEventLoop, 
                         busy=lambda: mirror.tuning is not None or mirror.held is not None,
                         home_path=head_home_path())
     tracking.head_listener = lambda t, at: loop.call_soon_threadsafe(follow.sample, t, at)
-    tracker = None
-    if own_camera:
-        # Gaze switching is off, so nothing else has the camera open.
-        tracker = tracking.HeadPoseTracker(lambda *_sample: None, camera=resolve(cfg.gaze.camera, cfg.gaze.camera_name))
-        tracker.start()
+    head = HeadCamera(follow, None, None)
+
+    def camera_if_needed() -> None:
+        # Gaze switching is off, so nothing else has the camera open. Only
+        # once there's an overlap to follow, and in a process of its own
+        # (curslink.headcamera): loading OpenCV on a thread here froze
+        # Kyle's PC host in 0.4.98 to 0.4.100 (``import cv2`` sat in a DLL
+        # load for minutes, and no thread could start meanwhile).
+        if own_camera and head.tracker is None and follow.wanted():
+            from curslink.headcamera import HeadCameraProcess
+
+            log.info("head tracking: an overlap to follow, so starting this computer's camera")
+            head.tracker = HeadCameraProcess(cfg.gaze.camera, tracking.head_listener, cfg.gaze.camera_name)
+            head.tracker.start()
 
     async def tick() -> None:
         while True:
             await asyncio.sleep(1.0)
+            camera_if_needed()
             follow.tick()
 
-    return HeadCamera(follow, tracker, loop.create_task(tick()))
+    camera_if_needed()
+    head.ticker = loop.create_task(tick())
+    return head
 
 
 def gaze_off_path():
@@ -1571,6 +1602,9 @@ async def run_agent(cfg: AgentConfig) -> None:
         helpers.append(asyncio.create_task(follow_cable(cfg, store, client, session)))
     if events.channel.enabled:
         helpers.append(asyncio.create_task(report_network_agent(client, cfg.optimise, mdns)))
+    beats = beat_to_app()
+    if beats is not None:
+        helpers.append(beats)
     try:
         await asyncio.wait({runner, stopper}, return_when=asyncio.FIRST_COMPLETED)
         if runner.done():

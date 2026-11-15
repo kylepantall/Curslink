@@ -2131,3 +2131,90 @@ def test_leaning_fits_are_read_from_and_written_to_the_config(tmp_path):
     # Lined up afresh by clicking corners: a plain rectangle.
     cfg.set_fit("mac/screen2", "pc/main", f.x, f.y, f.scale)
     assert "quad" not in cfg.fits()[0] and "eye" not in cfg.fits()[0]
+
+
+def test_bezels_on_the_front_screen_stands_for_all_it_and_its_frame_hide():
+    """``[layout] bezels``: the frame round a screen in front hides more of
+    the one behind than its glass does. Counted in, the front screen shows
+    (and the pointer crosses into it over) everything it and its frame
+    hide, so no line of text runs under the frame."""
+    from dataclasses import replace
+
+    from curslink.layout import DEFAULT_BEZEL_MM, Fit
+
+    # One PC pixel is 0.5 Mac pixels; a frame of 20 PC pixels left, top and right, 60 below.
+    fit = Fit(("mac", "screen2"), ("pc", "main"), 1200, 600, 0.5, bezel=(20.0, 20.0, 20.0, 60.0))
+    lay = _fit_layout([fit])
+    mac, pc = lay.screen("mac", "screen2"), lay.screen("pc", "main")
+    (_front, behind, there), = lay.covered_parts(mac)
+    assert behind == (1200, 600, 1440, 768) and there == (1000, 1200, 2880, 1536)  # off: just the glass
+    assert lay.seen_fit(mac, pc) == replace(fit, bezel=None)
+    lay.bezels = True
+    (_front, behind, there), = lay.covered_parts(mac)
+    # 10 Mac pixels more to the left, top and right, 30 below: all shown on the whole of the PC's screen.
+    assert behind == (1190, 590, 1460, 808) and there == (1000, 1200, 2880, 1536)
+    grown = lay.seen_fit(mac, pc)
+    assert grown.quad == pytest.approx((1190, 590, 2650, 590, 2650, 1398, 1190, 1398)) and grown.bezel is None
+    assert (grown.x, grown.y) == (1190, 590) and 0.5 < grown.scale < 0.53
+    assert lay.fits == (fit,)  # (the fit itself stays as measured: what's adjusted by hand and saved)
+    # The pointer goes by it too: the frame's outer corner on the Mac is the PC's own corner.
+    assert lay.map_point(mac, pc, 1190, 590) == pytest.approx((1000, 1200))
+    assert lay.map_point(pc, mac, 1000 + 2880, 1200 + 1536) == pytest.approx((2650, 1398))
+    # The picture is drawn over the whole front screen (mirror streams carry its shape).
+    assert lay.picture_quad(mac, pc, behind) == pytest.approx(
+        (1000, 1200, 3880, 1200, 3880, 2736, 1000, 2736))
+    # A leaning fit grows along its own lean.
+    lean = replace(fit, quad=(1200.0, 600.0, 2640.0, 560.0, 2660.0, 1368.0, 1190.0, 1380.0))
+    lay.fits = (lean,)
+    q = lay.seen_fit(mac, pc).quad
+    assert q[0] < 1200 and q[1] < 600 and q[2] > 2640 and q[3] < 560 and q[5] > 1368 and q[7] > 1380
+    # Not measured yet: 6 mm all round, where a pixel's size is known.
+    lay.fits = (Fit(("mac", "screen2"), ("pc", "main"), 1200, 600, 0.5, mm=0.25),)
+    g = lay.seen_fit(mac, pc)
+    assert 1200 - g.x == pytest.approx(DEFAULT_BEZEL_MM / 0.25) and 600 - g.y == pytest.approx(DEFAULT_BEZEL_MM / 0.25)
+    lay.fits = (Fit(("mac", "screen2"), ("pc", "main"), 1200, 600, 0.5),)
+    assert lay.seen_fit(mac, pc) == lay.fits[0]  # ...and nothing where it isn't
+    lay.physical[("mac", "screen2")] = (860.0, 360.0)
+    assert lay.seen_fit(mac, pc).x == pytest.approx(1200 - DEFAULT_BEZEL_MM / 0.25)
+
+
+def test_the_bezel_is_kept_with_its_fit_in_the_config_and_through_changes(tmp_path):
+    from curslink.config import ConfigError, parse_fits, parse_layout
+    from curslink.configedit import ConfigFile
+    from curslink.layout import Fit
+    from curslink.mirror import apply_fit
+
+    devices = list(_fit_layout().devices.values())
+    table = {"behind": "mac/screen2", "front": "pc/main", "x": 1200, "y": 600, "scale": 0.5,
+             "bezel": [20, 20.5, 20, 60]}
+    assert parse_fits([table], devices)[0].bezel == (20.0, 20.5, 20.0, 60.0)
+    with pytest.raises(ConfigError):
+        parse_fits([{**table, "bezel": [1, 2, 3]}], devices)
+    raw = {"devices": [{"id": d.id, "screens": [{"id": s.id, "x": s.x, "y": s.y, "width": s.width,
+                                                  "height": s.height, **({"z": s.z} if s.z else {})}
+                                                 for s in d.screens]} for d in devices],
+           "layout": {"allow_overlap": True, "mirror": True, "bezels": True, "fit": [table]}}
+    assert parse_layout(raw).bezels and not parse_layout({**raw, "layout": {**raw["layout"], "bezels": False}}).bezels
+    with pytest.raises(ConfigError):
+        parse_layout({**raw, "layout": {**raw["layout"], "bezels": "yes"}})
+    # Saved by a line-up, kept when the overlap is dragged into place or lined up again without one.
+    path = tmp_path / "curslink.toml"
+    path.write_text('[host]\ndevice_id = "mac"\n')
+    cfg = ConfigFile(path)
+    cfg.set_fit("mac/screen2", "pc/main", 1200, 600, 0.5, bezel=[20, 20.5, 20, 60])
+    assert list(cfg.fits()[0]["bezel"]) == [20, 20.5, 20, 60]
+    cfg.set_fit("mac/screen2", "pc/main", 1210, 600, 0.5, keep_lean=True)
+    assert list(cfg.fits()[0]["bezel"]) == [20, 20.5, 20, 60] and cfg.fits()[0]["x"] == 1210
+    cfg.set_fit("mac/screen2", "pc/main", 1210, 600, 0.5, bezel=[0, 0, 0, 0])
+    assert "bezel" not in cfg.fits()[0]
+    # The running service: sent with a fit, kept when that fit is nudged or sent again without one.
+    lay = _fit_layout()
+    cmd = {"behind": "mac/screen2", "front": "pc/main", "x": 1200, "y": 600, "scale": 0.5}
+    apply_fit(lay, {**cmd, "bezel": [20, 20, 20, 60]})
+    assert lay.fits[0].bezel == (20.0, 20.0, 20.0, 60.0)
+    apply_fit(lay, {"behind": "mac/screen2", "front": "pc/main", "dx": 5, "dy": 0})
+    assert lay.fits[0].bezel == (20.0, 20.0, 20.0, 60.0) and lay.fits[0].x == 1195
+    apply_fit(lay, cmd)
+    assert lay.fits[0].bezel == (20.0, 20.0, 20.0, 60.0) and lay.fits[0].x == 1200
+    apply_fit(lay, {**cmd, "bezel": [0, 0, 0, 0]})
+    assert lay.fits[0] == Fit(("mac", "screen2"), ("pc", "main"), 1200, 600, 0.5, bezel=(0.0, 0.0, 0.0, 0.0))

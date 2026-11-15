@@ -144,14 +144,27 @@ the Layout page measures it (`curslink/lineup.py`, `lineup_scene.py`,
   `Router.available` is false for it, so no edge, gaze or app mirror takes
   input there (the edge light goes with it) and `switch_to` refuses it.
   The page tells the running service (`device <id> on|off`), no restart.
+- **Bezels (`[layout] bezels`).** The pattern step's band is drawn right up
+  to and under the front screen's edge, so how far out from that edge the
+  camera first sees it is the width of the front screen's frame there
+  (`Seam._frame_width`, the median over the frames read; saved as the
+  fit's `bezel`: left, top, right, bottom in the front screen's pixels).
+  With the setting on, `Layout.seen_fit` grows the fit by it
+  (`Fit.grown`), and the pointer and mirror mode go by that: the front
+  screen stands for all that it and its frame hide. The saved fit stays
+  as measured. Unmeasured, 6 mm all round where a pixel's size is known.
+- **A line-up that passed is saved** (`LayoutPage.apply_lineup`,
+  `lineup_passed`): the joins agreed and every overlap's pattern joined,
+  nothing was missing and nothing else was waiting to be saved.
 - **Head tracking (experimental, `[layout] follow_head`).** The fit also
   records `eye` (where it was seen from, in the screen behind's pixels and
   that far in front of it), `depth` (how far in front each corner is) and
   `mm` (a pixel's size), so each corner is a known point in the room and
   `Fit.seen_from(eye)` gives the shape from anywhere else.
   `curslink/headfollow.py` takes the head's place before this computer's
-  camera from MediaPipe's face matrix (the gaze tracker's, or a tracker of
-  its own when gaze is off), as a move from "home" (where the head first
+  camera from MediaPipe's face matrix (the gaze tracker's, or with gaze off
+  a camera process of its own, `curslink/headcamera.py`: loading OpenCV on
+  a thread of a Windows host held the whole host up), as a move from "home" (where the head first
   sat still; kept in `head-home.json`, "Sit here" takes it again), turns
   it into the screen behind's terms (a laptop's own camera looks out of
   its leaning screen: `screen_axes`), smooths it (1-euro) and rewrites the
