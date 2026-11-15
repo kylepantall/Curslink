@@ -30,10 +30,22 @@ class Gestures(private val service: AccessibilityService, private val main: Hand
         private set
     val down: Boolean get() = stroke != null
 
+    /** The display the next finger goes down on (Samsung DeX's, or the phone's own). */
+    var displayId = android.view.Display.DEFAULT_DISPLAY
+
+    // The display the finger now down went down on: it stays there to the end.
+    private var strokeDisplay = android.view.Display.DEFAULT_DISPLAY
+
+    private fun gesture(s: GestureDescription.StrokeDescription, on: Int = strokeDisplay): GestureDescription =
+        GestureDescription.Builder().addStroke(s).apply {
+            if (android.os.Build.VERSION.SDK_INT >= 30) setDisplayId(on)
+        }.build()
+
     /** Finger down at [p] (pixels). */
     fun press(p: PointF, forScroll: Boolean = false) {
         if (stroke != null) cancel()
         scrolling = forScroll
+        strokeDisplay = displayId
         lifting = false
         target = null
         val path = Path().apply { moveTo(p.x, p.y) }
@@ -48,7 +60,7 @@ class Gestures(private val service: AccessibilityService, private val main: Hand
         if (stroke != null) return
         val path = Path().apply { moveTo(p.x, p.y) }
         val s = GestureDescription.StrokeDescription(path, 0, holdMs, false)
-        service.dispatchGesture(GestureDescription.Builder().addStroke(s).build(), null, main)
+        service.dispatchGesture(gesture(s, displayId), null, main)
     }
 
     fun moveTo(p: PointF) {
@@ -106,7 +118,7 @@ class Gestures(private val service: AccessibilityService, private val main: Hand
     private fun dispatch(s: GestureDescription.StrokeDescription) {
         inFlight = true
         lastSent = SystemClock.uptimeMillis()
-        val ok = service.dispatchGesture(GestureDescription.Builder().addStroke(s).build(), object : AccessibilityService.GestureResultCallback() {
+        val ok = service.dispatchGesture(gesture(s), object : AccessibilityService.GestureResultCallback() {
             override fun onCompleted(g: GestureDescription) {
                 inFlight = false
                 pump()

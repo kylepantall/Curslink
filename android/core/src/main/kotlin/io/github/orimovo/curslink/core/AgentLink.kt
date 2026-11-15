@@ -19,6 +19,9 @@ data class HostPairing(
     val hasRelay get() = relay.isNotEmpty() && relayKey.isNotEmpty()
 }
 
+/** The host lays out screens a device reports later (a `screens` frame). */
+const val SCREENS_FEATURE = "screens"
+
 /** Where the host's input goes on this device. Called on the link's threads. */
 interface InputHandler {
     fun enter(x: Double, y: Double, effect: String)
@@ -227,6 +230,32 @@ class AgentLink(
 
     val udpUp: Boolean get() = udp?.up == true
 
+    /** The host takes a `screens` frame (it lays out a screen that comes or
+     *  goes, like Samsung DeX, without a reconnect). */
+    @Volatile var hostScreens = false
+        private set
+    @Volatile private var screensSent: List<Map<String, Any>>? = null
+
+    /** This device's screens changed (Samsung DeX came on or went off):
+     *  tell the host, so its layout follows. An older host hears it as a
+     *  fresh hello. Doesn't block. */
+    fun screensChanged() {
+        val f = io ?: return
+        val me = runCatching { hello() }.getOrNull() ?: return
+        if (me.screens == screensSent) return
+        if (!hostScreens) {
+            log("this phone's screens changed; saying hello again so ${pairing()?.hostName ?: "the host"} sees them")
+            reconnect()
+            return
+        }
+        screensSent = me.screens
+        Thread({
+            runCatching {
+                f.send("screens", jsonOf("screens" to me.screens, "screen_mm" to me.screenMm.ifEmpty { null }))
+            }.onFailure { log("couldn't tell the host about the screens: ${it.message}") }
+        }, "curslink-screens").apply { isDaemon = true; start() }
+    }
+
     fun start() {
         if (running) return
         running = true
@@ -377,6 +406,9 @@ class AgentLink(
             if (welcome.t != "welcome") throw ProtocolException("${p.hostName} did not welcome us")
             via = opened.via
             log("connected to ${p.hostName} via $via")
+            screensSent = me.screens
+            hostScreens = (welcome["features"] as? kotlinx.serialization.json.JsonArray)
+                ?.any { it.strOrNull() == SCREENS_FEATURE } == true
             if (opened.direct) {
                 AgentUdp.parseOffer(welcome.obj("udp"))?.let { offer ->
                     runCatching {

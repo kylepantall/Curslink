@@ -460,10 +460,17 @@ class ConfigFile:
             base_x = min((c["x"] for c in current.values()), default=0) - min(w["os_x"] for w in wanted)
             base_y = min((c["y"] for c in current.values()), default=0) - min(w["os_y"] for w in wanted)
         screens, added, changed = [], [], []
+        # Where a phone's DeX screen was when DeX went off: it comes back there.
+        parked = device.get("parked") if isinstance(device.get("parked"), dict) else {}
         for w in wanted:
             old = current.get(w["id"])
             if old is None:
-                screens.append({"id": w["id"], "x": base_x + w["os_x"], "y": base_y + w["os_y"],
+                at = parked.get(w["id"])
+                if isinstance(at, list) and len(at) == 2 and all(isinstance(v, int) for v in at):
+                    x, y = at
+                else:
+                    x, y = base_x + w["os_x"], base_y + w["os_y"]
+                screens.append({"id": w["id"], "x": x, "y": y,
                                 "width": w["width"], "height": w["height"], "os_x": w["os_x"], "os_y": w["os_y"]})
                 added.append(w["id"])
                 continue
@@ -474,6 +481,15 @@ class ConfigFile:
         removed = [sid for sid in current if sid not in {w["id"] for w in wanted}]
         if not (added or removed or changed):
             return None
+        for sid in removed:
+            if is_phone_extra(sid):
+                parked[sid] = [current[sid]["x"], current[sid]["y"]]
+        for sid in added:
+            parked.pop(sid, None)
+        if parked:
+            device["parked"] = parked
+        else:
+            device.pop("parked", None)
         self.replace_screens(device_id, screens)
         return {"added": added, "removed": removed, "changed": changed}
 
@@ -490,6 +506,39 @@ class ConfigFile:
         dx = right - box[0]
         for s in device.get("screens", []):
             s["x"] = int(s.get("x", 0)) + dx
+
+    def _overlaps_others(self, device_id: str, screen_ids: list[str]) -> bool:
+        """Does any of ``device_id``'s screens ``screen_ids`` overlap another
+        device's screen (or one of its own not in the list)?"""
+        def rect(s):
+            return (int(s.get("x", 0)), int(s.get("y", 0)), int(s.get("width", 0)), int(s.get("height", 0)))
+
+        mine = [rect(s) for i, s in enumerate(self._device(device_id).get("screens", []))
+                if str(s.get("id", f"screen{i}")) in screen_ids]
+        others = [rect(s) for d in self.devices() for i, s in enumerate(d.get("screens", []))
+                  if not (d.get("id") == device_id and str(s.get("id", f"screen{i}")) in screen_ids)]
+        return any(ax < bx + bw and bx < ax + aw and ay < by + bh and by < ay + ah
+                   for ax, ay, aw, ah in mine for bx, by, bw, bh in others)
+
+    def move_screens_clear(self, device_id: str, screen_ids: list[str]) -> None:
+        """Move just ``screen_ids`` of ``device_id`` to the right of every other
+        screen (side by side, tops level with the device's first screen), so
+        a newly reported one (a phone's Samsung DeX, a monitor plugged in)
+        overlaps nothing, while the device's other screens stay put."""
+        device = self._device(device_id)
+        if device is None:
+            raise KeyError(device_id)
+        screens = device.get("screens", [])
+        moving = [s for i, s in enumerate(screens) if str(s.get("id", f"screen{i}")) in screen_ids]
+        if not moving:
+            return
+        staying = [s for d in self.devices() for s in d.get("screens", []) if not any(s is m for m in moving)]
+        right = max((int(s.get("x", 0)) + int(s.get("width", 0)) for s in staying), default=0)
+        top = int(screens[0].get("y", 0)) if not any(screens[0] is m for m in moving) else 0
+        for s in moving:
+            s["x"] = right
+            s["y"] = top
+            right += int(s.get("width", 0))
 
     def _box(self, device_id: str) -> tuple[int, int, int, int] | None:
         device = self._device(device_id)
@@ -524,6 +573,13 @@ class ConfigFile:
         a, d = self._box(anchor_id), self._box(device_id)
         if a is None or d is None:
             raise KeyError(device_id if d is None else anchor_id)
+        all_screens = list(self._device(device_id).get("screens", []))
+        if whole_side and len(all_screens) > 1:
+            # A phone with Samsung DeX (or another display) on: the phone's
+            # own screen is what goes beside; DeX keeps its place by it.
+            first = all_screens[0]
+            d = (int(first.get("x", 0)), int(first.get("y", 0)),
+                 int(first.get("x", 0)) + int(first.get("width", 0)), int(first.get("y", 0)) + int(first.get("height", 0)))
         w, h = d[2] - d[0], d[3] - d[1]
         if side == "right":
             nx, ny = a[2], a[1] + ((a[3] - a[1]) - h) // 2
@@ -544,6 +600,12 @@ class ConfigFile:
             if any(e.split("/")[0] == device_id for e in ends):
                 self.remove_link(*ends)
         screens = list(self._device(device_id).get("screens", []))
+        if whole_side and len(screens) > 1:
+            first_id = str(screens[0].get("id", "screen0"))
+            extra = [str(s.get("id", f"screen{i}")) for i, s in enumerate(screens) if i > 0]
+            if self._overlaps_others(device_id, extra):
+                self.move_screens_clear(device_id, extra)
+            screens = [s for s in screens if str(s.get("id", "screen0")) == first_id]
         if whole_side and len(screens) == 1:
             mine = screens[0]
             facing = OPPOSITE[side]
@@ -711,6 +773,17 @@ def sync_agent_screens(cfg: ConfigFile, device_id: str, reported: list[dict[str,
     try:
         parse_layout(cfg.raw())
     except ConfigError:
+        if (done.get("added") and all(is_phone_extra(i) for i in done["added"])
+                and len(done["added"]) < len((cfg._device(device_id) or {}).get("screens", []))):
+            # Only the new screen is in the way (a phone's Samsung DeX coming
+            # on): move just that one clear; the rest stay where they are.
+            cfg.move_screens_clear(device_id, list(done["added"]))
+            try:
+                parse_layout(cfg.raw())
+                cfg.save()
+                return {**done, "moved_new": True}
+            except ConfigError:
+                pass
         cfg.move_clear_of_others(device_id)
         try:
             parse_layout(cfg.raw())
@@ -723,16 +796,33 @@ def sync_agent_screens(cfg: ConfigFile, device_id: str, reported: list[dict[str,
     return done
 
 
+# Screens an agent reports that have a name of their own (see the Android app).
+SCREEN_LABELS = {"dex": "Samsung DeX", "phone": "the phone's screen"}
+
+
+def is_phone_extra(screen_id: str) -> bool:
+    """A phone's second screen: Samsung DeX ("dex") or another display it
+    drives ("external", "external2", ...). It goes where there's room rather
+    than taking the phone (and its edges) with it."""
+    return screen_id == "dex" or screen_id.startswith("external")
+
+
+def screen_label(screen_id: str) -> str:
+    return SCREEN_LABELS.get(screen_id, screen_id)
+
+
 def screens_note(name: str, done: dict[str, Any]) -> str:
     """What :func:`sync_agent_screens` did, in words."""
     parts = []
     if done.get("added"):
-        parts.append(f"added {', '.join(done['added'])}")
+        parts.append(f"added {', '.join(screen_label(i) for i in done['added'])}")
     if done.get("removed"):
-        parts.append(f"took away {', '.join(done['removed'])} (unplugged)")
+        parts.append(f"took away {', '.join(screen_label(i) for i in done['removed'])} (unplugged)")
     if done.get("changed"):
         parts.append(f"resized {', '.join(done['changed'])}")
     text = f"Updated {name}'s screens on the Layout page to match its monitors: " + "; ".join(parts) + "."
+    if done.get("moved_new"):
+        text += " The new one would have overlapped other screens, so it's to the right of everything: arrange it there."
     if done.get("moved"):
         text += " They'd have overlapped yours, so it's now to the right of your screens: arrange it there."
     return text

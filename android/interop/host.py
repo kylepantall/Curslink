@@ -9,6 +9,7 @@ copy of it. Talks to the test over stdout, one line per event:
     CONNECTED <device id> <json>   it connected (json: hello's screens, features)
     SENT <json>                    the input below went out (json: {"udp": bool})
     GONE <device id> <paused>      it disconnected (paused: it said bye, paused)
+    SCREENS <device id> <json>     its screens changed (json: {"screens": [...]})
     DROPPED <json>                 a file dragged from here was let go of on the
                                    phone and it said so (json: its file_result)
     RELAYED <json>                 a file dragged on a PC agent, carried to the
@@ -196,6 +197,7 @@ async def main() -> None:
     server = HostServer(known, server_context(None, keys.get), on_connect=on_connect, on_disconnect=on_disconnect,
                         host="127.0.0.1", port=0,
                         verify_hello=HelloVerifier(None, keys.get))
+    server.on_screens = lambda conn: say("SCREENS", conn.device_id, json.dumps({"screens": conn.screens}))
     await server.start()
     relay = RelayServer(RELAY_KEY, host="127.0.0.1", port=0)
     await relay.start()

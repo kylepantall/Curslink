@@ -154,7 +154,9 @@ class LinkService : Service() {
             applyPause()
         }.also { it.start() }
         applyPause()
+        Dex.refresh(this)
         link?.start()
+        (getSystemService(DISPLAY_SERVICE) as android.hardware.display.DisplayManager).registerDisplayListener(displayListener, main)
         (getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager).registerDefaultNetworkCallback(netCallback)
         // Updates from GitHub releases: look now (if it's been a while) and every few hours.
         main.postDelayed(updateCheck, 30_000)
@@ -173,6 +175,8 @@ class LinkService : Service() {
         AppLog.i(TAG, "stopping")
         instance = null
         main.removeCallbacks(updateCheck)
+        main.removeCallbacks(lookForDex)
+        runCatching { (getSystemService(DISPLAY_SERVICE) as android.hardware.display.DisplayManager).unregisterDisplayListener(displayListener) }
         runCatching { (getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager).unregisterNetworkCallback(netCallback) }
         runCatching { clipboard.removePrimaryClipChangedListener(clipListener) }
         calls?.stop()
@@ -270,7 +274,32 @@ class LinkService : Service() {
      *  turning the phone doesn't move the edge (InputService maps it). */
     private fun screens(): List<Map<String, Any>> {
         val (w, h) = currentLayout()
-        return listOf(mapOf("x" to 0, "y" to 0, "width" to w, "height" to h, "name" to "phone"))
+        val phone = mapOf("x" to 0, "y" to 0, "width" to w, "height" to h, "name" to "phone")
+        // Samsung DeX on: its desktop is a screen of its own, beside ours.
+        val dex = Dex.current(this) ?: return listOf(phone)
+        return listOf(phone, Dex.report(dex, w))
+    }
+
+    /** A display came, went or changed: Samsung DeX may have come on or gone off. */
+    private val displayListener = object : android.hardware.display.DisplayManager.DisplayListener {
+        override fun onDisplayAdded(displayId: Int) = displaysChanged()
+        override fun onDisplayRemoved(displayId: Int) = displaysChanged()
+        override fun onDisplayChanged(displayId: Int) {
+            if (displayId != android.view.Display.DEFAULT_DISPLAY) displaysChanged()
+        }
+    }
+
+    private fun displaysChanged() {
+        // DeX takes a moment to switch the display over: look once it has.
+        main.removeCallbacks(lookForDex)
+        main.postDelayed(lookForDex, 700)
+    }
+
+    private val lookForDex = Runnable {
+        if (!Dex.refresh(this)) return@Runnable
+        InputService.instance?.displaysChanged()
+        link?.screensChanged()
+        changed()
     }
 
     /** How big the screen really is, in mm (its pixels over the panel's dpi), for mirror mode. */
