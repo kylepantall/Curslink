@@ -31,6 +31,11 @@ log = logging.getLogger(__name__)
 # longer than this; a bogus first report (see PynputCapture._mac_motion)
 # doesn't, and used to bounce input home within 15 ms of arriving.
 RETURN_GUARD_S = 0.15
+# ...and for this long while the pointer hasn't gone further than this from
+# where it landed: a wobble on the join isn't a change of mind.
+RETURN_NEAR_S = 0.6
+RETURN_NEAR_PX = 12
+RETURN_WOBBLE_PX = 6
 
 # While the mouse is moving, the hand is driving: gaze waits until it has
 # been still this long. Otherwise a glance mid-move (or gaze beating the
@@ -181,6 +186,7 @@ class Router:
         self._carry_armed = True
         self.clock: Callable[[], float] = time.monotonic
         self._arrived: tuple[float, str] | None = None  # (when, from which device)
+        self._arrived_at: tuple[float, float] | None = None  # where it landed then
         self._moved_at = -1e9  # when the mouse last moved (self.clock())
         self._scrolls = Tally("scroll sent to the other computer")
         # How far the pointer goes on another device for the host's mouse
@@ -437,7 +443,7 @@ class Router:
             crossing = self.layout.find_crossing(
                 self.active_device, self.x, self.y, dx, dy, self.settings.gap_tolerance_px
             )
-            if crossing and (self._just_came_from(crossing.screen.device_id) or not self._edge_armed):
+            if crossing and (self._just_came_from(crossing.screen.device_id, dx, dy) or not self._edge_armed):
                 crossing = None
             if crossing and self.available(crossing.screen.device_id):
                 self.switch_to(crossing.screen, crossing.x, crossing.y, "edge")
@@ -508,11 +514,30 @@ class Router:
             return False
         return to_device == self.local_id or self.takes_drag(to_device)
 
-    def _just_came_from(self, device_id: str) -> bool:
+    def _overlapping(self, a, b) -> bool:
+        """Is one of these screens in front of the other (different devices)?"""
+        if a is None or b is None or a.device_id == b.device_id or not self.layout.allow_overlap:
+            return False
+        return a.overlap(b) is not None
+
+    def _just_came_from(self, device_id: str, dx: float = 0.0, dy: float = 0.0) -> bool:
+        """Did input only just arrive from ``device_id``? For RETURN_GUARD_S
+        always; for RETURN_NEAR_S while the pointer is still within
+        RETURN_NEAR_PX of where it landed and the push back (``dx, dy``) is
+        no more than RETURN_WOBBLE_PX: a hand wobbling on the join it just
+        crossed went back and forth three times in 370 ms. A real pull back
+        is a bigger move, and a slow one gets through once the time is up."""
         if self._arrived is None:
             return False
         when, source = self._arrived
-        return source == device_id and self.clock() - when < RETURN_GUARD_S
+        if source != device_id:
+            return False
+        since = self.clock() - when
+        if since < RETURN_GUARD_S:
+            return True
+        at = self._arrived_at
+        return (since < RETURN_NEAR_S and at is not None and max(abs(dx), abs(dy)) <= RETURN_WOBBLE_PX
+                and abs(self.x - at[0]) <= RETURN_NEAR_PX and abs(self.y - at[1]) <= RETURN_NEAR_PX)
 
     def on_button(self, button: str, pressed: bool) -> None:
         try:
@@ -592,6 +617,13 @@ class Router:
         except KeyError:
             return
         if not self.available(screen.device_id):
+            return
+        if self._overlapping(screen, self.screen):
+            # A screen in front of another: both are in the same direction,
+            # so a face turned that way says nothing about which one is
+            # meant. The pointer went where it is by hand; gaze pulling it
+            # back to the other of the pair was Kyle's "the overlap edge
+            # quits and the mouse bounces back" (0.4.114, gaze on).
             return
         if self.jumps_to(screen) and not target.guess:
             # A jump monitor: the pointer goes to that very monitor, where
@@ -695,6 +727,7 @@ class Router:
         self.active_device, self.screen, self.x, self.y = new, screen, x, y
         if old != new:
             self._arrived = (self.clock(), old)
+            self._arrived_at = (x, y)
         self._carry_armed = not self._near_covered(screen, x, y)
         ox, oy = screen.to_os(x, y)
         if new == self.local_id:
