@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 import queue
 import threading
+import time
 import uuid
 
 from PySide6.QtCore import QObject, QRectF, Qt, QTimer, Signal
@@ -518,12 +519,19 @@ class LineupFlow(QObject):
         from curslink import lineup
 
         numbers = {s["key"]: s.get("number") for s in self.screens}
+        # For the log (and so a diagnostics file): how the scan went, every couple of seconds.
+        began = said = time.monotonic()
+        count = size = 0
+        spent = 0.0
         while True:
             item = self.frames.get()
             if item is None:
+                if self.live is not None:
+                    log.info("line-up scan ended after %.1fs: %s", time.monotonic() - began, _progress_line(self.live))
                 return
             path, seq, focal, device = item
             status = {"seq": seq, "device": device}
+            t0 = time.monotonic()
             try:
                 with open(path, "rb") as f:
                     data = f.read()
@@ -531,8 +539,19 @@ class LineupFlow(QObject):
                 if gray is not None:
                     if self.live is None:
                         self.live = lineup.Live(self.screens, self.planned, self.reference)
+                        log.info("line-up scan: first frame %dx%d, %d kB, focal %s", gray.shape[1], gray.shape[0],
+                                 len(data) // 1024, focal)
                     self.live.frame(gray, focal)
                     self.live.update()
+                    count += 1
+                    size += len(data)
+                    spent += time.monotonic() - t0
+                    now = time.monotonic()
+                    if now - said >= 2.0 or self.live.aligned:
+                        log.info("line-up scan %.1fs: %d frames (%.1f/s, %d kB each, %.0f ms to read and solve); %s",
+                                 now - began, count, count / max(0.001, now - said), size // count // 1024,
+                                 1000 * spent / count, _progress_line(self.live))
+                        said, count, size, spent = now, 0, 0, 0.0
             except Exception:  # noqa: BLE001 - a frame OpenCV chokes on: on with the next
                 log.warning("couldn't read a line-up frame", exc_info=True)
             finally:
@@ -665,6 +684,21 @@ class LineupFlow(QObject):
         self.dialog.hide()
         self.dialog.deleteLater()
         self.finished.emit(result)
+
+
+def _progress_line(live) -> str:
+    """Where a curslink.lineup.Live has got to, for the log."""
+    result = live.result
+    seen = ",".join(k for k in live.wanted if k in live.last_seen) or "none"
+    if result is None:
+        return f"{live.frames} frames in, no layout yet (in view: {seen}){'; ' + live.error if live.error else ''}"
+    states = live.states()
+    each = ", ".join(f"{k} {states.get(k, '?')} ±{result.errors[k]:.0f}px" if k in result.errors
+                     else f"{k} {states.get(k, '?')}" for k in live.wanted)
+    return (f"{live.frames} frames in, {result.views} views kept, fit {result.rms:.2f} px, asks ±{live.tolerance:.0f} px; "
+            f"{each}; in view: {seen}; solves agree: {'yes' if live.steady() else 'no'}; "
+            f"{'lined up' if live.aligned else 'settled' if live.settled else 'not settled'}"
+            f"{'; ' + live.error if live.error else ''}")
 
 
 def _remove(path: str) -> None:
