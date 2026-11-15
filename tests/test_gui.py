@@ -1757,6 +1757,7 @@ def test_live_line_up_joins_a_pattern_across_an_overlap(desktop, qapp, tmp_path)
     flow = page.lineup
     flow.check_settle = 0.0
     flow.check_hold = 0.0
+    flow.seam_hold = 0.6  # (5 s for a person to look at the joined blocks: here just long enough to see it happen)
     _hx, _hy, hw, hh = home.layout_rect()
     _lx, _ly, lw, lh = laptop.layout_rect()
     desk = Desk([(home.key, home.device_id, hw, hh, 600, (0, 0, 0), 0, 0),
@@ -1794,6 +1795,8 @@ def test_live_line_up_joins_a_pattern_across_an_overlap(desktop, qapp, tmp_path)
             break
     assert answer.get("done") and answer["hint"] == "Lined up" and drew
     assert "Joining up the overlap" in titles
+    # Joined, the blocks stayed up a while for the person to see, still being read.
+    assert "Joined: have a look" in titles and titles.index("Joined: have a look") < len(titles) - 1
     # The laptop was sent the pattern, with the overlap to draw it by.
     told = [json.loads(c[len("lineup "):]) for c in sent if c.startswith("lineup {") and '"pattern"' in c]
     entry = told[-1]["devices"]["laptop"]["screens"][0]

@@ -502,6 +502,10 @@ class LineupFlow(QObject):
     # The lines stay up at least this long, however soon the camera is happy:
     # they're for the person to see too (a check over in a second isn't seen).
     check_hold = 3.0
+    # The blocks stay up this long after the camera calls them joined (still
+    # read and eased meanwhile), so the person can see for themselves that
+    # they carry on unbroken, rather than vanishing the moment they do.
+    seam_hold = 5.0
     _analysed = Signal(object, str)  # (Result or None, error), from the worker thread
     _status = Signal(object)  # a live frame was read: how it's going (a dict), from the worker thread
 
@@ -755,6 +759,8 @@ class LineupFlow(QObject):
         began = said = time.monotonic()
         settle = held = 0.0
         stage = "scan"  # then "check" (lines across the joins), "seam" (blocks across each overlap), "done"
+        seam_done: float | None = None  # when the blocks were first joined (or given up on)
+        seam_over = False
         count = size = 0
         spent = 0.0
         while True:
@@ -777,12 +783,15 @@ class LineupFlow(QObject):
                                  len(data) // 1024, focal)
                     if stage == "seam":
                         # The last step: the blocks are up; each overlap is moved by the break seen in them.
-                        if time.monotonic() >= settle and not self.live.seam.done:
+                        now = time.monotonic()
+                        if now >= settle and (seam_done is None or now < seam_done + self.seam_hold):
                             if self.live.seam_frame(gray):
                                 settle = time.monotonic() + self.check_settle
-                            if self.live.seam.done:
-                                log.info("line-up pattern ended: %d frames, %d with the pattern read, %s",
-                                         self.live.seam.frames, self.live.seam.measured, self.live.seam.summary())
+                            if self.live.seam.done and seam_done is None:
+                                seam_done = time.monotonic()
+                                log.info("line-up pattern ended: %d frames, %d with the pattern read, %s; kept up "
+                                         "%.0f s more", self.live.seam.frames, self.live.seam.measured,
+                                         self.live.seam.summary(), self.seam_hold)
                     elif stage == "check":
                         # The check: the lines are up; nudge the layout by what's seen of them
                         # (not in a frame taken before the screens had drawn the latest ones).
@@ -838,7 +847,10 @@ class LineupFlow(QObject):
             live = self.live
             if live is not None:
                 checking = stage == "check"
-                joining = stage == "seam" and (not live.seam.done or time.monotonic() < held)
+                joining = stage == "seam" and (seam_done is None or time.monotonic() < max(held, seam_done + self.seam_hold))
+                if stage == "seam" and seam_done is not None and not joining and not seam_over:
+                    seam_over = True
+                    log.info("line-up pattern came down: %d frames, %s", live.seam.frames, live.seam.summary())
                 busy = checking or joining
                 status.update(progress=min(live.progress(), 0.97) if busy else live.progress(),
                               hint=live.hint(numbers), states=live.states(),
@@ -847,7 +859,8 @@ class LineupFlow(QObject):
                               pattern=live.seam.patterns() if joining else None,
                               showing=live.seam.drawing if joining else None,
                               step=live.check.worst() if live.check is not None else None,
-                              left=live.seam.worst() if live.seam is not None else None)
+                              left=live.seam.worst() if live.seam is not None else None,
+                              joined=joining and seam_done is not None and live.seam.joined)
             self._status.emit(status)
 
     def send_live(self, device, data: dict) -> None:
@@ -892,6 +905,10 @@ class LineupFlow(QObject):
             detail = "The screen behind and the one in front of it are drawing one pattern of blocks. It should " \
                      "carry on unbroken across the edge from where you sit: the camera is measuring any break " \
                      "and moving the overlap until there's none. Hold the phone close to your eyes."
+            if status.get("joined"):
+                detail = "The camera now reads the blocks as joined. They stay up a few seconds so you can see for " \
+                         "yourself: from where you sit they should carry on unbroken from the screen behind onto " \
+                         "the one in front."
             if isinstance(status.get("left"), (int, float)):
                 detail += f" Break now: {max(1, round(status['left']))} px."
         elif lines is not None:
@@ -902,7 +919,8 @@ class LineupFlow(QObject):
             self.show_states(states)
         if result is not None and lines is None and pattern is None and isinstance(status.get("step"), (int, float)):
             detail += f" Joins checked to {max(1, round(status['step']))} px."
-        self.dialog.say("Lined up" if aligned else "Joining up the overlap" if pattern is not None else
+        self.dialog.say("Lined up" if aligned else "Joined: have a look" if pattern is not None and status.get("joined")
+                        else "Joining up the overlap" if pattern is not None else
                         "Checking the joins" if lines is not None else "Scanning your desk",
                         status.get("hint") or "Reading the patterns…")
         self.dialog.show_live(status.get("progress", 0.0), rects, detail, bool(status.get("usable")) and not aligned)
