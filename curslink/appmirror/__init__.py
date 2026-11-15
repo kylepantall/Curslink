@@ -76,6 +76,9 @@ MAX_VIEW = 0.9
 MIN_VIEW = 160
 # While the pointer is this close to a mirror (layout px), its tag shows.
 NEAR_PX = 40
+# A mirror this close to its screen's edge: the pointer doesn't leave the app
+# through that side (there's nowhere to go but the gap).
+WALL_PX = 48
 # A window's own rounded corners on its computer (its OS pixels): the
 # mirror is cut the same way, so nothing square shows behind them.
 CORNERS = {"mac": 10, "windows": 8}
@@ -552,6 +555,17 @@ class AppMirrorHost:
                 return None
             u, v = (x - rx) / rw, (y - ry) / rh
             vx, vy, vw, vh = s.view
+            t = s.target
+            # A side of the mirror against its screen's edge (or the menu bar)
+            # is the app's edge, as a window's would be: the pointer stops
+            # there, in the app, rather than falling out onto the sliver
+            # beside it and in again (the title bar and tabs are up there).
+            walled = ((u < 0 and vx - t.x <= WALL_PX) or (u >= 1 and t.right - (vx + vw) <= WALL_PX)
+                      or (v < 0 and vy - t.y <= WALL_PX) or (v >= 1 and t.bottom - (vy + vh) <= WALL_PX))
+            if walled:
+                cx, cy = min(max(x, rx), rx + rw - 1), min(max(y, ry), ry + rh - 1)
+                here = self.layout.screen_at(cx, cy, s.source) or s.src_screen
+                return (here, *here.clamp(cx, cy))
             # Out onto the mirror's own edge first (where it's resized), not
             # past it: moving on leaves it, moving back goes in again.
             tx = min(max(vx + u * vw, vx + 1), vx + vw - 2)
