@@ -15,7 +15,7 @@ from curslink.net import quality
 from curslink.net.framing import STREAM_LIMIT, read_message
 from curslink.net.relay import RelayError, RelayTarget, agent_connect
 from curslink.net.udp import AgentUdp
-from curslink.protocol import (AGENT_FEATURES, APP_MIRROR_FEATURE, CLIPBOARD_FEATURE, EDGE_FEATURE, FILES_FEATURE, FILES_OUT_FEATURE, DROP_FEATURE, FILE_ACK_FEATURE, MIRROR_CURSOR_FEATURE, MIRROR_FEATURE, MIRROR_TILES_FEATURE, NETSTATS_FEATURE, POPUPS_FEATURE, PREPARE_FEATURE, PROTOCOL_VERSION, SCREENS_FEATURE, UDP_FEATURE, Message, ProtocolError,
+from curslink.protocol import (AGENT_FEATURES, APP_MIRROR_FEATURE, CLIPBOARD_FEATURE, EDGE_FEATURE, FILES_FEATURE, FILES_OUT_FEATURE, DROP_FEATURE, FILE_ACK_FEATURE, PREFETCH_FEATURE, MIRROR_CURSOR_FEATURE, MIRROR_FEATURE, MIRROR_TILES_FEATURE, NETSTATS_FEATURE, POPUPS_FEATURE, PREPARE_FEATURE, PROTOCOL_VERSION, SCREENS_FEATURE, UDP_FEATURE, Message, ProtocolError,
                                encode)
 from curslink.security import channel_binding, hello_auth
 from curslink.tally import Tally
@@ -505,7 +505,7 @@ class AgentClient:
         if self.optimise:
             quality.mark_low_latency(quality.transport_socket(writer))
         try:
-            features = list(AGENT_FEATURES) + ([FILES_FEATURE, DROP_FEATURE, FILE_ACK_FEATURE] if self.session.files is not None else [])
+            features = list(AGENT_FEATURES) + ([FILES_FEATURE, DROP_FEATURE, FILE_ACK_FEATURE, PREFETCH_FEATURE] if self.session.files is not None else [])
             if self.session.drag_out is not None:
                 features.append(FILES_OUT_FEATURE)
             if self.session.popups is not None:
