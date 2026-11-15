@@ -333,3 +333,138 @@ def test_a_head_camera_that_dies_is_started_again_a_few_times(monkeypatch):
     time.sleep(0.3)
     assert len(starts) == headcamera.RESTARTS + 1 and "exit code 3" in proc.error
     proc.stop()
+
+
+def test_slowly_the_overlap_is_aimed_at_where_you_settle(tmp_path):
+    """``[layout] follow_seat``: nothing moves as you lean about; half a
+    minute somewhere new and the overlap is aimed from there, once, and can
+    be put back."""
+    from curslink.headfollow import SEAT_S
+
+    lay = layout()
+    base = lay.fits[0]
+    changed, moves, homes = [], [], []
+    clock = Clock()
+    follow = HeadFollow(lay, "mac", lambda: changed.append(1), home_path=tmp_path / "h.json", clock=clock, slow=True,
+                        moved=lambda was, now: moves.append((was, now)), home_set=homes.append)
+    assert lay.part_grid == 1  # (nothing's moving many times a second: captured as it is)
+    settle(follow, clock, seconds=1.5)
+    assert follow.home is None  # (home takes longer than a glance here: the phone has just been put down)
+    settle(follow, clock, seconds=4.0)
+    assert follow.home == pytest.approx((10.0, -40.0, 600.0)) and homes == [follow.home]
+    # leaning over for a few seconds, then back: nothing moves
+    settle(follow, clock, (90.0, -40.0, 600.0), seconds=5.0)
+    settle(follow, clock, seconds=SEAT_S + 2)
+    assert not changed and not moves and lay.fits[0] is base
+    # settled 14 cm further back
+    settle(follow, clock, (10.0, -40.0, 740.0), seconds=SEAT_S - 10)
+    assert not changed
+    settle(follow, clock, (12.0, -38.0, 742.0), seconds=10)
+    assert len(changed) == 1 and moves == [((0.0, 0.0, 0.0), pytest.approx((0.0, 0.0, 140.0), abs=3))]
+    want = base.seen_from((EYE[0], EYE[1], EYE[2] + 140 / MM))
+    assert lay.fits[0].quad == pytest.approx(want.quad, abs=3.0)
+    # staying there doesn't move it again, nor does the face going out of sight
+    settle(follow, clock, (10.0, -40.0, 740.0), seconds=SEAT_S + 5)
+    clock.t += 60
+    follow.tick()
+    assert len(changed) == 1
+    # "Put it back": as lined up, and left so while you sit there
+    follow.put_back()
+    assert len(changed) == 2 and lay.fits[0].quad == pytest.approx(base.quad) and follow.offset == (0.0, 0.0, 0.0)
+    settle(follow, clock, (10.0, -40.0, 740.0), seconds=SEAT_S + 5)
+    assert len(changed) == 2
+    # ...but somewhere else again is followed
+    settle(follow, clock, (10.0, -40.0, 480.0), seconds=SEAT_S + 5)
+    assert len(changed) == 3 and moves[-1][1] == pytest.approx((0.0, 0.0, -120.0), abs=3)
+    follow.stop()
+    assert lay.fits[0] == base
+
+
+def test_follow_seat_alone_starts_the_slow_kind_and_says_when_it_moves(monkeypatch, tmp_path):
+    import asyncio
+
+    import curslink.headcamera as headcamera
+    from curslink import app, events
+    from curslink.gaze import tracker as tracking
+
+    class FakeTracker:
+        def __init__(self, camera, on_head, name=None):
+            pass
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+    said = []
+    monkeypatch.setattr(headcamera, "HeadCameraProcess", FakeTracker)
+    monkeypatch.setattr(app, "head_home_path", lambda: tmp_path / "head-home.json")
+    monkeypatch.setattr(events, "emit", lambda kind, **data: said.append((kind, data)))
+    monkeypatch.setenv("CURSLINK_HOME", str(tmp_path))
+
+    async def go():
+        loop = asyncio.get_running_loop()
+        cfg = FakeConfig(on=False)
+        cfg.follow_seat = True
+        head = app.start_head_follow(cfg, FakeMirror(), loop, own_camera=True)
+        assert head is not None and head.follow.slow
+        both = FakeConfig()
+        both.follow_seat = True
+        live = app.start_head_follow(both, FakeMirror(), loop, own_camera=True)
+        assert not live.follow.slow  # (Follow my head is the live kind, and wins)
+        live.stop()
+        tracking.head_listener = lambda t, at: head.follow.sample(t, at)
+        t = 50.0
+        for at, seconds in (((10.0, -40.0, 600.0), 6), ((10.0, -40.0, 760.0), 40)):
+            for _ in range(seconds * 10):
+                t += 0.1
+                head.follow.clock = lambda t=t: t
+                head.follow.sample(t, at)
+        assert [s for s in said if s[0] == "seat"] == [("seat", {"across": 0, "down": 0, "back": 160, "moved": [0, 0, 160]})]
+        head.stop()
+
+    asyncio.run(go())
+
+
+def test_the_camera_is_placed_when_head_tracking_first_sees_you_after_the_phone_found_your_eyes(monkeypatch, tmp_path):
+    from curslink import app, seat
+
+    monkeypatch.setenv("CURSLINK_HOME", str(tmp_path))
+    square = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+    desk = {"reference": "mac/main", "mm": 0.25, "eye": [800.0, -100.0, -3000.0], "scan_eye": [800.0, 0.0, -2400.0],
+            "how": "scan", "when": seat.now(),
+            "screens": {"mac/main": {"width": 1600.0, "height": 1000.0, "r": square, "t": [0.0, 0.0, 0.0], "scale": 1.0,
+                                     "bend": 0.0}}}
+    seat.save(desk)
+    app.camera_seen_from_seat("mac", (0.0, 20.0, 700.0))
+    assert "camera" not in seat.load()  # (the eye point is only where the scan was held)
+    seat.save({**desk, "how": "phone", "when": "2020-01-01T00:00:00"})
+    app.camera_seen_from_seat("mac", (0.0, 20.0, 700.0))
+    assert "camera" not in seat.load()  # (found long ago: you needn't be sitting there now)
+    seat.save({**desk, "how": "phone"})
+    app.camera_seen_from_seat("mac", (0.0, 20.0, 700.0))
+    camera = seat.load()["camera"]
+    assert camera["how"] == "found" and camera["screen"] == "mac/main"
+    # 700 mm in front of you, 20 mm above your eyes
+    assert camera["at"] == pytest.approx([800.0, -100.0 - 80.0, -3000.0 + 2800.0])
+
+
+def test_follow_seat_is_read_from_the_layout_table():
+    from curslink.config import ConfigError, _follow_head
+
+    assert _follow_head({}, "follow_seat") is False and _follow_head({"follow_seat": True}, "follow_seat") is True
+    with pytest.raises(ConfigError, match="follow_seat"):
+        _follow_head({"follow_seat": 1}, "follow_seat")
+
+
+def test_what_the_head_camera_is_doing():
+    from curslink.app import head_state
+
+    assert head_state(False, 10, None, 0, None) == "no_overlap"
+    assert head_state(True, 10, None, 0, True) == "starting"
+    assert head_state(True, 10, 9, 0, True) == "watching"
+    assert head_state(True, 60, None, 0, True) == "no_face"
+    assert head_state(True, 60, 20, 0, True) == "no_face"
+    assert head_state(True, 10, None, 0, False) == "failed"
+    assert head_state(True, 10, None, 0, None) == "starting"  # gaze switching has the camera

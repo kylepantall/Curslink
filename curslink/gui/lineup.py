@@ -407,6 +407,11 @@ class LineupDialog(QDialog):
         f.setBold(True)
         self.title.setFont(f)
         lay.addWidget(self.title)
+        self.steps = QLabel()
+        self.steps.setTextFormat(Qt.TextFormat.RichText)
+        self.steps.setObjectName("small")
+        self.steps.hide()
+        lay.addWidget(self.steps)
         self.text = QLabel()
         self.text.setWordWrap(True)
         self.text.setMinimumWidth(380)
@@ -451,8 +456,19 @@ class LineupDialog(QDialog):
         self.again_button.setVisible(again and not busy)
         self.adjustSize()
 
-    def show_live(self, progress: float, rects: list, detail: str, usable: bool) -> None:
-        """The live line-up's state: the bar, the little layout, the numbers."""
+    def show_step(self, step: int, done: bool = False) -> None:
+        """Which of the live line-up's steps it's at (all ticked once ``done``)."""
+        names = ("Scan", "Check lines", "Pattern", "Your seat")
+        self.steps.setText("      ".join(f"✓ {n}" if i < step or done else f"<b>{i + 1} {n}</b>" if i == step else
+                                         f"{i + 1} {n}" for i, n in enumerate(names)))
+        self.steps.show()
+
+    def show_live(self, progress: float, rects: list, detail: str, usable: bool, skip: bool = False) -> None:
+        """The live line-up's state: the bar, the little layout, the numbers.
+        ``skip``: it's the last step, which can be left out."""
+        self.use_button.setText("Skip this step" if skip else "Use it as it is")
+        self.use_button.setToolTip("Leave the overlaps aimed at where the phone was held for the scan." if skip else
+                                   "Stop scanning and take the layout as measured so far.")
         first = not self.bar.isVisible()
         self.bar.show()
         self.preview.show()
@@ -541,6 +557,9 @@ class LineupFlow(QObject):
         self.sent_lines: dict | None = None
         self.sent_patterns: dict | None = None
         self.seam_showing: dict | None = None
+        self.seat_shown = False
+        # The last step (where you sit): off for a layout nobody sits before (tests switch it off too).
+        self.seat_step = True
 
     def start(self) -> bool:
         from curslink import lineup
@@ -656,6 +675,15 @@ class LineupFlow(QObject):
         if remote:
             self.send("lineup " + json.dumps({"devices": remote}, separators=(",", ":")))
 
+    def show_seat(self) -> None:
+        """The last step: the blocks come down and every screen shows its
+        check patterns alone, for the phone at your eyes to find itself by."""
+        if self.seat_shown:
+            return
+        self.seat_shown = True
+        self.sent_lines = None
+        self.show_check({})
+
     def centre_dialog(self) -> None:
         area = self.dialog.screen().geometry() if self.dialog.screen() is not None else None
         if area is not None:
@@ -755,10 +783,14 @@ class LineupFlow(QObject):
         from curslink import lineup
 
         numbers = {s["key"]: s.get("number") for s in self.screens}
+        names = {s["key"]: f"screen {s.get('number')}" for s in self.screens if s.get("number")}
         # For the log (and so a diagnostics file): how the scan went, every couple of seconds.
         began = said = time.monotonic()
         settle = held = 0.0
-        stage = "scan"  # then "check" (lines across the joins), "seam" (blocks across each overlap), "done"
+        # then "check" (lines across the joins), "seam" (blocks across each overlap), "seat" (the phone at
+        # the eyes of someone sitting back), "done"
+        stage = "scan"
+        seat_asked = False
         seam_done: float | None = None  # when the blocks were first joined (or given up on)
         seam_over = False
         count = size = 0
@@ -781,8 +813,20 @@ class LineupFlow(QObject):
                         self.live = lineup.Live(self.screens, self.planned, self.reference)
                         log.info("line-up scan: first frame %dx%d, %d kB, focal %s", gray.shape[1], gray.shape[0],
                                  len(data) // 1024, focal)
-                    if stage == "seam":
-                        # The last step: the blocks are up; each overlap is moved by the break seen in them.
+                    if stage == "seat":
+                        # Last of all: the phone is found, held at the eyes of someone sitting back.
+                        if self.live.seat_frame(gray):
+                            seat = self.live.seat
+                            log.info("line-up seat: found after %.1f s, %d frames (%d placed), %s where the pattern "
+                                     "step left the phone: %s; overlaps moved %.0f mm", time.monotonic() - seat.began,
+                                     seat.frames, seat.located, "away from" if seat.moved else "still",
+                                     self.live.seat_summary(), self.live.result.desk.get("moved_mm") or 0.0)
+                        elif self.live.seat.gave_up and stage == "seat":
+                            stage = "done"
+                            log.info("line-up seat: not found in %d frames (%d placed); the overlaps stay aimed "
+                                     "at where the scan began", self.live.seat.frames, self.live.seat.located)
+                    elif stage == "seam":
+                        # The step before: the blocks are up; each overlap is moved by the break seen in them.
                         now = time.monotonic()
                         if now >= settle and (seam_done is None or now < seam_done + self.seam_hold):
                             if self.live.seam_frame(gray):
@@ -851,7 +895,15 @@ class LineupFlow(QObject):
                 if stage == "seam" and seam_done is not None and not joining and not seam_over:
                     seam_over = True
                     log.info("line-up pattern came down: %d frames, %s", live.seam.frames, live.seam.summary())
-                busy = checking or joining
+                if (stage == "done" or (stage == "seam" and not joining)) and not seat_asked:
+                    # The patterns stay up a little longer, for the phone to find itself by.
+                    seat_asked = True
+                    if self.seat_step and live.start_seat() is not None:
+                        stage = "seat"
+                        log.info("line-up seat: looking for the phone at your eyes (1 unit of the desk is %s mm)",
+                                 live.result.desk.get("mm"))
+                seating = stage == "seat" and not live.seat.done
+                busy = checking or joining or seating
                 status.update(progress=min(live.progress(), 0.97) if busy else live.progress(),
                               hint=live.hint(numbers), states=live.states(),
                               result=live.result, aligned=live.aligned and not busy, usable=live.usable,
@@ -860,7 +912,10 @@ class LineupFlow(QObject):
                               showing=live.seam.drawing if joining else None,
                               step=live.check.worst() if live.check is not None else None,
                               left=live.seam.worst() if live.seam is not None else None,
-                              joined=joining and seam_done is not None and live.seam.joined)
+                              joined=joining and seam_done is not None and live.seam.joined,
+                              seat=None if live.seat is None else "looking" if seating else
+                              "found" if live.seat.eye is not None else "none",
+                              seated=live.seat_summary(names) if live.seat is not None else "")
             self._status.emit(status)
 
     def send_live(self, device, data: dict) -> None:
@@ -883,6 +938,7 @@ class LineupFlow(QObject):
         aligned = bool(status.get("aligned"))
         self.send_live(status.get("device"), {"seq": status.get("seq"), "progress": status.get("progress", 0.0),
                                               "hint": status.get("hint", ""), "screens": numbers,
+                                              **({"buzz": True} if aligned and status.get("seat") == "found" else {}),
                                               **({"done": True} if aligned else {})})
         rects = []
         if result is not None:
@@ -900,7 +956,19 @@ class LineupFlow(QObject):
             if how:
                 detail += ". " + how[:1].upper() + how[1:] + "."
         lines, pattern = status.get("lines"), status.get("pattern")
-        if pattern is not None:
+        seat = status.get("seat")
+        self.dialog.show_step(3 if seat else 2 if pattern is not None or self.sent_patterns is not None else
+                              1 if lines is not None or self.sent_lines is not None else 0, done=aligned)
+        if seat == "looking":
+            self.show_seat()
+            detail = "The line-up is done; this last step finds your eyes. Sit back the way you normally sit and " \
+                     "rest the top of the phone on the bridge of your nose, its camera facing your screens. The " \
+                     "overlap is then aimed at where you really sit, not at where the phone was held for the scan."
+        elif seat == "found" and status.get("seated"):
+            detail = status["seated"] + ". Your overlapping screens are now aimed from there."
+        if seat == "looking":
+            pass
+        elif pattern is not None:
             self.show_seam(pattern, status.get("showing") or {})
             detail = "The screen behind and the one in front of it are drawing one pattern of blocks. It should " \
                      "carry on unbroken across the edge from where you sit: the camera is measuring any break " \
@@ -919,11 +987,13 @@ class LineupFlow(QObject):
             self.show_states(states)
         if result is not None and lines is None and pattern is None and isinstance(status.get("step"), (int, float)):
             detail += f" Joins checked to {max(1, round(status['step']))} px."
-        self.dialog.say("Lined up" if aligned else "Joined: have a look" if pattern is not None and status.get("joined")
+        self.dialog.say("Now show me where you sit" if seat == "looking" else
+                        "Lined up" if aligned else "Joined: have a look" if pattern is not None and status.get("joined")
                         else "Joining up the overlap" if pattern is not None else
                         "Checking the joins" if lines is not None else "Scanning your desk",
                         status.get("hint") or "Reading the patterns…")
-        self.dialog.show_live(status.get("progress", 0.0), rects, detail, bool(status.get("usable")) and not aligned)
+        self.dialog.show_live(status.get("progress", 0.0), rects, detail, bool(status.get("usable")) and not aligned,
+                              skip=seat == "looking")
         if aligned and self.latest is not None:
             # A moment to see it's done, then the result.
             self.ending = True

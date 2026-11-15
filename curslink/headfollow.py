@@ -29,6 +29,14 @@ What it goes by, and where it's rough:
   a new line-up), and is kept between runs. If you sat differently then,
   "Sit here" in Settings > Overlapping screens takes where you are now.
 
+``[layout] follow_seat`` ("Keep overlaps aimed at where I sit") is the slow,
+dependable cousin (``slow=True``): nothing moves as you lean about, but once
+you've settled somewhere new for half a minute the overlaps are aimed from
+there, once, and ``moved(was, now)`` says so (the app shows it, with a way
+to put it back: :meth:`HeadFollow.put_back`). Home is then where the camera
+first saw you sitting still after the line-up: its last step has just found
+your eyes (curslink.seat), so that's the face at a known place.
+
 No camera or ML here: samples come in through :meth:`HeadFollow.sample`.
 """
 
@@ -54,6 +62,13 @@ EVERY_S = 1 / 20  # the fits are moved at most this often
 MIN_PX = 1.0  # ...and only when a corner would move this far (the screen behind's pixels)
 MAX_MM = (300.0, 250.0, 350.0)  # further from home than this (across, down, away) is held at it
 LOST_S = 3.0  # no face for this long: back to the fit as measured
+
+# Slow ("Keep overlaps aimed at where I sit"):
+SEAT_S = 30.0  # settled: the head has been about one place this long...
+SEAT_SAMPLES = 40  # ...seen at least this often...
+SEAT_NEAR_MM = (60.0, 60.0, 120.0)  # ...four sightings in five within this of the middle of them
+SEAT_MOVED_MM = (30.0, 30.0, 50.0)  # ...and that's this far from where the overlaps are aimed now
+SEAT_HOME_S = 4.0  # home, slow: still for longer than a glance (the phone has just been put down)
 
 
 def mediapipe_head(matrix) -> tuple[float, float, float]:
@@ -108,13 +123,20 @@ class HeadFollow:
 
     def __init__(self, layout: Layout, local_id: str, changed: Callable[[], None],
                  busy: Callable[[], bool] = lambda: False, home_path: Path | None = None,
-                 clock: Callable[[], float] = time.monotonic):
+                 clock: Callable[[], float] = time.monotonic, slow: bool = False,
+                 moved: Callable[[tuple, tuple], None] | None = None,
+                 home_set: Callable[[tuple], None] | None = None):
         self.layout = layout
         self.local_id = local_id
         self.changed = changed
         self.busy = busy
         self.home_path = home_path
         self.clock = clock
+        self.slow = slow
+        self.moved = moved
+        self.home_set = home_set  # told where the head is before the camera when home is taken
+        self._seat: list[tuple[float, tuple[float, float, float]]] = []  # slow: where the head's been lately
+        self._refused: tuple[float, float, float] | None = None  # slow: a place it was told not to aim from
         self.base: dict[tuple, Fit] = {}
         self._mine: tuple | None = None  # layout.fits as this last left them
         self._grid = layout.part_grid
@@ -129,8 +151,10 @@ class HeadFollow:
         self._logged = 0.0
         self._take()
         self._load_home()
-        layout.part_grid = GRID
-        log.info("head tracking (experimental): following %d overlap(s)%s", len(self.base),
+        if not slow:
+            layout.part_grid = GRID
+        log.info("%s: following %d overlap(s)%s", "keeping overlaps aimed at where you sit" if slow else
+                 "head tracking (experimental)", len(self.base),
                  "" if self.base else " (none has been through a live line-up yet)")
 
     # ---- the fits as measured ----
@@ -197,18 +221,25 @@ class HeadFollow:
         log.info("head tracking: taking where you sit now as home")
 
     def _settle(self, t: float, head: tuple[float, float, float]) -> None:
-        self._settling = [(at, h) for at, h in self._settling if t - at <= HOME_S] + [(t, head)]
-        if len(self._settling) < HOME_SAMPLES or t - self._settling[0][0] < 0.8 * HOME_S:
+        over = SEAT_HOME_S if self.slow else HOME_S
+        self._settling = [(at, h) for at, h in self._settling if t - at <= over] + [(t, head)]
+        if len(self._settling) < HOME_SAMPLES or t - self._settling[0][0] < 0.8 * over:
             return
         middle = tuple(sorted(h[k] for _at, h in self._settling)[len(self._settling) // 2] for k in range(3))
         if any(abs(h[k] - middle[k]) > STILL_MM for _at, h in self._settling for k in range(2)):
             return  # still moving about
         self.home, self._settling = middle, []
+        self._seat, self._refused = [], None
         self._home_for = signature(self.base.values())
         for f in self._filters:
             f.reset()
         self._save_home()
         log.info("head tracking: home is %.0f mm across, %.0f down, %.0f mm from the camera", *middle)
+        if self.home_set is not None:
+            try:
+                self.home_set(middle)
+            except Exception:  # (noting it is a nicety)
+                log.debug("couldn't note where home is", exc_info=True)
 
     # ---- samples ----
     def sample(self, t: float, head: tuple[float, float, float]) -> None:
@@ -225,11 +256,52 @@ class HeadFollow:
         if self.home is None:
             self._settle(t, head)
             return
+        if self.slow:
+            self._sat(t, head)
+            return
         smooth = tuple(f(t, v) for f, v in zip(self._filters, head))
         self._apply(tuple(max(-m, min(m, s - h)) for s, h, m in zip(smooth, self.home, MAX_MM)), t=t)
 
+    # ---- slow: where you've settled ----
+    def _sat(self, t: float, head: tuple[float, float, float]) -> None:
+        """Slow: once the head has been about one place for a while, and
+        that's not where the overlaps are aimed from, they're aimed from there."""
+        self._seat = [(at, h) for at, h in self._seat if t - at <= SEAT_S] + [(t, head)]
+        if len(self._seat) < SEAT_SAMPLES or t - self._seat[0][0] < 0.9 * SEAT_S:
+            return
+        middle = tuple(sorted(h[k] for _at, h in self._seat)[len(self._seat) // 2] for k in range(3))
+        near = sum(1 for _at, h in self._seat if all(abs(h[k] - middle[k]) <= SEAT_NEAR_MM[k] for k in range(3)))
+        if near < 0.8 * len(self._seat):
+            return  # moving about
+        offset = tuple(max(-m, min(m, v - h)) for v, h, m in zip(middle, self.home, MAX_MM))
+        if not any(abs(a - b) >= m for a, b, m in zip(offset, self.offset, SEAT_MOVED_MM)):
+            return
+        if self._refused is not None and not any(abs(a - b) >= m for a, b, m in zip(offset, self._refused, SEAT_MOVED_MM)):
+            return  # put back from here once already
+        was = self.offset
+        self._apply(offset, t=t, force=True)
+        if self.offset == offset:
+            self._refused = None
+            self._seat = []
+            log.info("where you sit: settled %.0f mm across, %.0f down, %.0f further back than where the overlaps were "
+                     "lined up from; they're aimed from there now", *offset)
+            if self.moved is not None:
+                self.moved(was, offset)
+
+    def put_back(self) -> None:
+        """Slow: the overlaps as they were before the last move (and not
+        moved for sitting there again)."""
+        if not self.slow or self.offset == (0.0, 0.0, 0.0):
+            return
+        self._refused, self._seat = self.offset, []
+        self._apply((0.0, 0.0, 0.0), force=True)
+        log.info("where you sit: put back to the overlaps as lined up")
+
     def tick(self, t: float | None = None) -> None:
-        """Now and then: with no face for a while, back to the fits as measured."""
+        """Now and then: with no face for a while, back to the fits as measured
+        (slow: they stay; you've only left the desk)."""
+        if self.slow:
+            return
         t = self.clock() if t is None else t
         if self._seen_at is not None and t - self._seen_at > LOST_S and self.offset != (0.0, 0.0, 0.0):
             log.info("head tracking: no face for %.0f s, back to the overlaps as lined up", t - self._seen_at)

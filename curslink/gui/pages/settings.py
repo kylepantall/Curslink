@@ -47,6 +47,27 @@ SECTIONS = (
 HOST_SECTIONS = ("overlap",)
 
 
+def head_note(status: dict | None) -> str:
+    """What to say under the head-tracking switches for a ``head`` event from
+    the host (curslink.app.head_state)."""
+    if not status:
+        return ""
+    camera = str(status.get("camera") or "this computer's camera")
+    return {
+        "no_mirror": "The camera is off: mirror mode is off, so there is nothing to keep lined up.",
+        "no_overlap": "The camera is off for now: no overlap has been lined up with the phone camera yet. Run "
+                      "Line up with a camera on the Layout page (again, if you last did before 0.4.103); the "
+                      "camera comes on by itself when it passes.",
+        "starting": f"Starting the camera ({camera}). That can take up to half a minute, and starts over "
+                    "whenever a setting here changes.",
+        "watching": f"The camera ({camera}) is on and sees you.",
+        "no_face": f"The camera ({camera}) is on but can't see a face. If that's the wrong camera, choose "
+                   "another on the Calibrate page.",
+        "failed": f"The camera ({camera}) didn't start"
+                  + (f": {status.get('error')}." if status.get("error") else ". Is another app using it?"),
+    }.get(str(status.get("state")), "")
+
+
 class SettingsPage(QStackedWidget):
     """Every settings section, one shown at a time (``show_section``)."""
 
@@ -247,6 +268,26 @@ class SettingsPage(QStackedWidget):
             "and its frame hide, squeezed in a touch, so nothing is lost behind the frame, and the pointer "
             "crosses at the frame's outer edge. Line up with a camera measures the frame; until then it's "
             "taken as 6 mm all round."), self.bezels)
+        self.follow_seat = Toggle("Keep overlaps aimed at where I sit")
+        self.follow_seat.clicked.connect(lambda on: self.set_config("layout", "follow_seat", on))
+        self.seat_back = button("Put it back", None, lambda: self.app.service.send("seat back"))
+        self.seat_back.setToolTip("Aim the overlaps from where they were lined up again, and leave them there "
+                                  "while you sit where you are now")
+        self.follow_seat_row = self.mirror_card.add_row(text_block(
+            "Keep overlaps aimed at where I sit",
+            "A screen in front of another only lines up from where you sit. With this on, this computer's camera "
+            "notices when you've settled somewhere new for 30 seconds (further back, say) and aims the overlap "
+            "from there, once; nothing moves while you only lean about. It goes by where your face was right "
+            "after the last line-up, whose final step finds your eyes with the phone, and keeps the camera on. "
+            "Curslink tells you when it has moved the overlap; Put it back undoes that."),
+            self.seat_back, self.follow_seat)
+        self.seat_tips = Toggle("Show seat suggestions")
+        self.seat_tips.clicked.connect(lambda on: self.set_config("layout", "seat_tips", on, restart=False))
+        self.seat_tips_row = self.mirror_card.add_row(text_block(
+            "Show seat suggestions",
+            "Under the layout, where you sit is shown with what moving something would change: your eye level "
+            "against the main screen's top edge, how far back you are for the width of your screens, and what "
+            "the screen in front hides."), self.seat_tips)
         self.follow_head = Toggle("Follow my head (experimental)")
         self.follow_head.clicked.connect(lambda on: self.set_config("layout", "follow_head", on))
         self.head_home = button("Sit here", None, lambda: self.app.service.send("head home"))
@@ -259,6 +300,11 @@ class SettingsPage(QStackedWidget):
             "across far ones. It needs an overlap lined up with the phone camera (Layout, Line up with a "
             "camera) and keeps the camera on. Sit here: take where you are sitting now as the place it was "
             "lined up from."), self.head_home, self.follow_head)
+        # What the camera those two switches use is doing: until 0.4.114 nothing
+        # said why it hadn't come on (no overlap through a line-up yet, say).
+        self.head_note = label("", "small", wrap=True)
+        self.mirror_card.body.addWidget(self.head_note)
+        self.head_note.setVisible(False)
         # Rows for screens behind others: keep mirroring while on a screen joined to it.
         self.joined_rows: list = []
         self.joined_toggles: dict[tuple[str, str | None], Toggle] = {}
@@ -510,9 +556,15 @@ class SettingsPage(QStackedWidget):
             self.mirror_fps_row.setVisible(overlap and self.mirror.isChecked())
             self.bezels.setChecked(bool(layout_raw.get("bezels", False)))
             self.bezels_row.setVisible(overlap and self.mirror.isChecked())
+            self.follow_seat.setChecked(bool(layout_raw.get("follow_seat", False)))
+            self.follow_seat_row.setVisible(overlap and self.mirror.isChecked())
+            self.seat_back.setVisible(self.follow_seat.isChecked())
+            self.seat_tips.setChecked(bool(layout_raw.get("seat_tips", True)))
+            self.seat_tips_row.setVisible(overlap)
             self.follow_head.setChecked(bool(layout_raw.get("follow_head", False)))
             self.follow_head_row.setVisible(overlap and self.mirror.isChecked())
             self.head_home.setVisible(self.follow_head.isChecked())
+            self.show_head_status()
             self.mirror_note.setVisible(not overlap)
             self.load_joined(raw, overlap and self.mirror.isChecked() and role == "host")
             self.agent_keys_card.setVisible(role == "agent")
@@ -596,6 +648,13 @@ class SettingsPage(QStackedWidget):
         if which == "all":
             return set(joined)
         return {k for k in which if k in joined} if isinstance(which, list) else set()
+
+    def show_head_status(self) -> None:
+        """Say what the head-tracking camera is doing, while either switch is on."""
+        on = (self.follow_head.isChecked() or self.follow_seat.isChecked()) and not self.follow_head_row.isHidden()
+        text = head_note(getattr(self.app, "head_status", None)) if on else ""
+        self.head_note.setText(text)
+        self.head_note.setVisible(bool(text))
 
     def load_joined(self, raw: dict, show: bool) -> None:
         choices = self.joined_choices(raw) if show else []

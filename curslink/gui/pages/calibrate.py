@@ -24,6 +24,12 @@ log = logging.getLogger(__name__)
 LOOKING_DEG = 12.0
 
 
+# The extra first step when a line-up has left the desk in 3D (curslink.seat):
+# looking at the camera itself, which is how where you sit is found without a phone.
+CAMERA = "(camera)"
+CAMERA_NAME = "This computer's camera"
+
+
 class CalibratePage(Page):
     def __init__(self, app):
         super().__init__(
@@ -40,6 +46,10 @@ class CalibratePage(Page):
         # Linking stayed up (gaze off) so paired computers show "Look here" too.
         self.kept_linking = False
         self._look_sent: str | None = None
+        # Where you sit (curslink.seat): the saved desk, if this pass can find the seat too,
+        # and whether that's all it was started for (the Layout page's "Find with the camera").
+        self.desk: dict | None = None
+        self.seat_only = False
 
         self.agent_note = label("Gaze runs on the host, the computer with the camera and the keyboard and mouse. "
                                 "Calibrate there.", "warn", wrap=True)
@@ -183,11 +193,32 @@ class CalibratePage(Page):
         elif self.state == "ready":
             self.record()
 
-    def begin(self) -> None:
+    def seat_desk(self) -> dict | None:
+        """The desk a line-up left, if it's of these screens and says how big they are."""
+        from curslink import seat
+
+        desk = seat.load()
+        keys = {t.key for t, _n in self.targets}
+        if desk is None or seat.mm_of(desk) is None or not set(desk["screens"]) <= keys:
+            return None
+        return desk
+
+    def begin(self, seat_only: bool = False) -> None:
         from curslink.app import Calibrator
+        from curslink.gaze.zones import Target
 
         self.load_targets()
+        self.targets = [t for t in self.targets if t[0].screen_id != CAMERA]
         if not self.targets:
+            return
+        self.seat_only = bool(seat_only)
+        self.desk = self.seat_desk()
+        if self.desk is not None:
+            self.targets.insert(0, (Target(str(self.app.config().get("host", "device_id")), CAMERA), CAMERA_NAME))
+        elif self.seat_only:
+            self.state, self.message = "error", ("Line up your screens with the phone camera first (Layout, Line up "
+                                                 "with camera): that's what measures where each screen stands.")
+            self.show_state()
             return
         self.was_linking = self.app.service.state in (RUNNING, STARTING)
         # Running: keep linking so the other computers can show "Look here",
@@ -283,6 +314,9 @@ class CalibratePage(Page):
         self.state = "recording"
         self.show_state()
         cal = self.calibrator
+        if target.screen_id == CAMERA:
+            in_background(lambda: cal.look(1.5), lambda centre: self.recorded(name, centre), self.failed)
+            return
         in_background(lambda: cal.record(target, 1.5), lambda centre: self.recorded(name, centre), self.failed)
 
     def overlay_record(self) -> None:
@@ -330,8 +364,9 @@ class CalibratePage(Page):
         cfg = self.app.config()
         path = self.app.config_path.parent / str(cfg.get("gaze", "calibration", "calibration.json"))
         cal.calibration.save(path)
-        cfg.set("gaze", "enabled", True)
-        cfg.save()
+        if not self.seat_only:
+            cfg.set("gaze", "enabled", True)
+            cfg.save()
         margin = float(cfg.get("gaze", "switch_margin_deg", GazeSettings().switch_margin_deg))
         close = close_pairs(cal.calibration, margin)
         if close:
@@ -340,10 +375,55 @@ class CalibratePage(Page):
                             "Edges still work between them.")
         else:
             self.message = f"All {len(cal.calibration.centroids())} screens are far enough apart to tell apart."
+        if self.seat_only:
+            self.message = ""
+        try:
+            self.message = (self.message + " " + self.finish_seat(cal)).strip()
+        except Exception:
+            log.warning("couldn't work out where you sit", exc_info=True)
         self.state = "done"
         self.show_state()
         self.app.config_changed.emit()
         self.resume_linking(force=True)
+
+    def finish_seat(self, cal) -> str:
+        """Where you sit, from this pass (curslink.seat): where the head was
+        before the camera and how far it turned between the camera and each
+        screen. The saved overlaps are aimed from there. What to say of it."""
+        from curslink import seat
+
+        desk, self.desk = self.desk, None
+        if desk is None:
+            return ""
+        head = cal.head()
+        if head is None:
+            return "The camera gave no distance to your face, so where you sit wasn't found."
+        cfg = self.app.config()
+        me = str(cfg.get("host", "device_id"))
+        mine = [k for k in desk["screens"] if k.split("/", 1)[0] == me]
+        on = mine[0] if mine else seat.main_screen(desk)
+        names = {t.key: n.split(" / ")[0] for t, n in self.targets}
+        if desk.get("how") == "phone":
+            # The phone found the eyes, better than this can: so it's the camera that's placed, against them.
+            desk["camera"] = seat.locate_camera(desk, head, on)
+            seat.save(desk)
+            log.info("where you sit: the camera placed against the phone's eye point: %s", desk["camera"])
+            return ("Your seat was already measured with the phone, which is more exact, so it's kept; this pass "
+                    "noted where the camera is against it.")
+        camera = desk["camera"] if isinstance(desk.get("camera"), dict) and desk["camera"].get("how") == "found" \
+            else seat.assumed_camera(desk, on)
+        looks = {t.key: centre for t, centre in cal.calibration.centroids().items() if t.key in desk["screens"]}
+        found = seat.from_looks(desk, camera, head, looks, self.results.get(CAMERA_NAME))
+        if found is None:
+            return "Where you sit couldn't be worked out from this pass."
+        log.info("where you sit, by the camera: %.0f mm from it by the size of your face, %.0f mm fitted to %d pair(s) "
+                 "of looks (the head made %.0f%% of each turn)", found["by_face"], found["by_turns"], found["pairs"],
+                 100 * found["turn"])
+        new = seat.apply(cfg, desk, found["eye"], "camera")
+        main = seat.main_screen(new, seat.config_fits(cfg))
+        return (f"You sit about {seat.distance(new, main) * seat.mm_of(new) / 10:.0f} cm from "
+                f"{names.get(main, 'your main screen')}; your overlapping screens are aimed from there now. This is "
+                "rougher than the phone step at the end of a line-up, which replaces it whenever you next line up.")
 
     def failed(self, exc) -> None:
         log.warning("calibration stopped: %s", exc, exc_info=exc if not isinstance(exc, RuntimeError) else None)
@@ -486,7 +566,15 @@ class CalibratePage(Page):
             me = None
         step = f"Step {self.step + 1} of {len(self.targets)} · {name.split(' / ')[0]}"
         done = {i for i, (_t, n) in enumerate(self.targets) if n in self.results}
-        if target.device_id == me:
+        if target.screen_id == CAMERA:
+            # The card goes on this computer's first screen; it's the camera that's looked at.
+            self.send_look(None)
+            first = next((str(s.get("id", f"screen{i}")) for d in self.app.config().devices() if d.get("id") == me
+                          for i, s in enumerate(d.get("screens", []))), "")
+            self.overlay.show(first, f"Step 1 of {len(self.targets)} · look at the camera itself, not at this card",
+                              recording=self.state == "recording", total=len(self.targets), current=self.step,
+                              done=done)
+        elif target.device_id == me:
             self.send_look(None)
             self.overlay.show(target.screen_id, step, recording=self.state == "recording",
                               total=len(self.targets), current=self.step, done=done)
@@ -528,8 +616,13 @@ class CalibratePage(Page):
         elif s in ("ready", "recording"):
             name = self.targets[self.step][1]
             self.step_title.setText(f"STEP {self.step + 1} OF {n}")
-            self.prompt.setText(f"Look at {name}")
-            if s == "recording":
+            camera_step = self.targets[self.step][0].screen_id == CAMERA
+            self.prompt.setText("Look straight at the camera" if camera_step else f"Look at {name}")
+            if camera_step and s != "recording" and getattr(self, "retry", None) != name:
+                detail = ("This finds where you sit: sit as you normally do and point your nose at this computer's "
+                          "camera, not just your eyes. Then press Record. For each screen after it, turn your "
+                          "head to face it the same way.")
+            elif s == "recording":
                 detail = "Keep looking for a moment…"
             elif getattr(self, "retry", None) == name:
                 detail = ("The camera couldn't see your face while you looked there. Turn your head a little "
@@ -541,8 +634,8 @@ class CalibratePage(Page):
         elif s == "done":
             art = "calibrated"
             self.step_title.setText("DONE")
-            self.prompt.setText("Calibration saved")
-            self.prompt_detail.setText(self.message + " Gaze switching is on.")
+            self.prompt.setText("Found where you sit" if self.seat_only else "Calibration saved")
+            self.prompt_detail.setText(self.message + ("" if self.seat_only else " Gaze switching is on."))
             self.primary.setText("Calibrate again")
             self.readout.setText(self.idle_readout())
         elif s == "error":

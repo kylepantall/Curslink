@@ -92,6 +92,9 @@ class HostConfig:
     # Experimental ([layout] follow_head): this computer's camera watches where your
     # head is and overlaps move to stay lined up from there (curslink.headfollow).
     follow_head: bool = False
+    # [layout] follow_seat: the same camera, slowly: once you've settled somewhere
+    # new for half a minute the overlaps are aimed from there (curslink.seat).
+    follow_seat: bool = False
     # App mirror: drag an app's window off this computer or another onto a
     # third, where it's shown and used ([app_mirror] enabled; see curslink.appmirror).
     app_mirror: bool = True
@@ -390,10 +393,10 @@ def _mirror_quality(layout: Any) -> str:
     return value
 
 
-def _follow_head(layout: Any) -> bool:
-    value = layout.get("follow_head", False) if isinstance(layout, dict) else False
+def _follow_head(layout: Any, key: str = "follow_head") -> bool:
+    value = layout.get(key, False) if isinstance(layout, dict) else False
     if not isinstance(value, bool):
-        raise ConfigError("[layout].follow_head must be true or false")
+        raise ConfigError(f"[layout].{key} must be true or false")
     return value
 
 
@@ -584,6 +587,7 @@ def host_config(raw: dict[str, Any], base_dir: Path = Path(".")) -> HostConfig:
         mirror_fps=_mirror_fps(raw.get("layout", {})),
         mirror_quality=_mirror_quality(raw.get("layout", {})),
         follow_head=_follow_head(raw.get("layout", {})),
+        follow_seat=_follow_head(raw.get("layout", {}), "follow_seat"),
         app_mirror=_enabled(raw.get("app_mirror", {}), "[app_mirror]"),
         clipboard=bool(host.get("clipboard", True)),
         clipboard_max_mb=_clipboard_max_mb(host, "[host]"),

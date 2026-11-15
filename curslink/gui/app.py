@@ -63,6 +63,7 @@ class Curslink(QObject):
         self.service.event.connect(self._on_identify)
         self.service.event.connect(self._on_lineup)
         self.calibrating = False  # host: the service gave the camera to calibration
+        self.head_status: dict | None = None  # host: what head tracking's camera is doing
         self.service.event.connect(self._on_calibrating)
         self.service.event.connect(self._on_paired)
         self.service.event.connect(self._on_agent_screens)
@@ -352,10 +353,43 @@ class Curslink(QObject):
     def _on_calibrating(self, event: dict) -> None:
         if event.get("event") == "calibrating":
             self.calibrating = bool(event.get("on"))
+        elif event.get("event") == "seat":
+            self._on_seat(event)
+        elif event.get("event") == "head":
+            # What head tracking's camera is doing, for Settings to say.
+            self.head_status = {k: event.get(k) for k in ("state", "camera", "error")}
+            if self.window is not None:
+                self.window.pages["settings"].show_head_status()
+
+    def _on_seat(self, event: dict) -> None:
+        """The host aimed the overlaps at somewhere new you've settled
+        ([layout] follow_seat, curslink.headfollow): say so, and how to undo it."""
+        try:
+            moved = [float(v) for v in event.get("moved", [])][:3]
+        except (TypeError, ValueError):
+            return
+        if len(moved) != 3 or not any(abs(v) >= 1 for v in moved):
+            return
+        if not any(abs(float(event.get(k, 0) or 0)) >= 1 for k in ("across", "down", "back")):
+            return  # (put back)
+        back, across, down = moved[2], moved[0], moved[1]
+        if abs(back) >= max(abs(across), abs(down)):
+            what = f"moved {'back' if back > 0 else 'forward'} {abs(back) / 10:.0f} cm"
+        elif abs(across) >= abs(down):
+            what = f"moved {abs(across) / 10:.0f} cm to the {'right' if across > 0 else 'left'}"
+        else:
+            what = f"sat {abs(down) / 10:.0f} cm {'lower' if down > 0 else 'higher'}"
+        tray = getattr(self, "tray", None)
+        if tray is not None:
+            tray.say(f"You've {what}", "Curslink re-aimed your overlapping screens to match. Put it back: "
+                                        "Settings > Overlapping screens.")
 
     def _on_service_state(self, state: str) -> None:
         if state != RUNNING:
             self.calibrating = False
+            self.head_status = None  # the next host says afresh
+            if self.window is not None:
+                self.window.pages["settings"].show_head_status()
         if state in (STOPPED, FAILED):
             self.status.stopped()
             if self._look is not None:
