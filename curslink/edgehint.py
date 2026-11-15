@@ -29,7 +29,13 @@ An ``edge`` command (a JSON object) is one of:
                                        along that side, same units
      "near": 0.0 .. 1.0,               how close: 1 is at the edge
      "name": "WKS82261",               the device across ("from" only)
-     "kind": "mac" | "windows" | "linux" | "phone"}
+     "kind": "mac" | "windows" | "linux" | "phone",
+     "lean": [da, db]}                 optional ("to" only): the edge it meets
+                                       leans (a screen turned in or tipped
+                                       back, lined up by camera): how far off
+                                       the side's straight line it runs at
+                                       ``a`` and at ``b``, across the side, in
+                                       the same pixels; + is right (or down)
 """
 
 from __future__ import annotations
@@ -81,6 +87,11 @@ class EdgeHint:
     # ``a``, ``b`` and ``at`` count from the screen's own top (or left).
     rect: tuple[int, int, int, int] = (0, 0, 0, 0)
     trect: tuple[int, int, int, int] = (0, 0, 0, 0)
+    # The target's bar where the edge it meets leans (a screen turned in or
+    # tipped back, a leaning Fit): how far the real edge is off the bar's
+    # straight line at its two ends (``ta`` and ``tb``), across it, in the
+    # target's layout pixels (+ is right, or down). None: straight.
+    tlean: tuple[float, float] | None = None
 
     @property
     def near(self) -> float:
@@ -142,6 +153,31 @@ def _stretch(layout: Layout, here: Screen, side: str, at: float, target: Screen,
     if hi <= lo:
         return 0.0, float(here.width), target_side, 0.0, float(target.width)
     return lo - here.x, hi - here.x, target_side, lo - target.x, hi - target.x
+
+
+def _leaning(layout: Layout, here: Screen, side: str, a: float, b: float, target: Screen,
+             ) -> tuple[tuple[int, int, int, int], str, float, float, tuple[float, float]] | None:
+    """Mirror mode, a leaning fit between ``here`` and ``target`` (a screen
+    turned in or tipped back, lined up by camera): where the stretch ``a``
+    to ``b`` of ``here``'s ``side`` really runs across ``target``, as the
+    target's bar: its rectangle and side (the straight line through the
+    middle of that run), its stretch, and how far the real edge is off that
+    line at either end (target's layout px, + right or down). None: no lean."""
+    found = layout.pair_fit(here, target)
+    if found is None or found[1].quad is None:
+        return None
+    vertical = side in ("left", "right")
+    edge = _boundary(here, side) - (1 if side in ("right", "bottom") else 0)
+    ends = [(edge, here.y + t) if vertical else (here.x + t, edge) for t in (a, b)]
+    (px, py), (qx, qy) = (layout.map_point(here, target, *p) for p in ends)
+    across = (px, qx) if vertical else (py, qy)
+    boundary = (across[0] + across[1]) / 2 + (1 if side in ("right", "bottom") else 0)
+    trect, tside = _entry_rect(target, side, boundary)
+    line = {"left": trect[0], "right": trect[0] + trect[2], "top": trect[1], "bottom": trect[1] + trect[3]}[tside]
+    ta, tb = (py - target.y, qy - target.y) if vertical else (px - target.x, qx - target.x)
+    lean = (round(across[0] + (1 if side in ("right", "bottom") else 0) - line, 1),
+            round(across[1] + (1 if side in ("right", "bottom") else 0) - line, 1))
+    return trect, tside, ta, tb, lean
 
 
 def _whole(screen: Screen) -> tuple[int, int, int, int]:
@@ -248,8 +284,14 @@ def find_hint(layout: Layout, device_id: str, x: float, y: float,
         else:  # an edge link joining other sides: its own side of the screen
             trect = _whole(target)
         tat = _along(target, target_side, crossing.x, crossing.y)
+        tlean = None
+        leaning = _leaning(layout, here, side, a, b, target) if target_side == OPPOSITE[side] else None
+        if leaning is not None:
+            trect, target_side, ta, tb, tlean = leaning
+            if all(abs(v) < 1 for v in tlean):
+                tlean = None
         best = EdgeHint(here, side, a, b, at, max(0.0, distance), target, target_side, ta, tb, tat,
-                        _whole(here), trect)
+                        _whole(here), trect, tlean)
     for hint in _covered_hints(layout, here, x, y, available):
         if best is None or hint.distance < best.distance:
             best = hint
@@ -339,6 +381,8 @@ class EdgeIndicator:
                 "a": round(hint.ta), "b": round(hint.tb), "at": round(hint.tat), "near": near,
                 "screen": hint.target.id, "screen_os": _screen_os(hint.target),
             }
+            if hint.tlean is not None:
+                wanted[target]["lean"] = list(hint.tlean)
         for device in list(self._shown):
             if device not in wanted:
                 self._put(device, {"hide": True})
@@ -385,7 +429,7 @@ class EdgeIndicator:
     def _changed(old: dict | None, new: dict) -> bool:
         if old is None:
             return True
-        for key in ("role", "rect", "side", "a", "b", "name", "kind"):
+        for key in ("role", "rect", "side", "a", "b", "name", "kind", "lean"):
             if old.get(key) != new.get(key):
                 return True
         if abs(old["at"] - new["at"]) >= STEP_PX:

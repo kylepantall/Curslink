@@ -139,6 +139,12 @@ the Layout page measures it (`curslink/lineup.py`, `lineup_scene.py`,
   rectangle, so it follows the screen as it's dragged), with the rectangle
   the pointer goes by as a dotted outline; from the line-up just run, or
   the saved fits.
+- **The edge glow along a leaning edge.** In mirror mode the bar on the
+  screen the pointer heads for goes where the edge it leaves really runs
+  across that screen (`edgehint._leaning`, through the fit), and with a
+  leaning fit the `edge` command carries `lean`: how far that edge is off
+  the bar's straight line at each end. The helper shears the bar to match
+  (`Bar.draw`); older agents and the phone draw it straight.
 - **Turning a device off.** `[[devices]] enabled = false` ("Use <name>" on
   the Layout page): it stays paired, connected and laid out, but
   `Router.available` is false for it, so no edge, gaze or app mirror takes
