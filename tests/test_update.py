@@ -254,6 +254,9 @@ def test_windows_setup_install_works_without_a_console(tmp_path, monkeypatch):
     monkeypatch.setattr(update.os, "_exit", fake_exit)
     with pytest.raises(Exited):
         update.install(setup, "windows-setup", "9.0.0", relaunch=["gui"])
-    assert started["cmd"][:2] == ["cmd", "/c"]
+    # The setup itself, never through cmd.exe (antivirus blocks that).
+    assert started["cmd"][:2] == [str(setup), "/VERYSILENT"]
+    assert started["cmd"][-1].startswith("/RELAUNCH=")
+    assert started["env"]["CURSLINK_NO_UPDATE"] == "just-updated"
     assert started["creationflags"] & 0x08000000  # CREATE_NO_WINDOW
-    assert (tmp_path / "curslink-9.0.0-windows-x64-setup.cmd").exists()
+    assert (tmp_path / "curslink-9.0.0-windows-x64-setup.relaunch").exists()
