@@ -624,6 +624,11 @@ def main(argv: list[str] | None = None) -> int:
 
         run_helper()
         return 0
+    if argv[:1] == ["_head-camera"]:
+        # ...and as head tracking's camera (see headcamera.py).
+        from curslink.headcamera import main as head_camera_main
+
+        return head_camera_main(argv[1:])
     if argv[:1] == ["_pair-dialog"]:
         from curslink.pairing.dialog import main as dialog_main
 

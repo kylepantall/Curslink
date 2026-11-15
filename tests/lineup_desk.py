@@ -147,11 +147,13 @@ def draw_screen(w: int, h: int, markers: list, cells: int = 6, lines=None, patte
 
 
 def render(desk: Desk, planned: dict, cam: Camera, pose, blur: float = 0.8, noise: float = 2.0,
-           glare=None, motion: int = 0, seed: int = 0, shown: int = 0, lines=None, patterns=None):
+           glare=None, motion: int = 0, seed: int = 0, shown: int = 0, lines=None, patterns=None, bezels=None):
     """The grey frame ``cam`` takes of ``desk`` from ``pose``, every screen
     in ``planned`` showing its patterns (its set number ``shown``, as they
     change through the scan). ``glare``: ``[(key, u, v, radius
-    in screen widths)]`` reflections; ``motion``: pixels of smear."""
+    in screen widths)]`` reflections; ``motion``: pixels of smear;
+    ``bezels``: ``{key: (left, top, right, bottom) mm}`` of dark frame
+    round a (flat) screen's glass."""
     import cv2
 
     rng = np.random.default_rng(seed)
@@ -182,6 +184,13 @@ def render(desk: Desk, planned: dict, cam: Camera, pose, blur: float = 0.8, nois
             across = (p1 - p0) / (a1 - a0)
             # strip pixel (x, y) is at p0 + (x - a0) * across + y * down
             hm = k @ np.column_stack([r @ across, r @ s["r"][:, 1] * step, r @ (p0 - a0 * across) + t])
+            frame = (bezels or {}).get(s["key"])
+            if frame and strips == 1:
+                # The frame first: a dark rectangle that much bigger all round.
+                fl, ft, fr, fb = (v / step for v in frame)
+                grow = np.array([[(iw + fl + fr) / iw, 0, -fl], [0, (ih + ft + fb) / ih, -ft], [0, 0, 1.0]])
+                mask = cv2.warpPerspective(np.ones((ih, iw), np.float32), hm @ grow, (w, h), flags=cv2.INTER_LINEAR)
+                out = out * (1 - mask) + 12 * mask
             part = np.zeros((ih, iw), np.float32)
             part[:, a0:a1] = 1
             warped = cv2.warpPerspective(img * part, hm, (w, h), flags=cv2.INTER_LINEAR)

@@ -613,6 +613,75 @@ def test_a_line_up_just_measured_shows_as_measured_before_it_is_saved(desktop, q
     assert desktop.config().fits()[0]["quad"] == quad
 
 
+def test_a_line_up_that_passed_its_checks_is_saved_without_asking(desktop, qapp):
+    """A line-up whose lines across the joins agreed and whose pattern joined
+    up is saved there and then (Kyle, 0.4.100: nothing to press). One that
+    didn't pass, or that would save other changes along with it, still waits
+    for Save layout."""
+    from curslink.gui.pages.layout import lineup_passed
+    from curslink.lineup import Result
+
+    joined = {"state": "joined", "joins": 1, "left": 1.2, "moved": 30.0}
+    assert lineup_passed({"state": "checked", "lines": 6, "joins": 2, "step": 1.0})
+    assert lineup_passed({"state": "checked", "lines": 6, "joins": 2, "step": 1.0, "seam": joined})
+    assert lineup_passed({"state": "none", "lines": 0, "joins": 0, "step": None, "seam": joined})
+    assert not lineup_passed(None) and not lineup_passed({"state": "none", "lines": 0, "joins": 0, "step": None})
+    assert not lineup_passed({"state": "part", "lines": 6, "joins": 2, "step": 9.0, "seam": joined})
+    assert not lineup_passed({"state": "unseen", "lines": 6, "joins": 2, "step": None})
+    assert not lineup_passed({"state": "checked", "lines": 6, "joins": 2, "step": 1.0, "seam": {**joined, "state": "part"}})
+
+    page, home, laptop = _host_with_laptop(desktop)
+    home_key, laptop_key = home.key, laptop.key
+    saves = []
+    real = desktop.config_saved
+    desktop.config_saved = lambda *a, **k: (saves.append(1), real(restart=False))[1]
+    hx, hy, hw, hh = home.layout_rect()
+    fit = {"behind": home_key, "front": laptop_key, "x": hw - 300.0, "y": hh - 215.0, "scale": 0.5,
+           "bezel": [30.0, 28.0, 30.0, 0.0]}
+
+    def result(check):
+        return Result({home_key: (hx, hy), laptop_key: (hx + hw - 400, hy + hh - 300)}, [(home_key, laptop_key)], [],
+                      [dict(fit)], found=[home_key, laptop_key], missing=[], reference=home_key, check=check)
+
+    passed = {"state": "checked", "lines": 6, "joins": 2, "step": 1.0, "seam": joined}
+    # Still moving when it stopped: shown, and left to be checked and saved.
+    page.apply_lineup(result({**passed, "seam": {**joined, "state": "part"}}))
+    assert page.dirty and not saves and "press Save layout" in page.lineup_note.text()
+    page.load()
+    # Something else was waiting to be saved: the line-up doesn't save that for you.
+    page.scene.clearSelection()
+    home_item = next(i for i in page.items if i.key == home_key)
+    home_item.setSelected(True)
+    page.spins["x"].setValue(home_item.layout_rect()[0] + 10)
+    assert page.dirty
+    page.apply_lineup(result(passed))
+    assert page.dirty and not saves and "press Save layout" in page.lineup_note.text()
+    page.load()
+    # Passed, with nothing else pending: saved, the frame round the laptop with it.
+    page.apply_lineup(result(passed))
+    assert saves == [1] and not page.dirty and page.lineup_result is None
+    assert "so it's saved" in page.lineup_note.text() and "press Save layout" not in page.lineup_note.text()
+    saved, = desktop.config().fits()
+    assert saved["x"] == hw - 300.0 and list(saved["bezel"]) == [30.0, 28.0, 30.0, 0.0]
+
+
+def test_bezels_switch_in_settings(desktop, qapp):
+    desktop.window.pages["setup"].create()
+    cfg = desktop.config()
+    cfg.set("layout", "allow_overlap", True)
+    cfg.set("layout", "mirror", True)
+    cfg.save()
+    desktop.config_saved(restart=False)
+    settings = desktop.window.pages["settings"]
+    settings.load()
+    assert not settings.bezels_row.isHidden() and not settings.bezels.isChecked()
+    settings.bezels.click()
+    assert desktop.config().get("layout", "bezels") is True
+    from curslink.config import parse_layout
+
+    assert parse_layout(desktop.config().raw()).bezels
+
+
 def test_no_widget_opens_as_a_stray_window(desktop, qapp):
     # A widget shown before it has a parent opens as a window of its own:
     # on Windows that flashed up and vanished, on macOS it left rows piled up.
@@ -1731,6 +1800,7 @@ def test_live_line_up_ends_with_lines_across_the_joins(desktop, qapp, tmp_path):
     from curslink import lineup
 
     page, home, laptop = _host_with_laptop(desktop)
+    home_key, laptop_key = home.key, laptop.key
     sent = []
     desktop.service.send = sent.append
     page.start_lineup()
@@ -1783,12 +1853,14 @@ def test_live_line_up_ends_with_lines_across_the_joins(desktop, qapp, tmp_path):
         qapp.processEvents()
         time.sleep(0.01)
     assert page.lineup is None and sent[-1] == 'lineup {"hide":true}'
-    true = lineup.arrange(flow.screens, true_solution(desk, home.key, places[0][0]))
+    true = lineup.arrange(flow.screens, true_solution(desk, home_key, places[0][0]))
+    # It passed its check, so it was saved there and then (the page loaded again from the config).
+    laptop = next(i for i in page.items if i.key == laptop_key)
     x, y, *_ = laptop.layout_rect()
-    assert (x, y) == pytest.approx(true.positions[laptop.key], abs=8)
-    # The page says the check ran, and how close it got.
-    assert page.lineup_result.check["state"] == "checked"
-    assert "Joins checked with" in page.lineup_note.text()
+    assert (x, y) == pytest.approx(true.positions[laptop_key], abs=8)
+    assert page.lineup_result is None and not page.dirty
+    # The page says the check ran, how close it got, and that it's saved.
+    assert "Joins checked with" in page.lineup_note.text() and "so it's saved" in page.lineup_note.text()
 
     from curslink.gui.pages.layout import check_note
 
@@ -1868,9 +1940,12 @@ def test_live_line_up_joins_a_pattern_across_an_overlap(desktop, qapp, tmp_path)
         qapp.processEvents()
         time.sleep(0.01)
     assert page.lineup is None and sent[-1] == 'lineup {"hide":true}'
-    assert page.lineup_result.check["seam"]["state"] == "joined"
-    assert "pattern joined up" in page.lineup_note.text()
-    assert page.lineup_result.fits[0] == seam.fits()[0]
+    assert "pattern joined up" in page.lineup_note.text() and "so it's saved" in page.lineup_note.text()
+    # Joined, so saved there and then, with no Save layout to press: the overlap as the pattern left it.
+    assert page.lineup_result is None and not page.dirty
+    saved, = desktop.config().fits()
+    assert [float(v) for v in saved["quad"]] == pytest.approx(seam.fits()[0]["quad"], abs=0.06)
+    assert len(saved["eye"]) == 3 and len(saved["depth"]) == 4
 
 
 def test_settings_sections_in_the_sidebar_and_gaze_settings_on_calibrate(desktop, qapp):
