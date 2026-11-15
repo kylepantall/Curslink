@@ -604,6 +604,10 @@ class Curslink(QObject):
         if just_updated:
             env[SKIP_ENV] = "just-updated"
         log.info("restarting Curslink")
+        if sys.platform == "win32":
+            # Started directly, never through cmd.exe (antivirus blocks that:
+            # see restart_command); the new copy waits for this one itself.
+            env[WAIT_PID_ENV] = str(os.getpid())
         subprocess.Popen(restart_command(argv, os.getpid()), env=env, stdin=subprocess.DEVNULL,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **_detached())
         self.quit()
@@ -655,30 +659,50 @@ class WindowLog(QObject):
 
 
 def restart_command(argv: list[str], pid: int, wait_s: int = 60) -> list[str]:
-    """A command that waits (up to ``wait_s``) for process ``pid`` to exit, then runs ``argv``."""
-    if sys.platform == "win32":
-        import subprocess
+    """A command that waits (up to ``wait_s``) for process ``pid`` to exit, then runs ``argv``.
 
-        # A batch file, as the Windows update uses: cmd's quoting rules make
-        # a one-line wait loop fragile.
-        script = Path(tempfile.mkdtemp(prefix="curslink-restart-")) / "restart.cmd"
-        script.write_text("\r\n".join([
-            "@echo off",
-            "set /a n=0",
-            ":wait",
-            f"if %n% geq {wait_s} goto start",
-            f'tasklist /FI "PID eq {pid}" 2>nul | find "{pid}" >nul || goto start',
-            "set /a n+=1",
-            "ping -n 2 127.0.0.1 >nul",
-            "goto wait",
-            ":start",
-            'start "" ' + subprocess.list2cmdline(argv),
-            '(goto) 2>nul & del "%~f0"',
-        ]) + "\r\n")
-        return ["cmd", "/c", str(script)]
+    On Windows that's ``argv`` itself, with WAIT_PID_ENV set: a cmd.exe batch
+    file that waited and then started Curslink got it quarantined, because
+    antivirus behaviour checks (Bitdefender Advanced Threat Defense) block
+    "cmd.exe, signed by Microsoft, started an unsigned program". The new copy
+    waits in main() instead, before it takes the single-instance lock.
+    """
+    if sys.platform == "win32":
+        return list(argv)
     script = (f'i=0; while kill -0 {pid} 2>/dev/null && [ $i -lt {wait_s * 5} ]; '
               'do sleep 0.2; i=$((i+1)); done; exec "$@"')
     return ["/bin/sh", "-c", script, "curslink", *argv]
+
+
+WAIT_PID_ENV = "CURSLINK_WAIT_PID"
+
+
+def wait_for_exit(pid: int, timeout: float) -> bool:
+    """Wait up to ``timeout`` seconds for process ``pid`` to end. True if it did."""
+    if pid == os.getpid():
+        return False
+    if sys.platform == "win32":
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        handle = kernel32.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE
+        if not handle:
+            return True  # already gone
+        try:
+            return kernel32.WaitForSingleObject(ctypes.c_void_p(handle), int(timeout * 1000)) == 0
+        finally:
+            kernel32.CloseHandle(ctypes.c_void_p(handle))
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            pass
+        time.sleep(0.1)
+    return False
 
 
 def _detached() -> dict:
@@ -773,6 +797,11 @@ def main(argv: list[str] | None = None) -> int:
         qt.setWindowIcon(app_icon())
     qt.setStyle("Fusion")
     qt.setQuitOnLastWindowClosed(False)
+
+    waiting_for = os.environ.pop(WAIT_PID_ENV, "")
+    if waiting_for.isdigit():
+        # Restarted by a copy that's quitting: let it go before taking the lock.
+        wait_for_exit(int(waiting_for), 60.0)
 
     name = instance_name()
     instance_lock = _take_instance_lock(name)

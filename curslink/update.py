@@ -40,7 +40,7 @@ import urllib.error
 import urllib.request
 import zipfile
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Callable
 
 from curslink import __version__
@@ -299,23 +299,24 @@ def _relaunch(argv: list[str], version: str) -> None:
     os.execve(argv[0], argv, env)
 
 
-def _windows_script(setup: Path, relaunch: list[str] | None, pid: int) -> str:
-    """A batch file that waits for this process to exit, runs the setup, then restarts Curslink."""
-    def q(s: str) -> str:
-        return '"' + s.replace('"', '') + '"'
+def _windows_setup_command(setup: Path, relaunch: list[str] | None) -> list[str]:
+    """The command that installs the Windows setup silently and, once it's
+    done, has the setup itself start Curslink again.
 
-    lines = [
-        "@echo off",
-        # Wait for Curslink (this pid) to exit so the setup can replace it.
-        ":wait",
-        f'tasklist /FI "PID eq {pid}" 2>nul | find "{pid}" >nul && (ping -n 2 127.0.0.1 >nul & goto wait)',
-        f"{q(str(setup))} /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS",
-    ]
+    No cmd.exe batch file: antivirus behaviour checks (Bitdefender Advanced
+    Threat Defense) block "cmd.exe, signed by Microsoft, started an unsigned
+    program" and quarantine Curslink. The setup closes this copy itself
+    (CloseApplications=force) and starts the program named in the
+    /RELAUNCH file (packaging/windows/curslink.iss) when it finishes."""
+    cmd = [str(setup), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS"]
     if relaunch:
-        lines.append(f"set {SKIP_ENV}=just-updated")
-        lines.append(" ".join(q(a) for a in relaunch))
-    lines.append('(goto) 2>nul & del "%~f0"')
-    return "\r\n".join(lines) + "\r\n"
+        spec = setup.with_suffix(".relaunch")
+        exe = PureWindowsPath(relaunch[0]).name
+        show = "show" if Path(exe).stem.lower() == "curslinkw" else "hide"
+        spec.write_text("\r\n".join([exe, subprocess.list2cmdline(relaunch[1:]), show]) + "\r\n",
+                        encoding="utf-8-sig")
+        cmd.append(f"/RELAUNCH={spec}")
+    return cmd
 
 
 def install(path: Path, kind: str, version: str, relaunch: list[str] | None = None) -> str:
@@ -324,11 +325,12 @@ def install(path: Path, kind: str, version: str, relaunch: list[str] | None = No
     Returns a message for the user when it does return.
     """
     if kind == "windows-setup":
-        script = path.with_suffix(".cmd")
-        script.write_text(_windows_script(path, _relaunch_argv(relaunch), os.getpid()))
-        # No console window: the setup runs silently and Curslink restarts by itself.
+        # The setup runs silently and starts Curslink again when it's done;
+        # the restarted copy inherits this environment (no update check).
+        env = dict(os.environ, **{SKIP_ENV: "just-updated"})
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200)
-        subprocess.Popen(["cmd", "/c", str(script)], creationflags=flags, close_fds=True,
+        subprocess.Popen(_windows_setup_command(path, _relaunch_argv(relaunch)), creationflags=flags,
+                         close_fds=True, env=env,
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         # The setup can't replace curslink.exe while it runs: exit now.
         log.info("Curslink %s is installing; it will start again when done", version)

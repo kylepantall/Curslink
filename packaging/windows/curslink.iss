@@ -116,10 +116,37 @@ begin
   RegWriteExpandStringValue(HKEY_CURRENT_USER, EnvKey, 'Path', Paths);
 end;
 
+// An update started from Curslink passes /RELAUNCH=<file>: a UTF-8 file
+// of three lines, the program in {app} to start again, its parameters, and
+// "show" or "hide". Curslink used to wait, install and restart through a
+// cmd.exe batch file, and antivirus behaviour checks (Bitdefender Advanced
+// Threat Defense) block "cmd.exe started an unsigned program": the setup
+// starts it itself instead.
+procedure Relaunch();
+var
+  Spec: string;
+  Lines: TArrayOfString;
+  Show, Code: Integer;
+begin
+  Spec := ExpandConstant('{param:RELAUNCH|}');
+  if (Spec = '') or not LoadStringsFromFile(Spec, Lines) or (GetArrayLength(Lines) < 2) then
+    exit;
+  DeleteFile(Spec);
+  // Only a program installed here, never a path from elsewhere.
+  if (Lines[0] = '') or (Pos('\', Lines[0]) > 0) or (Pos('/', Lines[0]) > 0) or (Pos('..', Lines[0]) > 0) then
+    exit;
+  Show := SW_SHOWNORMAL;
+  if (GetArrayLength(Lines) > 2) and (Lines[2] = 'hide') then
+    Show := SW_HIDE;
+  Exec(ExpandConstant('{app}\') + Lines[0], Lines[1], ExpandConstant('{app}'), Show, ewNoWait, Code);
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then
     AddToPath(ExpandConstant('{app}'));
+  if CurStep = ssDone then
+    Relaunch();
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);

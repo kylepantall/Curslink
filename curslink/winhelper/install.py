@@ -49,10 +49,55 @@ def status() -> str:
     """"missing", "stopped" or "running". No admin needed."""
     if sys.platform != "win32":
         return "missing"
+    try:
+        return _query_status()
+    except OSError:
+        log.debug("couldn't ask the service manager directly; using sc.exe", exc_info=True)
     result = _sc("query", SERVICE_NAME)
     if result.returncode == 1060:  # ERROR_SERVICE_DOES_NOT_EXIST
         return "missing"
     return parse_state(result.stdout)
+
+
+def _query_status() -> str:  # pragma: no cover - Windows only
+    """Ask the service manager itself rather than starting sc.exe: the
+    settings page asks often, and antivirus behaviour checks score an
+    unsigned program starting system tools."""
+    import ctypes
+    from ctypes import wintypes
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    advapi32.OpenSCManagerW.restype = wintypes.HANDLE
+    advapi32.OpenSCManagerW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD]
+    advapi32.OpenServiceW.restype = wintypes.HANDLE
+    advapi32.OpenServiceW.argtypes = [wintypes.HANDLE, wintypes.LPCWSTR, wintypes.DWORD]
+    advapi32.CloseServiceHandle.argtypes = [wintypes.HANDLE]
+
+    class SERVICE_STATUS(ctypes.Structure):  # noqa: N801
+        _fields_ = [(n, wintypes.DWORD) for n in (
+            "dwServiceType", "dwCurrentState", "dwControlsAccepted", "dwWin32ExitCode",
+            "dwServiceSpecificExitCode", "dwCheckPoint", "dwWaitHint")]
+
+    advapi32.QueryServiceStatus.argtypes = [wintypes.HANDLE, ctypes.POINTER(SERVICE_STATUS)]
+    scm = advapi32.OpenSCManagerW(None, None, 0x0001)  # SC_MANAGER_CONNECT
+    if not scm:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        svc = advapi32.OpenServiceW(scm, SERVICE_NAME, 0x0004)  # SERVICE_QUERY_STATUS
+        if not svc:
+            err = ctypes.get_last_error()
+            if err == 1060:  # ERROR_SERVICE_DOES_NOT_EXIST
+                return "missing"
+            raise ctypes.WinError(err)
+        try:
+            st = SERVICE_STATUS()
+            if not advapi32.QueryServiceStatus(svc, ctypes.byref(st)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            return "running" if st.dwCurrentState == 4 else "stopped"  # SERVICE_RUNNING
+        finally:
+            advapi32.CloseServiceHandle(svc)
+    finally:
+        advapi32.CloseServiceHandle(scm)
 
 
 def _stop_and_wait(timeout: float = 15.0) -> None:

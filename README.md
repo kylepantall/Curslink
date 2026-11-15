@@ -285,6 +285,12 @@ session for now.
   and injection; a uinput backend is planned.
 * **Windows**: input can't be injected into apps running as administrator
   unless the agent runs elevated too.
+  The Windows build isn't code-signed yet, so behaviour-based antivirus
+  (Bitdefender Advanced Threat Defense and similar) can flag it. Since
+  0.4.118 Curslink never starts itself through `cmd.exe`, which is what
+  Bitdefender blocked; if it still quarantines Curslink, restore it from
+  the quarantine and add `%LOCALAPPDATA%\Programs\Curslink\` as an
+  exception.
 * **Android** (8 or later; `curslink-X.Y.Z-android.apk` from the release):
   install it, turn on *Curslink mouse and keyboard* in Settings →
   Accessibility, and allow it to run in the background. Then pair: on the
