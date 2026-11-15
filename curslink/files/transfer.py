@@ -106,6 +106,8 @@ class Outgoing:
     # Bytes allowed in flight (sent but not acknowledged), or None: no acks.
     window: int | None = None
     acked: int = 0
+    prefetch: bool = False   # sent ahead of a drop that hasn't happened yet
+    result: dict | None = None  # its file_result, if that came before the drop
     _moved: asyncio.Event | None = None
     # Called once with a path that takes more than OPEN_SLOW_S to open: on a
     # Mac that's a permission prompt waiting to be answered on this computer.

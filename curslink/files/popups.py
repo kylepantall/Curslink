@@ -18,6 +18,9 @@ class ReceivePopups:
         self.toasts: dict[str, dict] = {}
         self.shown = 0.0
         self.quiet: set[str] = set()   # transfers that show nothing until revealed
+        # Transfers sent ahead of a drop that never came here: whatever
+        # still arrives for them is thrown away without a word.
+        self.ignored: set[str] = set()
 
     def reveal(self, tid: str) -> None:
         """Start showing a quiet transfer's popup (the drop is waiting for it)."""
@@ -28,6 +31,10 @@ class ReceivePopups:
 
     def __call__(self, kind: str, info: dict) -> None:
         tid = info.get("id", "")
+        if tid in self.ignored:
+            if kind in ("done", "failed"):
+                self.ignored.discard(tid)
+            return
         if tid in self.quiet:
             if kind == "start":
                 self.toasts[tid] = {**info, "state": "receiving", "received": 0}
