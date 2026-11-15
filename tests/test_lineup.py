@@ -427,6 +427,11 @@ def test_the_check_lines_take_out_what_the_scan_left(desk, ref, middle, aim):
     assert all(0 <= x <= 1 and 0 <= y <= 1 for runs in lines.values() for run in runs for x, y in run)
     # every join has lines, each with a half on both of its screens
     assert all(len(j.lines) >= 2 for j in check.joins)
+    if desk is CURVED_DESK:
+        # A computer's own two screens are checked against each other as well:
+        # the MacBook's screen in front of its curved monitor.
+        assert {(j.a, j.b) for j in check.joins} == {("pc/main", "mac/screen2"), ("mac/main", "mac/screen2")}
+        assert not any(f["front"] == "mac/main" for f in off.fits)
     dims = {s["key"]: (s["width"], s["height"]) for s in layout}
     for n in range(20):
         at, target, roll = places[(n * 7 + 3) % len(places)]
@@ -445,6 +450,11 @@ def test_the_check_lines_take_out_what_the_scan_left(desk, ref, middle, aim):
         was = abs(off.positions[key][axis] - true.positions[key][axis])
         now = abs(fixed.positions[key][axis] - true.positions[key][axis])
         assert now <= max(6, 0.6 * was), (key, was, now)
+    for front, behind, side in true.joins:
+        if side is None and front != ref:  # in front of another: nearer right both ways
+            was = np.hypot(*np.subtract(off.positions[front], true.positions[front]))
+            now = np.hypot(*np.subtract(fixed.positions[front], true.positions[front]))
+            assert now <= max(8, 0.6 * was), (front, was, now)
     for f in true.fits:
         mine_off = next(g for g in off.fits if g["front"] == f["front"])
         mine = next(g for g in fixed.fits if g["front"] == f["front"])
@@ -633,3 +643,27 @@ def test_inbox_live_frames_and_how_its_going(tmp_path):
     assert server.sent[-1][2]["done"] is True
     inbox.handle("phone", "lineup_photo", {"id": "L1", "done": True})
     assert events[-1] == ("lineup_photo", {"device": "phone", "id": "L1", "done": True})
+
+
+def test_a_fit_is_right_where_the_screen_behind_shows_past_the_one_in_front():
+    """A laptop turned in and tipped back, in front of a curved monitor: its
+    outline against the monitor is skewed, and what matters is where its
+    edges are seen against the monitor's face (the pointer crosses there,
+    the monitor's picture carries on there). The fit is within a few pixels
+    all along those stretches, not centimetres out as one rectangle
+    averaged over the whole laptop was."""
+    import numpy as np
+
+    from curslink.lineup_scene import project_from
+
+    layout = CURVED_DESK.layout()
+    places = figure_of_eight(30, (0, -60, -900), reach=(15, 10, 8), aim=(0, 120, -50), seed=0)
+    solution = true_solution(CURVED_DESK, "pc/main", places[0][0])
+    fit = next(f for f in lineup.arrange(layout, solution).fits if f["front"] == "pc/main")
+    front, behind = solution.screens["pc/main"], solution.screens["mac/screen2"]
+    edges = np.array([(x, 0.0) for x in np.linspace(0, 2880, 60)] + [(2880.0, y) for y in np.linspace(0, 1620, 40)])
+    seen = project_from(solution.eye, behind, front.at(edges))
+    showing = (seen[:, 0] >= 0) & (seen[:, 0] <= 3440) & (seen[:, 1] >= 0) & (seen[:, 1] <= 1440)
+    assert showing.sum() >= 8
+    said = np.column_stack([fit["x"] + fit["scale"] * edges[:, 0], fit["y"] + fit["scale"] * edges[:, 1]])
+    assert np.abs(said - seen)[showing].max() < 12

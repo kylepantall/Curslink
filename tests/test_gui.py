@@ -1648,6 +1648,7 @@ def test_live_line_up_ends_with_lines_across_the_joins(desktop, qapp, tmp_path):
     page.start_lineup()
     flow = page.lineup
     flow.check_settle = 0.0
+    flow.check_hold = 0.0
     hx, hy, hw, hh = home.layout_rect()
     _lx, _ly, lw, lh = laptop.layout_rect()
     desk = Desk([(home.key, home.device_id, hw, hh, 600, (0, 0, 0), 0, 0),
@@ -1689,7 +1690,7 @@ def test_live_line_up_ends_with_lines_across_the_joins(desktop, qapp, tmp_path):
     assert entry["markers"] == flow.planned[laptop.key]["check"]["markers"] and entry["sets"] == [entry["markers"]]
     assert entry["lines"] and all(0 <= x <= 1 and 0 <= y <= 1 for run in entry["lines"] for x, y in run)
     assert flow.live.check.measured >= 2 and flow.live.check.worst() < 5
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + 30  # (a slow machine: one round of events can take seconds)
     while page.lineup is not None and time.monotonic() < deadline:
         qapp.processEvents()
         time.sleep(0.01)
@@ -1697,3 +1698,14 @@ def test_live_line_up_ends_with_lines_across_the_joins(desktop, qapp, tmp_path):
     true = lineup.arrange(flow.screens, true_solution(desk, home.key, places[0][0]))
     x, y, *_ = laptop.layout_rect()
     assert (x, y) == pytest.approx(true.positions[laptop.key], abs=8)
+    # The page says the check ran, and how close it got.
+    assert page.lineup_result.check["state"] == "checked"
+    assert "Joins checked with" in page.lineup_note.text()
+
+    from curslink.gui.pages.layout import check_note
+
+    assert check_note(None) == ""
+    assert "never showed in the camera" in check_note({"state": "unseen", "lines": 3, "joins": 1, "step": None})
+    assert "no two screens meet" in check_note({"state": "none", "lines": 0, "joins": 0, "step": None})
+    assert check_note({"state": "checked", "lines": 3, "joins": 1, "step": 2.4}) == \
+        " Joins checked with 3 lines across 1 join: within 2 px."

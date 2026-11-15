@@ -313,6 +313,13 @@ class Result:
     stance: dict[str, dict] = field(default_factory=dict)
     views: int = 1  # the frames it's from
     rms: float = 0.0  # how well the patterns fit, in frame pixels
+    # Every pair of screens that meet or overlap as the person sees them, a
+    # computer's own two screens as well (which have no link or fit: its OS
+    # moves the pointer between them): (a, b, side of a that b is at) or
+    # (front, behind, None). The check at the end draws its lines across these.
+    joins: list[tuple[str, str, str | None]] = field(default_factory=list)
+    # How the check at the end went (Live.check_summary), None if there wasn't one.
+    check: dict | None = None
 
 
 def _span(a0: float, a1: float, b0: float, b1: float) -> tuple[float, float] | None:
@@ -410,6 +417,43 @@ class _Desk:
                 return other, Placed(n, 0.0, 0.0, N.width, N.height, 1.0)
         return None
 
+    def edge_fit(self, behind: str, front: str) -> tuple[float, float, float] | None:
+        """Where ``front`` covers ``behind``, for a fit: ``(x, y, scale)`` with
+        front's pixel (u, v) seen over behind's (x + scale*u, y + scale*v).
+
+        Fitted along the stretches of front's edges that are seen against
+        behind's face: that's where the pointer crosses and where behind's
+        picture carries on (the mirror strip), so that's where it has to be
+        right. (A laptop turned in and tipped back makes a skewed outline
+        against the monitor behind: one rectangle for the whole of it is
+        centimetres out at its top edge.) None if hardly any edge is."""
+        import numpy as np
+
+        from curslink.lineup_scene import project_from
+
+        F, B = self.screens[front], self.screens[behind]
+        along = np.linspace(0.0, 1.0, 41)
+        w, h = F.width, F.height
+        uv = np.concatenate([
+            np.column_stack([along * w, np.zeros_like(along)]), np.column_stack([along * w, np.full_like(along, h)]),
+            np.column_stack([np.zeros_like(along), along * h]), np.column_stack([np.full_like(along, w), along * h])])
+        seen = project_from(self.sol.eye, B, F.at(uv))
+        if seen is None:
+            return None
+        ok = (seen[:, 0] >= 0) & (seen[:, 0] <= B.width) & (seen[:, 1] >= 0) & (seen[:, 1] <= B.height)
+        if ok.sum() < 8:
+            return None
+        uv, seen = uv[ok], seen[ok]
+        # x + s*u = X, y + s*v = Y: least squares over (x, y, s)
+        n = len(uv)
+        a = np.zeros((2 * n, 3))
+        a[:n, 0], a[:n, 2] = 1.0, uv[:, 0]
+        a[n:, 1], a[n:, 2] = 1.0, uv[:, 1]
+        (x, y, scale), *_ = np.linalg.lstsq(a, np.concatenate([seen[:, 0], seen[:, 1]]), rcond=None)
+        if not 0.05 < scale < 20:
+            return None
+        return float(x), float(y), float(scale)
+
     def in_front(self, a: str, b: str) -> bool:
         """Is ``a`` nearer the person than ``b`` where they overlap? The
         smaller one's middle, against the bigger one's plane; when that
@@ -489,8 +533,14 @@ def arrange(screens: list[dict], solution) -> Result:
             return px + (N.x0 - P.x0) * P.k, py - nh
         if r is not None and desk.in_front(p, n):
             # n is behind p: p sits on n at (P - N) in n's pixels.
+            at = desk.edge_fit(n, p)
+            if at is not None:
+                return px - at[0], py - at[1]
             return px - (P.x0 - N.x0) * N.k, py - (P.y0 - N.y0) * N.k
         # n is in front of p (where it covers p, in p's pixels), or apart from it.
+        at = desk.edge_fit(p, n) if r is not None else None
+        if at is not None:
+            return px + at[0], py + at[1]
         return px + (N.x0 - P.x0) * P.k, py + (N.y0 - P.y0) * P.k
 
     # Breadth first along the screens that meet, nearest first.
@@ -535,7 +585,7 @@ def arrange(screens: list[dict], solution) -> Result:
         final[key] = (x, y)
         rects[key] = (x, y, int(s["width"]), int(s["height"]))
 
-    fronts, links, fits = [], [], []
+    fronts, links, fits, joins = [], [], [], []
     for i, a in enumerate(keys):
         for b in keys[i + 1:]:
             r = rel.get((a, b))
@@ -545,17 +595,24 @@ def arrange(screens: list[dict], solution) -> Result:
                 behind, front = (a, b) if desk.in_front(b, a) else (b, a)
                 fronts.append((behind, front))
                 both = desk.pair(behind, front)
+                if both is not None:
+                    joins.append((front, behind, None))
                 if info[a]["device"] != info[b]["device"] and both is not None:
                     Bh, Fr = both
-                    fits.append({"behind": behind, "front": front, "x": float((Fr.x0 - Bh.x0) * Bh.k),
-                                 "y": float((Fr.y0 - Bh.y0) * Bh.k), "scale": float(Bh.k / Fr.k)})
+                    at = desk.edge_fit(behind, front) or (
+                        float((Fr.x0 - Bh.x0) * Bh.k), float((Fr.y0 - Bh.y0) * Bh.k), float(Bh.k / Fr.k))
+                    fits.append({"behind": behind, "front": front, "x": at[0], "y": at[1], "scale": at[2]})
                 continue
-            if info[a]["device"] == info[b]["device"]:
-                continue  # its own OS moves the pointer between them
             side = r[1]
             both = desk.pair(a, b, side)
             if both is None:
                 continue
+            if info[a]["device"] == info[b]["device"]:
+                A, B = both
+                shared = _span(A.y0, A.y1, B.y0, B.y1) if side in ("left", "right") else _span(A.x0, A.x1, B.x0, B.x1)
+                if shared is not None:
+                    joins.append((a, b, side))
+                continue  # its own OS moves the pointer between them
             A, B = both
             if side in ("left", "right"):
                 shared = _span(A.y0, A.y1, B.y0, B.y1)
@@ -578,7 +635,8 @@ def arrange(screens: list[dict], solution) -> Result:
             if a_span[1] - a_span[0] < 1 or b_span[1] - b_span[0] < 1:
                 continue
             links.append({"a": a, "a_side": side, "a_span": a_span, "b": b, "b_side": OPP[side], "b_span": b_span})
-    return Result(final, fronts, links, fits, found=keys, missing=missing, reference=ref,
+            joins.append((a, b, side))
+    return Result(final, fronts, links, fits, found=keys, missing=missing, reference=ref, joins=joins,
                   errors={k: float(poses[k].error) for k in keys},
                   stance={k: desk.stance(k) for k in keys},
                   views=solution.frames, rms=solution.rms)
@@ -847,7 +905,23 @@ class Live:
             errors, views, rms = self.result.errors, self.result.views, self.result.rms
             self.result = arrange(self.screens, self.check.sol)
             self.result.errors, self.result.views, self.result.rms = errors, views, rms
+        self.result.check = self.check_summary()
         return moved
+
+    def check_summary(self) -> dict | None:
+        """How the check went, for the Layout page: ``{"state", "lines",
+        "joins", "step"}``. ``state``: "none" (no two screens meet where a
+        line could be drawn), "unseen" (lines were drawn, the camera never
+        saw one), "checked" (every join came within a pixel or two) or
+        "part" (it stopped before that). ``step``: the biggest step left."""
+        if not self.aligned:
+            return None
+        if self.check is None:
+            return {"state": "none", "lines": 0, "joins": 0, "step": None}
+        c = self.check
+        drawn = [j for j in c.joins if j.lines]
+        state = "unseen" if not c.measured else "checked" if c.agreed else "part"
+        return {"state": state, "lines": sum(len(j.lines) for j in drawn), "joins": len(drawn), "step": c.worst()}
 
     def hint(self, numbers: dict[str, object] | None = None) -> str:
         """What to do next, in a few words (for the phone's screen)."""
