@@ -662,7 +662,9 @@ class MirrorHost:
         self.fit(cmd)
 
     def update(self) -> None:
-        screen = self.held or self.router.screen
+        # In an app's mirror, the screen showing it is the one in use, not the
+        # app's own (which is often another computer's, mirrored or not).
+        screen = self.held or (self.apps.in_use() if self.apps is not None else None) or self.router.screen
         # Held, the pointer can be elsewhere: whether the picture casts it changes with it.
         key = (screen, self.router.screen)
         if key != self._screen:
