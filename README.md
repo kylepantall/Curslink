@@ -105,7 +105,11 @@ how far away it stands, at what angle, how big, and how curved if it's a
 curved monitor. A screen shows a green edge once it's measured, the layout
 on the computer keeps adjusting, and it stops by itself when every screen
 is lined up, usually in a few seconds. (A monitor that doesn't report its
-size needs the phone moved a little from side to side; the phone says so.) Without the
+size needs the phone moved a little from side to side; the phone says so.)
+To finish, the screens draw short bright lines across where they meet:
+from where you sit each should look like one straight line. The camera
+measures any step in them and moves the layout until they join, so you can
+see for yourself that it's right. Without the
 app, take one photo of the desk with any camera and choose it there: that
 works too, but one photo can't tell how far away each screen is. Check the
 result and press **Save layout**.

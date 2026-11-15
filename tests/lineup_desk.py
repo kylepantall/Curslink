@@ -107,8 +107,9 @@ DESK = Desk([
 
 # -- drawn as a camera would see it (needs OpenCV) ------------------------------
 
-def draw_screen(w: int, h: int, markers: list, cells: int = 6):
-    """A screen showing its patterns, as curslink.gui.lineup draws them."""
+def draw_screen(w: int, h: int, markers: list, cells: int = 6, lines=None):
+    """A screen showing its patterns (and the check's ``lines``: runs of
+    points as shares of its size), as curslink.gui.lineup draws them."""
     import cv2
 
     img = np.full((h, w), 45, np.uint8)  # whatever's on the screen behind the patterns
@@ -122,11 +123,14 @@ def draw_screen(w: int, h: int, markers: list, cells: int = 6):
                 if bits >> (15 - (r * 4 + c)) & 1:
                     x0, y0 = x + (c + 1) * cell, y + (r + 1) * cell
                     cv2.rectangle(img, (round(x0), round(y0)), (round(x0 + cell) - 1, round(y0 + cell) - 1), 255, -1)
+    for run in lines or []:
+        pts = np.array([[(x * w * 16, y * h * 16) for x, y in run]]).round().astype(np.int32)
+        cv2.polylines(img, pts, False, 255, max(2, round(0.008 * min(w, h))), cv2.LINE_AA, shift=4)
     return img
 
 
 def render(desk: Desk, planned: dict, cam: Camera, pose, blur: float = 0.8, noise: float = 2.0,
-           glare=None, motion: int = 0, seed: int = 0, shown: int = 0):
+           glare=None, motion: int = 0, seed: int = 0, shown: int = 0, lines=None):
     """The grey frame ``cam`` takes of ``desk`` from ``pose``, every screen
     in ``planned`` showing its patterns (its set number ``shown``, as they
     change through the scan). ``glare``: ``[(key, u, v, radius
@@ -145,7 +149,7 @@ def render(desk: Desk, planned: dict, cam: Camera, pose, blur: float = 0.8, nois
         iw = 1100
         ih = round(iw * s["h"] / s["w"])
         sets = planned[s["key"]].get("sets") or [planned[s["key"]]["markers"]]
-        img = draw_screen(iw, ih, sets[shown % len(sets)]).astype(np.float32)
+        img = draw_screen(iw, ih, sets[shown % len(sets)], lines=(lines or {}).get(s["key"])).astype(np.float32)
         for key, u, v, rad in glare or []:
             if key == s["key"]:
                 yy, xx = np.mgrid[0:ih, 0:iw]

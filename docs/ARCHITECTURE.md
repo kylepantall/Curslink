@@ -94,6 +94,21 @@ the Layout page measures it (`curslink/lineup.py`, `lineup_scene.py`,
   place) agreeing solves are enough, and the doubt is shown with the
   result. The scan logs how it's going every two seconds (`gui.lineup`),
   so a diagnostics file shows where a slow one spent its time.
+- **The check.** Once every screen is locked (`curslink/lineup_check.py`),
+  each screen swaps to four patterns in from its edges and the screens draw
+  short lines straight across every join (each link; each edge of a screen
+  in front of another): a line starts on one screen and carries on, as the
+  eye sees it, on the other (`lines` in the `lineup` frame). In each
+  further frame the camera is placed by the join's own patterns, which
+  says where both halves of each line should appear if the desk is as
+  solved, wherever the phone is; where they really are is measured across
+  them to a fraction of a pixel. The step between the halves is the layout
+  being off at that join: the screen further from the reference (and what
+  hangs off it) is moved by it, the lines are drawn again, and it ends
+  when every join is within 0.3% of the screen's shorter side twice
+  running (or after 28 frames; 8 if no line is ever seen, as with an older
+  agent that doesn't draw them). Lines across one edge only say how far
+  along it the other screen is, which is what the pointer crossing needs.
 - **From 3D to the layout.** The pointer should cross where edges *look*
   as if they meet, so each pair of screens is projected, from the eye,
   onto the plane of one of them, and measured at the edges that touch. The

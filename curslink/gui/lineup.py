@@ -26,8 +26,11 @@ A marker payload (one computer's) is::
 ms, so the camera gets points all over the screen from wherever it's held
 (``markers`` is the first set, all an older Curslink shows). ``state``:
 how the scan is going for that screen ("locked": it's measured, shown as a
-tick). The same payload sent again with only the states changed updates
-the windows in place.
+green edge). ``lines``: the check at the end (curslink.lineup_check): runs
+of points ``[[x, y], ...]`` as shares of the screen, drawn as bright lines
+that should carry straight on across to the next screen. The same payload
+sent again with only the states or lines changed updates the windows in
+place.
 """
 
 from __future__ import annotations
@@ -79,6 +82,11 @@ class _MarkerWindow(QWidget):
         # Normally one; an agent reporting one monitor as two shows both sets.
         self.screens = screens
         self.shown = 0  # which set of patterns is up
+        self.restart()
+
+    def restart(self) -> None:
+        if any(s.get("lines") is not None for s in self.screens):
+            self.shown = 0  # the check: its own patterns, staying put
 
     def step(self) -> None:
         """On to the next set of patterns."""
@@ -88,6 +96,8 @@ class _MarkerWindow(QWidget):
     def set_states(self, screens: list[dict]) -> None:
         for mine, new in zip(self.screens, screens):
             mine["state"] = new.get("state")
+            mine["lines"] = new.get("lines")
+        self.restart()
         self.update()
 
     def paintEvent(self, _e) -> None:
@@ -102,8 +112,21 @@ class _MarkerWindow(QWidget):
             for marker in sets[self.shown % len(sets)]:
                 bits, fx, fy, fw, fh = marker
                 draw_marker(p, int(bits), QRectF(fx * w, fy * h, fw * w, fh * h))
+        checking = any(s.get("lines") is not None for s in self.screens)
+        if checking:
+            # The check: bright lines that should carry straight on across to the next screen.
+            p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            pen = QPen(QColor(255, 255, 255), max(3.0, 0.008 * min(w, h)))
+            pen.setCapStyle(Qt.PenCapStyle.FlatCap)
+            p.setPen(pen)
+            for screen in self.screens:
+                for run in screen.get("lines") or []:
+                    path = QPainterPath()
+                    for i, (fx, fy) in enumerate(run):
+                        (path.lineTo if i else path.moveTo)(fx * w, fy * h)
+                    p.drawPath(path)
         locked = bool(self.screens) and all(s.get("state") == "locked" for s in self.screens)
-        if locked:
+        if locked and not checking:
             # Measured: a green edge all round, seen from across the desk.
             edge = max(6, round(min(w, h) * 0.012))
             p.setPen(QPen(STATE_COLOURS["locked"], edge))
@@ -126,7 +149,8 @@ class _MarkerWindow(QWidget):
         if lines:
             s = lines[0]
             number, title = str(s.get("number") or ""), str(s.get("title") or "")[:80]
-            note = ("Measured \u2713" if locked else "Lining up: keep these patterns in the camera's view")
+            note = ("Checking: the lines should carry on straight across to the next screen" if checking else
+                    "Measured \u2713" if locked else "Lining up: keep these patterns in the camera's view")
             bw = max(mb.horizontalAdvance(number), ms.horizontalAdvance(title), ms.horizontalAdvance(note)) + 2 * ms.height()
             bh = mb.height() + 2.6 * ms.height() + ms.height()
             # In the middle, clear of the patterns along the edges (the top and bottom
@@ -146,7 +170,7 @@ class _MarkerWindow(QWidget):
             p.setFont(small)
             p.setPen(QColor(255, 255, 255))
             p.drawText(QRectF(box.left(), y, bw, ms.height() * 1.3), Qt.AlignmentFlag.AlignCenter, title)
-            p.setPen(STATE_COLOURS["locked"] if locked else QColor(255, 255, 255, 170))
+            p.setPen(STATE_COLOURS["locked"] if locked and not checking else QColor(255, 255, 255, 170))
             p.drawText(QRectF(box.left(), y + ms.height() * 1.3, bw, ms.height() * 1.3),
                        Qt.AlignmentFlag.AlignCenter, note)
         p.end()
@@ -185,8 +209,13 @@ def screens_of(payload: dict) -> list[tuple[object, dict]]:
                 good = [m for m in one if _numbers(m, 5)] if isinstance(one, list) else []
                 if good:
                     sets.append(good)
+        lines = None
+        if isinstance(entry.get("lines"), list):
+            lines = [[(float(pt[0]), float(pt[1])) for pt in run if _numbers(pt, 2)]
+                     for run in entry["lines"][:64] if isinstance(run, list)]
+            lines = [run[:32] for run in lines if len(run) >= 2]
         out.append((qscreen, {"markers": markers, "sets": sets or [markers], "number": entry.get("number"),
-                              "title": entry.get("title"),
+                              "title": entry.get("title"), "lines": lines,
                               "state": entry.get("state") if isinstance(entry.get("state"), str) else None}))
     return out
 
@@ -215,7 +244,8 @@ class Markers:
         by_screen: dict[int, tuple[object, list[dict]]] = {}
         for qscreen, screen in found:
             by_screen.setdefault(id(qscreen), (qscreen, []))[1].append(screen)
-        what = [(id(q), [{k: v for k, v in s.items() if k != "state"} for s in ss]) for q, ss in by_screen.values()]
+        what = [(id(q), [{k: v for k, v in s.items() if k not in ("state", "lines")} for s in ss])
+                for q, ss in by_screen.values()]
         if self.windows and what == self.what:
             # The same patterns, only how it's going has changed: no need to start again.
             for window, (_q, screens) in zip(self.windows, by_screen.values()):
@@ -419,6 +449,9 @@ class LineupFlow(QObject):
     """
 
     finished = Signal(object)
+    # After the check's lines move, frames for this long are let go by: the
+    # screens (some of them another computer's) have to draw the new ones first.
+    check_settle = 0.6
     _analysed = Signal(object, str)  # (Result or None, error), from the worker thread
     _status = Signal(object)  # a live frame was read: how it's going (a dict), from the worker thread
 
@@ -451,6 +484,7 @@ class LineupFlow(QObject):
         self.shown_remote: dict[str, dict] = {}
         self.locked: set[str] = set()
         self.period = 320
+        self.sent_lines: dict | None = None
 
     def start(self) -> bool:
         from curslink import lineup
@@ -515,6 +549,29 @@ class LineupFlow(QObject):
                                "period": self.period})
         remote = {d: {**p, "screens": with_states(p["screens"])} for d, p in self.shown_remote.items()
                   if any(e.get("key") in changed for e in p["screens"])}
+        if remote:
+            self.send("lineup " + json.dumps({"devices": remote}, separators=(",", ":")))
+
+    def show_check(self, lines: dict) -> None:
+        """The check at the end: every screen shows its check patterns and
+        the lines across its joins (again whenever the lines move)."""
+        import json
+
+        if lines == self.sent_lines:
+            return
+        self.sent_lines = lines
+
+        def checking(entries: list[dict]) -> list[dict]:
+            out = []
+            for e in entries:
+                markers = (self.planned.get(e.get("key")) or {}).get("check", {}).get("markers")
+                if markers:
+                    out.append({**e, "markers": markers, "sets": [markers], "state": "locked",
+                                "lines": lines.get(e.get("key"), [])})
+            return out
+
+        self.markers.show({"screens": checking(self.shown_local), "seconds": SECONDS})
+        remote = {d: {**p, "screens": checking(p["screens"])} for d, p in self.shown_remote.items()}
         if remote:
             self.send("lineup " + json.dumps({"devices": remote}, separators=(",", ":")))
 
@@ -619,6 +676,7 @@ class LineupFlow(QObject):
         numbers = {s["key"]: s.get("number") for s in self.screens}
         # For the log (and so a diagnostics file): how the scan went, every couple of seconds.
         began = said = time.monotonic()
+        settle = 0.0
         count = size = 0
         spent = 0.0
         while True:
@@ -639,8 +697,23 @@ class LineupFlow(QObject):
                         self.live = lineup.Live(self.screens, self.planned, self.reference)
                         log.info("line-up scan: first frame %dx%d, %d kB, focal %s", gray.shape[1], gray.shape[0],
                                  len(data) // 1024, focal)
-                    self.live.frame(gray, focal)
-                    self.live.update()
+                    if self.live.check is not None:
+                        # The check: the lines are up; nudge the layout by what's seen of them
+                        # (not in a frame taken before the screens had drawn the latest ones).
+                        if time.monotonic() >= settle and not self.live.check.done:
+                            if self.live.check_frame(gray):
+                                settle = time.monotonic() + self.check_settle
+                            if self.live.check.done:
+                                log.info("line-up check ended: %d frames, %d with lines seen, screens moved %.1f px "
+                                         "in all, biggest step left %s px", self.live.check.frames,
+                                         self.live.check.measured, self.live.check.moved, self.live.check.worst())
+                    else:
+                        self.live.frame(gray, focal)
+                        self.live.update()
+                        if self.live.aligned and self.live.start_check() is not None:
+                            settle = time.monotonic() + self.check_settle
+                            log.info("line-up check: %d line(s) across %d join(s)",
+                                     sum(len(j.lines) for j in self.live.check.joins), len(self.live.check.joins))
                     count += 1
                     size += len(data)
                     spent += time.monotonic() - t0
@@ -656,9 +729,12 @@ class LineupFlow(QObject):
                 _remove(path)
             live = self.live
             if live is not None:
-                status.update(progress=live.progress(), hint=live.hint(numbers), states=live.states(),
-                              result=live.result, aligned=live.aligned, usable=live.usable,
-                              frames=live.frames)
+                checking = live.check is not None and not live.check.done
+                status.update(progress=min(live.progress(), 0.97) if checking else live.progress(),
+                              hint=live.hint(numbers), states=live.states(),
+                              result=live.result, aligned=live.aligned and not checking, usable=live.usable,
+                              frames=live.frames, lines=live.check.lines() if checking else None,
+                              step=live.check.worst() if live.check is not None else None)
             self._status.emit(status)
 
     def send_live(self, device, data: dict) -> None:
@@ -697,8 +773,17 @@ class LineupFlow(QObject):
             how = describe(result, {s["key"]: f"screen {s.get('number')}" for s in self.screens})
             if how:
                 detail += ". " + how[:1].upper() + how[1:] + "."
-        self.show_states(states)
-        self.dialog.say("Lined up" if aligned else "Scanning your desk", status.get("hint") or "Reading the patterns…")
+        lines = status.get("lines")
+        if lines is not None:
+            self.show_check(lines)
+            detail = "Bright lines are drawn across where your screens meet: each should look like one straight " \
+                     "line from where you sit. The camera is measuring any step in them and moving the layout to fit."
+        elif self.sent_lines is None:  # (after the check the lines stay up until it closes)
+            self.show_states(states)
+        if result is not None and lines is None and isinstance(status.get("step"), (int, float)):
+            detail += f" Joins checked to {max(1, round(status['step']))} px."
+        self.dialog.say("Lined up" if aligned else "Checking the joins" if lines is not None else "Scanning your desk",
+                        status.get("hint") or "Reading the patterns…")
         self.dialog.show_live(status.get("progress", 0.0), rects, detail, bool(status.get("usable")) and not aligned)
         if aligned and self.latest is not None:
             # A moment to see it's done, then the result.
