@@ -302,7 +302,7 @@ class Result:
     positions: dict[str, tuple[int, int]]  # key -> new (x, y) in the layout
     fronts: list[tuple[str, str]]  # (behind, front) for each overlap: front goes in front
     links: list[dict]  # for ConfigFile.set_link: a, a_side, a_span, b, b_side, b_span
-    fits: list[dict]  # for ConfigFile.set_fit: behind, front, x, y, scale
+    fits: list[dict]  # for ConfigFile.set_fit: behind, front, x, y, scale (and quad, eye, depth, mm)
     found: list[str]  # the screens placed
     missing: list[str]  # the screens that weren't
     reference: str
@@ -454,6 +454,80 @@ class _Desk:
             return None
         return float(x), float(y), float(scale)
 
+    def lean(self, behind: str, front: str) -> dict:
+        """How ``front`` leans against ``behind`` and where that's seen from,
+        for a fit (curslink.layout.Fit): ``{"quad", "eye", "depth"}``, or
+        nothing if it can't be told. ``quad``: front's four corners as seen
+        on behind (its pixels). ``eye``: where the eye is, across and down
+        behind and how far before it, and ``depth``: how far before it each
+        of those corners is, all in behind's pixels."""
+        import numpy as np
+
+        from curslink.layout import homography
+        from curslink.lineup_scene import project_from
+
+        F, B = self.screens[front], self.screens[behind]
+        quad = project_from(self.sol.eye, B, F.corners())
+        if quad is None or not np.all(np.isfinite(quad)):
+            return {}
+        # That's right for a flat screen behind. On a curved one a corner
+        # that's seen off the side of the glass is carried on in the plane
+        # of its corners, which isn't how the glass itself runs: so the
+        # shape is fitted to where the part of the front screen that *is*
+        # seen against the glass is seen, its edges most of all (where the
+        # pointer crosses and the mirror has to carry on from).
+        if B.bend:
+            fitted = self._fitted_quad(F, B)
+            if fitted is not None:
+                quad = fitted
+        flat = tuple(float(v) for v in quad.ravel())
+        rect = (0.0, 0.0, float(F.width), 0.0, float(F.width), float(F.height), 0.0, float(F.height))
+        if homography(rect, flat) is None or homography(flat, rect) is None:
+            return {}
+        # a shape the right way round, none of it folded over
+        sides = [(quad[(i + 1) % 4] - quad[i], quad[(i + 2) % 4] - quad[(i + 1) % 4]) for i in range(4)]
+        turn = [float(a[0] * b[1] - a[1] * b[0]) for a, b in sides]
+        if not all(t > 0 for t in turn):
+            return {}
+        out: dict = {"quad": list(flat)}
+        e = (B.r.T @ (np.asarray(self.sol.eye, np.float64) - B.t)) / B.scale
+        p = ((F.corners() - B.t) @ B.r) / B.scale
+        depth = -p[:, 2]
+        if -e[2] > 0 and np.all(depth >= 0) and np.all(depth < 0.9 * -e[2]):
+            out["eye"] = [float(e[0]), float(e[1]), float(-e[2])]
+            out["depth"] = [float(d) for d in depth]
+        return out
+
+    def _fitted_quad(self, F, B):
+        """``F``'s four corners on ``B`` by the perspective map that best
+        fits where the points of ``F`` seen against ``B``'s face are seen
+        (4, 2), or None if too little of it is."""
+        import cv2
+        import numpy as np
+
+        from curslink.lineup_scene import project_from
+
+        w, h = F.width, F.height
+        along = np.linspace(0.0, 1.0, 41)
+        edges = np.concatenate([
+            np.column_stack([along * w, np.zeros_like(along)]), np.column_stack([along * w, np.full_like(along, h)]),
+            np.column_stack([np.zeros_like(along), along * h]), np.column_stack([np.full_like(along, w), along * h])])
+        gx, gy = np.meshgrid(np.linspace(0.0, w, 17), np.linspace(0.0, h, 13))
+        uv = np.concatenate([edges, edges, edges, np.column_stack([gx.ravel(), gy.ravel()])])  # (edges count three times)
+        seen = project_from(self.sol.eye, B, F.at(uv))
+        if seen is None:
+            return None
+        ok = (seen[:, 0] >= 0) & (seen[:, 0] <= B.width) & (seen[:, 1] >= 0) & (seen[:, 1] <= B.height)
+        if ok.sum() < 40 or np.ptp(uv[ok, 0]) < 0.1 * w or np.ptp(uv[ok, 1]) < 0.05 * h:
+            return None
+        m, _ = cv2.findHomography(uv[ok].astype(np.float64), seen[ok].astype(np.float64), 0)
+        if m is None or not np.all(np.isfinite(m)):
+            return None
+        corners = np.array([(0.0, 0.0, 1.0), (w, 0.0, 1.0), (w, h, 1.0), (0.0, h, 1.0)]) @ m.T
+        if np.any(corners[:, 2] <= 1e-9):
+            return None
+        return corners[:, :2] / corners[:, 2:3]
+
     def in_front(self, a: str, b: str) -> bool:
         """Is ``a`` nearer the person than ``b`` where they overlap? The
         smaller one's middle, against the bigger one's plane; when that
@@ -495,6 +569,7 @@ def arrange(screens: list[dict], solution) -> Result:
     import numpy as np
 
     info = {s["key"]: s for s in screens}
+    mm = _sizes_mm(screens)
     desk = _Desk(solution)
     ref = solution.reference
     poses = {k: v for k, v in solution.screens.items() if k in info}
@@ -601,7 +676,11 @@ def arrange(screens: list[dict], solution) -> Result:
                     Bh, Fr = both
                     at = desk.edge_fit(behind, front) or (
                         float((Fr.x0 - Bh.x0) * Bh.k), float((Fr.y0 - Bh.y0) * Bh.k), float(Bh.k / Fr.k))
-                    fits.append({"behind": behind, "front": front, "x": at[0], "y": at[1], "scale": at[2]})
+                    fit = {"behind": behind, "front": front, "x": at[0], "y": at[1], "scale": at[2],
+                           **desk.lean(behind, front)}
+                    if "eye" in fit and behind in mm:
+                        fit["mm"] = mm[behind][0] / float(info[behind]["width"])
+                    fits.append(fit)
                 continue
             side = r[1]
             both = desk.pair(a, b, side)

@@ -115,10 +115,19 @@ def draw_screen(w: int, h: int, markers: list, cells: int = 6, lines=None, patte
 
     img = np.full((h, w), 45, np.uint8)  # whatever's on the screen behind the patterns
     if pattern:
-        from curslink.lineup_seam import blocks
+        from curslink.lineup_seam import blocks, tiles
 
         sw, sh = size or (w, h)
-        for x0, y0, x1, y1, white in blocks(pattern, sw, sh):
+        if pattern.get("quad"):
+            for (x0, y0, x1, y1), shapes in tiles(pattern, sw, sh):
+                layer = img.copy()
+                for corners, white in shapes:
+                    pts = np.array([(x * w / sw, y * h / sh) for x, y in corners])
+                    cv2.fillConvexPoly(layer, np.round(pts * 16).astype(np.int32), 255 if white else 0, shift=4)
+                a0, b0, a1, b1 = round(x0 * w / sw), round(y0 * h / sh), round(x1 * w / sw), round(y1 * h / sh)
+                img[b0:b1, a0:a1] = layer[b0:b1, a0:a1]
+            pattern = None
+        for x0, y0, x1, y1, white in blocks(pattern, sw, sh) if pattern else ():
             cv2.rectangle(img, (round(x0 * w / sw), round(y0 * h / sh)),
                           (round(x1 * w / sw) - 1, round(y1 * h / sh) - 1), 255 if white else 0, -1)
     for bits, fx, fy, fw, _fh in markers:

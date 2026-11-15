@@ -73,6 +73,12 @@ def ensure_model(path: Path | None = None, progress: Callable[[int, int], None] 
     return path
 
 
+# Told where the head is before the camera, each frame a face is in, by every
+# tracker here: ``head_listener(t, (right, down, away))`` in mm, as you look
+# at the screen (curslink.headfollow.mediapipe_head). On the tracker's thread.
+head_listener: Callable[[float, tuple[float, float, float]], None] | None = None
+
+
 class PoseEstimator:
     """Wraps MediaPipe: RGB frame in, raw ``(yaw, pitch, roll)`` out."""
 
@@ -90,6 +96,7 @@ class PoseEstimator:
         )
         self._landmarker = vision.FaceLandmarker.create_from_options(options)
         self._last_ts_ms = -1
+        self.matrix = None  # the face matrix of the last frame with a face in
         log.info("face landmarker ready in %.2fs (mediapipe %s)", time.monotonic() - started,
                  getattr(mp, "__version__", "?"))
 
@@ -103,6 +110,7 @@ class PoseEstimator:
         if not result.facial_transformation_matrixes:
             return None
         m = result.facial_transformation_matrixes[0]
+        self.matrix = m
         return rotation_to_euler([list(row[:3]) for row in m[:3]])
 
     def close(self) -> None:
@@ -219,6 +227,14 @@ class HeadPoseTracker:
                 elif pose is None and self.face_visible:
                     log.debug("camera %s: face lost", self.camera)
                 self.face_visible = pose is not None
+                listener = head_listener
+                if pose is not None and listener is not None and estimator.matrix is not None:
+                    from curslink.headfollow import mediapipe_head
+
+                    try:
+                        listener(now, mediapipe_head(estimator.matrix))
+                    except Exception:  # never the camera's problem
+                        log.debug("head listener failed", exc_info=True)
                 if pose is not None:
                     syaw, spitch = smoother(now, pose[0], pose[1])
                     self.on_sample(now, syaw, spitch)

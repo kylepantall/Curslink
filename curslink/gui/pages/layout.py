@@ -951,7 +951,7 @@ class LayoutPage(Page):
 
     def fit_tuned(self, behind: str, front: str, fit) -> None:
         cfg = self.app.config()
-        cfg.set_fit(behind, front, *fit)
+        cfg.set_fit(behind, front, *fit, keep_lean=True)
         cfg.save()
         # The service already has it (the fit command), so no restart.
         self.app.config_saved(restart=False)
@@ -1200,7 +1200,8 @@ class LayoutPage(Page):
         if self.allow_overlap:
             for fit in result.fits:
                 if unmoved(fit["behind"]) and unmoved(fit["front"]):
-                    cfg.set_fit(fit["behind"], fit["front"], fit["x"], fit["y"], fit["scale"])
+                    cfg.set_fit(fit["behind"], fit["front"], fit["x"], fit["y"], fit["scale"], quad=fit.get("quad"),
+                                eye=fit.get("eye"), depth=fit.get("depth"), mm=fit.get("mm"))
         self._say_lineup("")
 
     def detect(self) -> None:

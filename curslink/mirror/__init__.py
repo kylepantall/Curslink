@@ -81,6 +81,11 @@ class Stream:
     # Where that is on the screen in front (layout pixels): ``rect`` unless
     # the overlap is calibrated (curslink.layout.Fit).
     front: tuple[int, int, int, int] | None = None
+    # A leaning overlap (a Fit with a ``quad``): where the four corners of
+    # ``rect`` are seen on the screen in front (layout pixels: top left, top
+    # right, bottom right, bottom left). The picture is drawn in that shape,
+    # in a window at ``front`` (the rectangle round what shows of it).
+    quad: tuple[float, ...] | None = None
 
     @property
     def shown(self) -> tuple[int, int, int, int]:
@@ -129,7 +134,7 @@ def streams_for(layout: Layout, screen: Screen, can: Callable[[str], bool] = lam
     if not layout.mirror or not layout.allow_overlap:
         return []
     behind = [screen] + (layout.mirrored_while(screen, gap) if joined else [])
-    return [Stream(b, front, rect, None if there == rect else there)
+    return [Stream(b, front, rect, None if there == rect else there, layout.picture_quad(b, front, rect))
             for b in behind if can(b.device_id)
             for front, rect, there in layout.covered_parts(b) if can(front.device_id)]
 
@@ -176,8 +181,10 @@ def apply_fit(layout: Layout, data: dict) -> tuple[float, float, float] | None:
     the screen in front, as fractions of it, clicked there, at its real size);
     or ``"dx", "dy"`` (move the picture, in the screen
     behind's pixels) and/or ``"grow"`` (a factor); or ``"reset": true`` to
-    drop the calibrated one. Returns the fit now in use, or None if ``data``
-    doesn't make sense."""
+    drop the calibrated one. With ``"x"``, ``"quad"`` (eight numbers) says how
+    it leans as well (:class:`curslink.layout.Fit`); moved or resized, a lean
+    it has goes along; placed by a click or reset, it's dropped. Returns the
+    fit now in use, or None if ``data`` doesn't make sense."""
     try:
         behind_ref = tuple(str(data["behind"]).split("/", 1))
         front_ref = tuple(str(data["front"]).split("/", 1))
@@ -186,6 +193,8 @@ def apply_fit(layout: Layout, data: dict) -> tuple[float, float, float] | None:
         behind, front = layout.screen(*behind_ref), layout.screen(*front_ref)
     except (KeyError, ValueError, TypeError):
         return None
+    old = layout.fit(behind, front)
+    lean: dict = {}
     try:
         if data.get("reset"):
             new = None
@@ -200,6 +209,12 @@ def apply_fit(layout: Layout, data: dict) -> tuple[float, float, float] | None:
             new = (px - u * front.width * k, py - v * front.height * k, k)
         elif "x" in data:
             new = (float(data["x"]), float(data["y"]), float(data["scale"]))
+            if isinstance(data.get("quad"), (list, tuple)) and len(data["quad"]) == 8:
+                lean["quad"] = tuple(float(v) for v in data["quad"])
+                if all(isinstance(data.get(k), (list, tuple)) and len(data[k]) == n for k, n in (("eye", 3), ("depth", 4))):
+                    lean["eye"] = tuple(float(v) for v in data["eye"])
+                    lean["depth"] = tuple(float(v) for v in data["depth"])
+                    lean["mm"] = float(data["mm"]) if data.get("mm") else None
         else:
             new = current_fit(layout, behind, front)
             new = nudge(new, float(data.get("dx", 0)), float(data.get("dy", 0)))
@@ -217,7 +232,10 @@ def apply_fit(layout: Layout, data: dict) -> tuple[float, float, float] | None:
         return None
     keep = tuple(f for f in layout.fits if (f.behind, f.front) != (behind_ref, front_ref))
     if new is not None:
-        keep += (Fit(behind_ref, front_ref, *new),)
+        if not lean and not any(k in data for k in ("x", "place")) and old is not None and old.quad is not None:
+            keep += (old.moved(*new),)  # moved or resized: its lean goes along
+        else:
+            keep += (Fit(behind_ref, front_ref, *new, **lean),)
     layout.fits = keep
     return current_fit(layout, behind, front)
 
@@ -263,6 +281,12 @@ def device_states(streams: list[Stream], names: dict[str, str], fps: int | Calla
         dst["shows"].append({"id": s.id, "screen": s.target.id, "os": s.os_rect(s.target),
                              "screen_os": screen_os(s.target), "size": list(s.shown[2:]),
                              "label": names.get(s.source.device_id, s.source.device_id), "edges": s.edges()})
+        if s.quad is not None:
+            # The picture's corners, as shares of the mirror's own rectangle
+            # (beyond 0..1 where the picture runs off the screen).
+            x, y, w, h = s.shown
+            dst["shows"][-1]["quad"] = [round((v - (x, y)[i % 2]) / max(1, (w, h)[i % 2]), 5)
+                                        for i, v in enumerate(s.quad)]
         if tuning == (f"{s.source.device_id}/{s.source.id}", f"{s.target.device_id}/{s.target.id}"):
             covered = s.os_rect(s.source)
             at = anchors.setdefault(tuning, covered) if anchors is not None else covered
@@ -615,7 +639,7 @@ class MirrorHost:
             self.hold(self.layout.screen(device, screen_id) if data["hold"] else None)
         else:
             self.refresh()
-        if self.on_fit is not None:
+        if self.on_fit is not None and not data.get("quiet"):
             self.on_fit({"behind": data["behind"], "front": data["front"], "x": round(now[0], 1),
                          "y": round(now[1], 1), "scale": round(now[2], 4)})
 

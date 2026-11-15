@@ -114,7 +114,13 @@ Layout page says afterwards how many were checked and how close they came).
 A computer's own two screens are checked against each other too. Last, where
 one screen stands in front of another, both draw one pattern of blocks and
 the overlap is nudged until the blocks carry on unbroken across the edge:
-hold the phone close to your eyes for that. Without the
+hold the phone close to your eyes for that. A laptop that's turned in or
+tipped back is seen against the monitor as a leaning shape, not a
+rectangle: the line-up measures that shape, and the mirror and the pointer
+go by it. (What lines up still depends on where you look from. **Settings >
+Overlapping screens > Follow my head** is an experiment that watches your
+head with this computer's camera and keeps the overlap lined up as you
+move.) Without the
 app, take one photo of the desk with any camera and choose it there: that
 works too, but one photo can't tell how far away each screen is. Check the
 result and press **Save layout**.

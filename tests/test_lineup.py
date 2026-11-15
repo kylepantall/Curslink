@@ -687,8 +687,9 @@ def test_the_blocks_are_the_same_wherever_they_are_drawn():
     assert first == (0.0, 0.0, 100.0, 100.0, bit(8, 6, 1))
 
 
-@pytest.mark.parametrize("out", [(40.0, -30.0, 1.02), (-55.0, 45.0, 0.985)])
-def test_a_pattern_across_an_overlap_puts_its_fit_right(out):
+@pytest.mark.parametrize("out,lean", [((40.0, -30.0, 1.02), True), ((-55.0, 45.0, 1.0), True),
+                                      ((-55.0, 45.0, 0.985), False)])
+def test_a_pattern_across_an_overlap_puts_its_fit_right(out, lean):
     """The last step: the monitor and the laptop in front of it draw one
     pattern of blocks, the laptop's by the fit. With the fit out, the blocks
     break at the laptop's edge; the camera (in a hand that isn't still)
@@ -697,12 +698,14 @@ def test_a_pattern_across_an_overlap_puts_its_fit_right(out):
 
     from curslink.lineup_check import Check
     from curslink.lineup_scene import project_from
-    from curslink.lineup_seam import Seam
+    from curslink.lineup_seam import Seam, _fit_of, _move
     from lineup_desk import Camera, render
 
+    # (``lean``: the laptop is turned in as well as tipped back, and its fit
+    # says how it leans; without, a fit as an older line-up left it.)
     desk = Desk([
         ("host/main", "host", 2560, 1440, 597, (0, 0, 0), 0, 0),
-        ("mac/main", "mac", 1512, 982, 304, (60, 150, -250), 0, 15),
+        ("mac/main", "mac", 1512, 982, 304, (60, 150, -250), 14 if lean else 0, 15),
     ])
     layout = desk.layout()
     planned = lineup.plan([{"key": s["key"], "width": s["width"], "height": s["height"]} for s in layout])
@@ -714,7 +717,11 @@ def test_a_pattern_across_an_overlap_puts_its_fit_right(out):
     intr = [1180, 812, 588, 0.04, -0.02]
     locate = Check(solution, result, showing, intr, cam.size).locate
     fit = dict(result.fits[0])
-    fit.update(x=fit["x"] + out[0], y=fit["y"] + out[1], scale=fit["scale"] * out[2])
+    assert len(fit["quad"]) == 8 and len(fit["eye"]) == 3 and len(fit["depth"]) == 4
+    if not lean:
+        for k in ("quad", "eye", "depth", "mm"):
+            fit.pop(k, None)
+    _move(fit, fit["x"] + out[0], fit["y"] + out[1], fit["scale"] * out[2])
     seam = Seam(solution, [fit], showing, intr, cam.size)
     assert seam.any and not seam.done
     drawn = seam.patterns()
@@ -725,7 +732,7 @@ def test_a_pattern_across_an_overlap_puts_its_fit_right(out):
     seen = project_from(solution.eye, behind, front.at(edge))  # where the laptop's top edge is really seen
 
     def off(f: dict) -> float:
-        said = np.column_stack([f["x"] + f["scale"] * edge[:, 0], f["y"] + f["scale"] * edge[:, 1]])
+        said = np.array([_fit_of(f).to_behind((1512, 982), u, v) for u, v in edge])
         return float(np.abs(said - seen).max())
 
     assert off(fit) > 40
@@ -737,5 +744,78 @@ def test_a_pattern_across_an_overlap_puts_its_fit_right(out):
         if seam.done:
             break
     assert seam.joined and n < 16 and seam.worst() < 6
-    assert off(seam.fits()[0]) < 14
+    assert off(seam.fits()[0]) < (8 if lean else 14)
+    assert ("quad" in drawn["mac/main"]) == lean
     assert seam.summary()["state"] == "joined"
+
+
+def test_a_turned_in_laptop_is_fitted_as_the_leaning_shape_it_is_seen_as():
+    """A laptop turned in and tipped back is seen against the monitor as a
+    leaning four-sided shape: a rectangle is pixels out at the ends of its
+    top edge, the shape through its four corners isn't. And from that shape
+    with how far in front each corner is, where it's seen from a head that
+    has moved (head tracking)."""
+    import numpy as np
+
+    from curslink.layout import Fit
+    from curslink.lineup_scene import project_from
+
+    desk = Desk([
+        ("host/main", "host", 2560, 1440, 597, (0, 0, 0), 0, 0),
+        ("mac/main", "mac", 1512, 982, 304, (-120, 150, -250), -18, 15),
+    ])
+    layout = [dict(s, width_mm=597.0, height_mm=336.0) if s["key"] == "host/main" else s for s in desk.layout()]
+    places = figure_of_eight(30, (0, 0, -700), reach=(15, 10, 8), aim=(0, 60, 0), seed=0)
+    solution = true_solution(desk, "host/main", places[0][0])
+    fit, = lineup.arrange(layout, solution).fits
+    front, behind = solution.screens["mac/main"], solution.screens["host/main"]
+    edge = np.array([(x, 0.0) for x in np.linspace(0, 1512, 15)] + [(1512.0, y) for y in np.linspace(0, 300, 5)])
+    seen = project_from(solution.eye, behind, front.at(edge))
+    shape = Fit(("host", "main"), ("mac", "main"), fit["x"], fit["y"], fit["scale"], quad=tuple(fit["quad"]),
+                eye=tuple(fit["eye"]), depth=tuple(fit["depth"]), mm=fit["mm"])
+    plain = Fit(("host", "main"), ("mac", "main"), fit["x"], fit["y"], fit["scale"])
+
+    def off(f, seen) -> float:
+        return float(np.abs(np.array([f.to_behind((1512, 982), u, v) for u, v in edge]) - seen).max())
+
+    assert off(plain, seen) > 8 and off(shape, seen) < 0.5
+    assert fit["mm"] == pytest.approx(597 / 2560) and shape.follows
+    # The head 40 mm to the right and 20 mm nearer: the laptop is seen over another part of the monitor.
+    pitch = 597 / 2560
+    moved = np.asarray(solution.eye) + np.array([40, 0, 20]) / pitch
+    now = project_from(moved, behind, front.at(edge))
+    assert float(np.abs(now - seen).max()) > 40
+    there = shape.seen_from((shape.eye[0] + 40 / pitch, shape.eye[1], shape.eye[2] - 20 / pitch))
+    assert off(there, now) < 0.5
+
+
+def test_a_leaning_shape_on_a_curved_monitor_is_fitted_to_what_shows_on_the_glass():
+    """A laptop hanging off the end of a curved monitor: its corner that's
+    seen past the end of the glass can't be laid on the glass, so the shape
+    is fitted to the part of the laptop that is seen against it."""
+    import numpy as np
+
+    from curslink.lineup_scene import project_from
+    from curslink.lineup_seam import _fit_of
+
+    desk = Desk([
+        ("pc/main", "pc", 2880, 1620, 345, (-250, 170, -250), 20, 20),
+        ("mac/screen2", "mac", 3440, 1440, 800, (0, 0, 0), 0, 0, 0.53),
+    ])
+    places = figure_of_eight(30, (0, -60, -900), reach=(15, 10, 8), aim=(0, 120, -50), seed=0)
+    solution = true_solution(desk, "pc/main", places[0][0])
+    fit, = lineup.arrange(desk.layout(), solution).fits
+    assert (fit["behind"], fit["front"]) == ("mac/screen2", "pc/main") and fit["quad"][0] < -500
+    front, behind = solution.screens["pc/main"], solution.screens["mac/screen2"]
+    edge = np.array([(x, 0.0) for x in np.linspace(0, 2880, 60)])
+    seen = project_from(solution.eye, behind, front.at(edge))
+    on = (seen[:, 0] >= 0) & (seen[:, 0] <= 3440)
+    assert on.sum() > 10
+
+    def off(f: dict) -> float:
+        said = np.array([_fit_of(f).to_behind((2880, 1620), u, v) for u, v in edge[on]])
+        return float(np.abs(said - seen[on]).max())
+
+    assert off(fit) < 8
+    corners = project_from(solution.eye, behind, front.corners())  # (carried on in the plane of its corners)
+    assert off({**fit, "quad": [float(v) for v in corners.ravel()]}) > 20

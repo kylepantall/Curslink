@@ -1973,3 +1973,161 @@ def test_a_chat_carried_off_the_pc_and_away_can_come_back_through_the_covered_pa
     router.on_motion(0, -60)  # well clear of the covered part: armed again
     router.on_motion(0, 62)   # back into it by a couple of pixels
     assert router.active_device == "kyles-pc"
+
+
+# -- a screen that leans against the one behind (a Fit with a quad) -------------
+
+def _leaning():
+    """The PC in front of the Mac's screen, turned in: its top edge slopes
+    30 px up from left to right as seen on the Mac."""
+    from curslink.layout import Fit
+
+    return Fit(("mac", "screen2"), ("pc", "main"), 1200, 1085, 0.5,
+               quad=(1200, 1100, 2600, 1070, 2640, 1850, 1190, 1880),
+               eye=(1720, 400, 2600), depth=(1000, 760, 800, 1040), mm=0.229)
+
+
+def test_a_leaning_fit_maps_points_through_its_four_corners():
+    f = _leaning()
+    size = (2880, 1536)
+    for (u, v), want in zip(((0, 0), (2880, 0), (2880, 1536), (0, 1536)),
+                            ((1200, 1100), (2600, 1070), (2640, 1850), (1190, 1880))):
+        assert f.to_behind(size, u, v) == pytest.approx(want)
+        assert f.to_front(size, *want) == pytest.approx((u, v), abs=1e-6)
+    # Half way along its top edge is on the line between those two corners.
+    x, y = f.to_behind(size, 1440, 0)
+    assert y == pytest.approx(1100 + (x - 1200) * (1070 - 1100) / 1400)
+    # Moved as a whole, the lean goes along.
+    g = f.moved(1210, 1085, 0.5)
+    assert g.quad[:2] == (1210, 1100) and g.eye == (1730, 400, 2600)
+    assert g.moved(1200, 1085, 0.5).quad == pytest.approx(f.quad)
+
+
+def test_the_pointer_crosses_a_leaning_edge_where_it_really_is():
+    lay = _fit_layout([_leaning()])
+    mac, pc = lay.screen("mac", "screen2"), lay.screen("pc", "main")
+    f = lay.fits[0]
+    # Down the Mac's screen toward the PC's top edge, near its left end and near its right: the edge
+    # is 30 px higher at the right, so it's met sooner there.
+    for x, edge in ((1300, 1097.9), (2500, 1072.1)):
+        assert lay._fitted_at(mac, x, edge - 3) is None
+        assert lay._fitted_at(mac, x, edge + 3) == pc
+        at = lay.map_point(mac, pc, x, edge + 3)
+        assert 0 <= at[1] - pc.y < 12
+        assert lay.map_point(pc, mac, *at) == pytest.approx((x, edge + 3))
+    # A plain fit there is level: 15 px out at each end.
+    lay.fits = (replace_fit(f),)
+    assert lay._fitted_at(mac, 2500, 1080) is None and lay._fitted_at(mac, 1300, 1090) == pc
+
+
+def replace_fit(f):
+    from dataclasses import replace
+
+    return replace(f, quad=None, eye=None, depth=None)
+
+
+def test_a_leaning_mirror_is_captured_square_and_shown_in_its_shape():
+    lay = _fit_layout([_leaning()])
+    mac = lay.screen("mac", "screen2")
+    (front, behind, there), = lay.covered_parts(mac)
+    # The rectangle round the leaning shape, down to the Mac's bottom edge.
+    assert behind == (1190, 1070, 1450, 370)
+    stream, = streams_for(lay, mac)
+    assert stream.quad is not None and stream.front == there
+    show = device_states([stream], {"mac": "Mac"}, 15)["pc"]["shows"][0]
+    quad = show["quad"]
+    assert len(quad) == 8
+    # The picture's corners as shares of the mirror's window: where the PC's own corners
+    # (1200, 1100) and (2600, 1070) of the Mac are, is the PC's top left and top right.
+    x, y, w, h = there
+    f = lay.fits[0]
+    for mac_xy, pc_uv in (((1200, 1100), (0, 0)), ((2600, 1070), (2880, 0))):
+        assert f.to_front((2880, 1536), *mac_xy) == pytest.approx(pc_uv, abs=1e-6)
+    # ...and the captured rectangle's top left corner, (1190, 1070), is above and left of the PC's.
+    assert quad[0] * w + x - 1000 < 0 and quad[1] * h + y - 1200 < 0
+    # A plain fit has no shape to send.
+    lay.fits = (replace_fit(f),)
+    plain, = streams_for(lay, mac)
+    assert plain.quad is None and "quad" not in device_states([plain], {"mac": "Mac"}, 15)["pc"]["shows"][0]
+
+
+def test_the_covered_part_of_a_leaning_fit_keeps_to_a_grid_when_asked():
+    lay = _fit_layout([_leaning()])
+    mac = lay.screen("mac", "screen2")
+    lay.part_grid = 64
+    (_front, behind, _there), = lay.covered_parts(mac)
+    assert behind == (1152, 1024, 1536, 416)
+    # The shape moving a few pixels doesn't change what's captured, only where it's shown.
+    before, = streams_for(lay, mac)
+    lay.fits = (lay.fits[0].moved(1204, 1088, 0.5),)
+    after, = streams_for(lay, mac)
+    assert after.rect == before.rect and after.quad != before.quad
+
+
+def test_a_leaning_mirror_paints_in_its_shape(qapp):
+    from PySide6.QtCore import QRectF
+    from PySide6.QtGui import QColor, QImage, QPixmap
+
+    from curslink.mirror.helper import MirrorWindow
+
+    spec = {"id": "a>b", "screen": "main", "os": [0, 0, 400, 200], "label": "Mac", "edges": [],
+            "quad": [0.0, 0.25, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0]}
+    win = MirrorWindow(spec)
+    assert win.ok
+    t = win.lean(QRectF(0, 0, 400, 200))
+    assert t is not None and (*t.map(0.0, 0.0), *t.map(400.0, 0.0)) == pytest.approx((0.0, 50.0, 400.0, 0.0), abs=1e-6)
+    pix = QPixmap(40, 20)
+    pix.fill(QColor(255, 0, 0))
+    win.pixmap = pix
+    win.resize(400, 200)
+    img = QImage(400, 200, QImage.Format.Format_ARGB32)
+    img.fill(QColor(0, 0, 255))
+    win.render(img)
+    # Above the sloping top edge at the left nothing is drawn; at the right the picture reaches the top.
+    assert img.pixelColor(10, 20).red() < 50 and img.pixelColor(390, 20).red() > 200
+    assert img.pixelColor(200, 150).red() > 200
+    win.spec = {**spec, "quad": "nonsense"}
+    assert win.lean(QRectF(0, 0, 400, 200)) is None
+    win.close_soon()
+
+
+def test_a_fit_command_carries_a_lean_and_moving_it_keeps_it():
+    from curslink.mirror import apply_fit
+
+    lay = _fit_layout()
+    f = _leaning()
+    cmd = {"behind": "mac/screen2", "front": "pc/main", "x": f.x, "y": f.y, "scale": f.scale,
+           "quad": list(f.quad), "eye": list(f.eye), "depth": list(f.depth), "mm": f.mm}
+    assert apply_fit(lay, cmd) == (1200, 1085, 0.5)
+    assert lay.fits[0] == f
+    # Nudged by hand: the picture 10 px right is the PC 10 px left on the Mac, lean and all.
+    apply_fit(lay, {"behind": "mac/screen2", "front": "pc/main", "dx": 10, "dy": 0})
+    assert lay.fits[0].x == 1190 and lay.fits[0].quad[0] == 1190 and lay.fits[0].quad[2] == 2590
+    # Put somewhere by its numbers alone, it's a plain rectangle again.
+    apply_fit(lay, {"behind": "mac/screen2", "front": "pc/main", "x": 1200, "y": 1100, "scale": 0.5})
+    assert lay.fits[0].quad is None
+
+
+def test_leaning_fits_are_read_from_and_written_to_the_config(tmp_path):
+    from curslink.config import ConfigError, parse_fits
+    from curslink.configedit import ConfigFile
+
+    devices = list(_fit_layout().devices.values())
+    f = _leaning()
+    entry = {"behind": "mac/screen2", "front": "pc/main", "x": f.x, "y": f.y, "scale": f.scale,
+             "quad": list(f.quad), "eye": list(f.eye), "depth": list(f.depth), "mm": f.mm}
+    assert parse_fits([entry], devices) == [f]
+    for bad in ({"quad": [1, 2, 3]}, {"eye": "x"}, {"depth": [1, 2, 3, True]}, {"mm": 0}):
+        with pytest.raises(ConfigError):
+            parse_fits([{**entry, **bad}], devices)
+    path = tmp_path / "curslink.toml"
+    path.write_text("[host]\ndevice_id = \"mac\"\n")
+    cfg = ConfigFile(path)
+    cfg.set_fit("mac/screen2", "pc/main", f.x, f.y, f.scale, quad=f.quad, eye=f.eye, depth=f.depth, mm=f.mm)
+    assert parse_fits(cfg.fits(), devices) == [f]
+    # Dragged into place by hand afterwards: 6 px over, and the lean with it.
+    cfg.set_fit("mac/screen2", "pc/main", f.x + 6, f.y, f.scale, keep_lean=True)
+    assert parse_fits(cfg.fits(), devices) == [f.moved(f.x + 6, f.y, f.scale)]
+    # Lined up afresh by clicking corners: a plain rectangle.
+    cfg.set_fit("mac/screen2", "pc/main", f.x, f.y, f.scale)
+    assert "quad" not in cfg.fits()[0] and "eye" not in cfg.fits()[0]

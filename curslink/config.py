@@ -89,6 +89,9 @@ class HostConfig:
     mirror_fps: int = 0
     # How sharp a mirror's picture is ([layout] mirror_quality, see curslink.mirror.QUALITIES).
     mirror_quality: str = "auto"
+    # Experimental ([layout] follow_head): this computer's camera watches where your
+    # head is and overlaps move to stay lined up from there (curslink.headfollow).
+    follow_head: bool = False
     # App mirror: drag an app's window off this computer or another onto a
     # third, where it's shown and used ([app_mirror] enabled; see curslink.appmirror).
     app_mirror: bool = True
@@ -378,6 +381,13 @@ def _mirror_quality(layout: Any) -> str:
     return value
 
 
+def _follow_head(layout: Any) -> bool:
+    value = layout.get("follow_head", False) if isinstance(layout, dict) else False
+    if not isinstance(value, bool):
+        raise ConfigError("[layout].follow_head must be true or false")
+    return value
+
+
 def parse_fits(value: Any, devices: list[Device]) -> list[Fit]:
     """``[[layout.fit]]``: calibrated overlaps, where a screen in front
     really stands on the one behind it (see curslink.layout.Fit)::
@@ -388,6 +398,10 @@ def parse_fits(value: Any, devices: list[Device]) -> list[Fit]:
         x = 1210.0      # its top-left corner, px from the top-left of the screen behind
         y = 1090.0
         scale = 0.42    # px of the screen behind to one of its own
+
+    A live line-up also writes how the screen in front leans (``quad``: its
+    four corners on the screen behind) and where it was seen from (``eye``,
+    ``depth``, ``mm``): see curslink.layout.Fit.
 
     One naming a screen no longer in the layout is skipped."""
     if not isinstance(value, list):
@@ -406,8 +420,20 @@ def parse_fits(value: Any, devices: list[Device]) -> list[Fit]:
         nums = [t.get(k) for k in ("x", "y", "scale")]
         if not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in nums) or not nums[2] > 0:
             raise ConfigError(f"[[layout.fit]] #{i + 1}: x and y must be numbers and scale more than 0")
+        more = {}
+        for k, n in (("quad", 8), ("eye", 3), ("depth", 4)):
+            if k in t:
+                v = t[k]
+                if not isinstance(v, list) or len(v) != n \
+                        or not all(isinstance(c, (int, float)) and not isinstance(c, bool) for c in v):
+                    raise ConfigError(f"[[layout.fit]] #{i + 1}: {k} must be {n} numbers")
+                more[k] = tuple(float(c) for c in v)
+        if "mm" in t:
+            if not isinstance(t["mm"], (int, float)) or isinstance(t["mm"], bool) or not t["mm"] > 0:
+                raise ConfigError(f"[[layout.fit]] #{i + 1}: mm must be a number more than 0")
+            more["mm"] = float(t["mm"])
         if all(r in known for r in refs):
-            out.append(Fit(refs[0], refs[1], float(nums[0]), float(nums[1]), float(nums[2])))
+            out.append(Fit(refs[0], refs[1], float(nums[0]), float(nums[1]), float(nums[2]), **more))
     return out
 
 
@@ -547,6 +573,7 @@ def host_config(raw: dict[str, Any], base_dir: Path = Path(".")) -> HostConfig:
         isolink=_enabled(raw.get("isolink", {}), "[isolink]"),
         mirror_fps=_mirror_fps(raw.get("layout", {})),
         mirror_quality=_mirror_quality(raw.get("layout", {})),
+        follow_head=_follow_head(raw.get("layout", {})),
         app_mirror=_enabled(raw.get("app_mirror", {}), "[app_mirror]"),
         clipboard=bool(host.get("clipboard", True)),
         clipboard_max_mb=_clipboard_max_mb(host, "[host]"),

@@ -33,6 +33,7 @@ for what to capture and where to show it (:meth:`Layout.covered_parts`).
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from functools import lru_cache
 from typing import Iterable
 
 
@@ -162,18 +163,141 @@ class Crossing:
     y: float
 
 
+def _solve(a: list[list[float]], b: list[float]) -> list[float] | None:
+    """``a x = b`` by elimination (plain Python: this module needs no numpy)."""
+    n = len(b)
+    m = [row[:] + [b[i]] for i, row in enumerate(a)]
+    for c in range(n):
+        p = max(range(c, n), key=lambda r: abs(m[r][c]))
+        if abs(m[p][c]) < 1e-12:
+            return None
+        m[c], m[p] = m[p], m[c]
+        for r in range(n):
+            if r != c:
+                k = m[r][c] / m[c][c]
+                if k:
+                    m[r] = [v - k * w for v, w in zip(m[r], m[c])]
+    return [m[i][n] / m[i][i] for i in range(n)]
+
+
+@lru_cache(maxsize=256)
+def homography(src: tuple[float, ...], dst: tuple[float, ...]) -> tuple[float, ...] | None:
+    """The eight numbers (a..h) of the perspective map taking the four points
+    ``src`` (x0, y0, ... x3, y3) to ``dst``: (x, y) goes to
+    ((a x + b y + c) / (g x + h y + 1), (d x + e y + f) / (g x + h y + 1)).
+    None if the points don't make one (three in a line)."""
+    rows, vals = [], []
+    for i in range(4):
+        x, y, u, v = src[2 * i], src[2 * i + 1], dst[2 * i], dst[2 * i + 1]
+        rows.append([x, y, 1.0, 0.0, 0.0, 0.0, -u * x, -u * y])
+        vals.append(u)
+        rows.append([0.0, 0.0, 0.0, x, y, 1.0, -v * x, -v * y])
+        vals.append(v)
+    out = _solve(rows, vals)
+    return None if out is None else tuple(out)
+
+
+def through(h: tuple[float, ...], x: float, y: float) -> tuple[float, float] | None:
+    """(x, y) through :func:`homography` ``h``; None past its horizon."""
+    w = h[6] * x + h[7] * y + 1.0
+    if w < 1e-6:
+        return None
+    return (h[0] * x + h[1] * y + h[2]) / w, (h[3] * x + h[4] * y + h[5]) / w
+
+
 @dataclass(frozen=True)
 class Fit:
     """Where the screen in front really stands on the screen behind it:
     its top-left corner at (``x``, ``y``) in the screen behind's own pixels
     (from that screen's top-left), and ``scale`` of that screen's pixels to
-    one of its own (the two monitors' pixel sizes compared)."""
+    one of its own (the two monitors' pixel sizes compared).
+
+    That's a screen seen square on. One that's turned or tipped (a laptop
+    angled in at the side of a monitor) is seen against the one behind as a
+    leaning four-sided shape, not a rectangle: ``quad`` is that shape, its
+    four corners (top left, top right, bottom right, bottom left) in the
+    screen behind's pixels, as a live line-up measures them. With it, points
+    go between the two screens by the perspective map through those corners
+    (``x``, ``y`` and ``scale`` stay, as the nearest plain rectangle: what an
+    older Curslink goes by, and the size things are drawn at).
+
+    And where it's seen depends on where it's seen *from*: ``eye`` (x, y in
+    the screen behind's pixels, and how far in front of it, in those same
+    pixels) is where the person's eye was when it was measured, ``depth``
+    how far in front of the screen behind each of those four corners is
+    (again its pixels), and ``mm`` the size of one of those pixels. From
+    them, :meth:`seen_from` gives the fit for an eye somewhere else (head
+    tracking, curslink.headfollow)."""
 
     behind: tuple[str, str]  # (device, screen)
     front: tuple[str, str]
     x: float
     y: float
     scale: float
+    quad: tuple[float, ...] | None = None
+    eye: tuple[float, float, float] | None = None
+    depth: tuple[float, float, float, float] | None = None
+    mm: float | None = None
+
+    def _maps(self, width: float, height: float):
+        """(front -> behind, behind -> front) for a front screen that size, or None."""
+        if self.quad is None:
+            return None
+        rect = (0.0, 0.0, float(width), 0.0, float(width), float(height), 0.0, float(height))
+        out, back = homography(rect, self.quad), homography(self.quad, rect)
+        return None if out is None or back is None else (out, back)
+
+    def to_behind(self, size: tuple[float, float], u: float, v: float) -> tuple[float, float]:
+        """Pixel (u, v) of the front screen (``size`` across and down), on the one behind."""
+        maps = self._maps(*size)
+        at = through(maps[0], u, v) if maps is not None else None
+        return at if at is not None else (self.x + self.scale * u, self.y + self.scale * v)
+
+    def to_front(self, size: tuple[float, float], x: float, y: float) -> tuple[float, float]:
+        """Pixel (x, y) of the screen behind, on the front one."""
+        maps = self._maps(*size)
+        at = through(maps[1], x, y) if maps is not None else None
+        return at if at is not None else ((x - self.x) / self.scale, (y - self.y) / self.scale)
+
+    def moved(self, x: float, y: float, scale: float) -> "Fit":
+        """The same fit moved and resized as a whole: its plain rectangle now
+        (x, y, scale), its ``quad`` (and the eye it's seen from) along with it."""
+        k = scale / self.scale
+        quad = self.quad
+        if quad is not None:
+            quad = tuple((v - (self.x, self.y)[i % 2]) * k + (x, y)[i % 2] for i, v in enumerate(quad))
+        eye = self.eye
+        if eye is not None:
+            eye = (eye[0] + x - self.x, eye[1] + y - self.y, eye[2])
+        return replace(self, x=x, y=y, scale=scale, quad=quad, eye=eye)
+
+    @property
+    def follows(self) -> bool:
+        """Does it know enough to be worked out again for an eye elsewhere?"""
+        return self.quad is not None and self.eye is not None and self.depth is not None \
+            and self.eye[2] > 0 and all(0 <= d < 0.9 * self.eye[2] for d in self.depth)
+
+    def seen_from(self, eye: tuple[float, float, float]) -> "Fit":
+        """This fit as seen from ``eye`` instead (same units as ``self.eye``):
+        each corner of the front screen is a fixed point in the room, ``depth``
+        in front of the screen behind, and is seen over a different part of
+        that screen from a different place. Itself if it can't tell
+        (:attr:`follows`), or from somewhere that makes no sense."""
+        if not self.follows:
+            return self
+        ex, ey, ez = self.eye
+        nx, ny, nz = eye
+        if not nz > 0 or any(d >= 0.9 * nz for d in self.depth):
+            return self
+        quad = []
+        for i, d in enumerate(self.depth):
+            qx, qy = self.quad[2 * i], self.quad[2 * i + 1]
+            # where that corner is in the room, across and down
+            px, py = (qx * (ez - d) + ex * d) / ez, (qy * (ez - d) + ey * d) / ez
+            quad += [(px * nz - nx * d) / (nz - d), (py * nz - ny * d) / (nz - d)]
+        dx = sum(quad[0::2]) / 4 - sum(self.quad[0::2]) / 4
+        dy = sum(quad[1::2]) / 4 - sum(self.quad[1::2]) / 4
+        return replace(self, x=self.x + dx, y=self.y + dy, quad=tuple(quad))
 
 
 # Screens up to this many pixels apart still count as joined (Layout.touching).
@@ -195,6 +319,10 @@ class Layout:
     mirror: bool = False
     # Calibrated overlaps: see Fit.
     fits: tuple[Fit, ...] = ()
+    # A leaning fit's covered part is taken out to multiples of this many
+    # pixels (1: as it is). Head tracking sets it, so the part captured stays
+    # the same while the shape it's shown in moves about.
+    part_grid: int = 1
     # Each screen's real size in mm, where its OS says (curslink.screensize):
     # (device, screen) -> (width_mm, height_mm). Not in the config: filled in
     # while running, for overlaps that aren't calibrated.
@@ -374,16 +502,25 @@ class Layout:
             return x, y
         src_behind, f = found
         if src_behind:  # behind -> front
-            return dst.x + (x - src.x - f.x) / f.scale, dst.y + (y - src.y - f.y) / f.scale
-        return dst.x + f.x + (x - src.x) * f.scale, dst.y + f.y + (y - src.y) * f.scale
+            u, v = f.to_front((dst.width, dst.height), x - src.x, y - src.y)
+        else:
+            u, v = f.to_behind((src.width, src.height), x - src.x, y - src.y)
+        return dst.x + u, dst.y + v
 
     def placed(self, dst: Screen, src: Screen) -> Screen:
         """``dst`` where it really stands in ``src``'s layout pixels (itself
         when there's no fit between them)."""
-        if self.pair_fit(src, dst) is None:
+        found = self.pair_fit(src, dst)
+        if found is None:
             return dst
-        x0, y0 = self.map_point(dst, src, dst.x, dst.y)
-        x1, y1 = self.map_point(dst, src, dst.right, dst.bottom)
+        if found[1].quad is None:
+            x0, y0 = self.map_point(dst, src, dst.x, dst.y)
+            x1, y1 = self.map_point(dst, src, dst.right, dst.bottom)
+        else:  # a leaning shape: the rectangle round it
+            pts = [self.map_point(dst, src, px, py) for px, py in
+                   ((dst.x, dst.y), (dst.right, dst.y), (dst.right, dst.bottom), (dst.x, dst.bottom))]
+            x0, y0 = min(p[0] for p in pts), min(p[1] for p in pts)
+            x1, y1 = max(p[0] for p in pts), max(p[1] for p in pts)
         return replace(dst, x=round(x0), y=round(y0), width=max(1, round(x1 - x0)), height=max(1, round(y1 - y0)))
 
     def covered_parts(self, screen: Screen) -> list[tuple[Screen, tuple[int, int, int, int], tuple[int, int, int, int]]]:
@@ -397,6 +534,11 @@ class Layout:
             if f is None:
                 out.append((front, rect, rect))
                 continue
+            if f.quad is not None:
+                part = self._leaning_part(screen, front, f)
+                if part is not None:
+                    out.append((front, *part))
+                continue
             k = f.scale
             fx, fy = screen.x + f.x, screen.y + f.y
             x0, y0 = max(screen.x, fx), max(screen.y, fy)
@@ -408,6 +550,46 @@ class Layout:
                      max(1, round((x1 - x0) / k)), max(1, round((y1 - y0) / k)))
             out.append((front, behind, there))
         return out
+
+    def _leaning_part(self, screen: Screen, front: Screen, f: Fit):
+        """:meth:`covered_parts` for a fit with a ``quad``: the rectangle of
+        ``screen`` round the leaning shape ``front`` is seen as (out to
+        ``part_grid``), and the rectangle of ``front`` round where that is
+        on it. None if it doesn't really cover any of it."""
+        import math
+
+        xs, ys = f.quad[0::2], f.quad[1::2]
+        g = self.part_grid
+        x0, y0, x1, y1 = min(xs), min(ys), max(xs), max(ys)
+        if g > 1:
+            x0, y0 = math.floor(x0 / g) * g, math.floor(y0 / g) * g
+            x1, y1 = math.ceil(x1 / g) * g, math.ceil(y1 / g) * g
+        x0, y0, x1, y1 = max(0.0, x0), max(0.0, y0), min(float(screen.width), x1), min(float(screen.height), y1)
+        if x1 - x0 < 1 or y1 - y0 < 1:
+            return None
+        behind = (round(screen.x + x0), round(screen.y + y0), round(x1 - x0), round(y1 - y0))
+        size = (front.width, front.height)
+        pts = [f.to_front(size, px, py) for px, py in ((x0, y0), (x1, y0), (x1, y1), (x0, y1))]
+        u0, v0 = max(0.0, min(p[0] for p in pts)), max(0.0, min(p[1] for p in pts))
+        u1, v1 = min(float(front.width), max(p[0] for p in pts)), min(float(front.height), max(p[1] for p in pts))
+        if u1 - u0 < 1 or v1 - v0 < 1:
+            return None
+        return behind, (round(front.x + u0), round(front.y + v0), max(1, round(u1 - u0)), max(1, round(v1 - v0)))
+
+    def picture_quad(self, screen: Screen, front: Screen, rect: tuple[int, int, int, int]) -> tuple[float, ...] | None:
+        """Where the four corners of ``rect`` (layout pixels, on ``screen``)
+        are seen on ``front`` standing before it, in layout pixels (top left,
+        top right, bottom right, bottom left): the shape mirror mode draws
+        that part of ``screen`` in. None unless their fit has a ``quad``."""
+        f = self.fit(screen, front)
+        if f is None or f.quad is None or f._maps(front.width, front.height) is None:
+            return None
+        x, y, w, h = rect
+        out: list[float] = []
+        for px, py in ((x, y), (x + w, y), (x + w, y + h), (x, y + h)):
+            u, v = f.to_front((front.width, front.height), px - screen.x, py - screen.y)
+            out += [front.x + u, front.y + v]
+        return tuple(out)
 
     def in_front(self, a: Screen, b: Screen) -> bool:
         """Is ``a`` drawn in front of ``b``?"""
@@ -441,6 +623,8 @@ class Layout:
                     raise ValueError(f"an overlap fit names an unknown screen {ref[0]}/{ref[1]}") from None
             if not f.scale > 0:
                 raise ValueError("an overlap fit's scale must be more than 0")
+            if f.quad is not None and len(f.quad) != 8:
+                raise ValueError("an overlap fit's quad is four corners: eight numbers")
         pairs = self.overlaps()
         if pairs and not self.allow_overlap:
             raise ValueError(overlap_message(*pairs[0]))
@@ -610,8 +794,13 @@ class Layout:
         if not self.mirror:
             return None
         for s in reversed(self._stack()):
-            if s.device_id != here.device_id and self.pair_fit(here, s) is not None \
-                    and self.placed(s, here).contains(x, y):
+            found = None if s.device_id == here.device_id else self.pair_fit(here, s)
+            if found is None:
+                continue
+            if found[1].quad is not None:  # a leaning shape: is that point of it on ``s`` at all?
+                if s.contains(*self.map_point(here, s, x, y)):
+                    return s
+            elif self.placed(s, here).contains(x, y):
                 return s
         return None
 
