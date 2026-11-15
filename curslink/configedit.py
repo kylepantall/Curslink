@@ -353,6 +353,22 @@ class ConfigFile:
     def has_device(self, device_id: str) -> bool:
         return self._device(device_id) is not None
 
+    def device_enabled(self, device_id: str) -> bool:
+        device = self._device(device_id)
+        return device is None or device.get("enabled", True) is not False
+
+    def set_device_enabled(self, device_id: str, on: bool) -> None:
+        """Turn a device off (``enabled = false``: it stays paired and laid
+        out, but the pointer and keyboard don't go to it) or back on."""
+        device = self._device(device_id)
+        if device is None:
+            raise KeyError(device_id)
+        if on:
+            if "enabled" in device:
+                del device["enabled"]
+        else:
+            device["enabled"] = False
+
     def move_screen(self, device_id: str, screen_id: str, x: int, y: int) -> None:
         device = self._device(device_id)
         if device is None:

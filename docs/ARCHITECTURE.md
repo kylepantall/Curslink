@@ -134,6 +134,16 @@ the Layout page measures it (`curslink/lineup.py`, `lineup_scene.py`,
   screen's blocks through the same map (`lineup_seam.tiles`), and moves the
   shape as a whole. `x`, `y`, `scale` stay as the nearest rectangle: what
   an older agent, the phone app and the fine-tune dialog go by.
+- **On the Layout page** a screen in front with a leaning fit is drawn the
+  shape it really is (`lean_corners`: the `quad` as shares of its own
+  rectangle, so it follows the screen as it's dragged), with the rectangle
+  the pointer goes by as a dotted outline; from the line-up just run, or
+  the saved fits.
+- **Turning a device off.** `[[devices]] enabled = false` ("Use <name>" on
+  the Layout page): it stays paired, connected and laid out, but
+  `Router.available` is false for it, so no edge, gaze or app mirror takes
+  input there (the edge light goes with it) and `switch_to` refuses it.
+  The page tells the running service (`device <id> on|off`), no restart.
 - **Head tracking (experimental, `[layout] follow_head`).** The fit also
   records `eye` (where it was seen from, in the screen behind's pixels and
   that far in front of it), `depth` (how far in front each corner is) and

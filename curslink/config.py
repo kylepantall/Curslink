@@ -301,7 +301,10 @@ def parse_layout(raw: dict[str, Any]) -> Layout:
             )
         if not screens:
             raise ConfigError(f"device {d['id']!r} needs at least one [[devices.screens]]")
-        devices.append(Device(id=d["id"], name=d.get("name", d["id"]), screens=tuple(screens)))
+        enabled = d.get("enabled", True)
+        if not isinstance(enabled, bool):
+            raise ConfigError(f"device {d['id']!r}: `enabled` must be true or false")
+        devices.append(Device(id=d["id"], name=d.get("name", d["id"]), screens=tuple(screens), enabled=enabled))
     if not devices:
         raise ConfigError("no [[devices]] defined")
     allow_overlap = raw.get("layout", {}).get("allow_overlap", False)
