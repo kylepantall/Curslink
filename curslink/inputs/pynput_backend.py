@@ -146,6 +146,9 @@ class PynputCapture:
         self._deaf_said: dict[str, float] = {}
         self._closed = False
         self._escapes: list[float] = []
+        # The take-back thread (_take_back_soon), started with the hooks.
+        self._take_back_wake = threading.Event()
+        self._take_back_why = ""
         # macOS: what keys typed here mean to a PC, where that differs (Option+D
         # types "∂" but is Alt+D to a PC; the Spotlight key is F4): the host's
         # key mapping reads it for keys going to Windows, Linux or Android.
@@ -165,6 +168,7 @@ class PynputCapture:
 
         self._handler = handler
         self._controller = mouse.Controller()
+        threading.Thread(target=self._take_back_worker, name="curslink-take-back", daemon=True).start()
         if self._mac:
             _mac_no_event_suppression()
         if self._shortcuts is not None:
@@ -187,6 +191,7 @@ class PynputCapture:
     def close(self) -> None:
         """Stop for good: the cursor shows again, and macOS's shortcuts work."""
         self._closed = True
+        self._take_back_wake.set()
         if self._helper is not None:
             self._helper.close()
         self.stop()
@@ -196,7 +201,8 @@ class PynputCapture:
         if self._hider is not None:
             self._hider.show()
 
-    def set_grab(self, grabbed: bool) -> None:
+    def set_grab(self, grabbed: bool, wait: float | None = None) -> None:
+        """``wait``: as for _restart (the safety nets pass one)."""
         if grabbed == self._grabbed:
             return
         if grabbed:
@@ -224,11 +230,47 @@ class PynputCapture:
             self._controller.position = self.park_at
         if self._hider is not None:
             (self._hider.hide if grabbed else self._hider.show)()
-        self._restart()
+        if self._suppress_live(grabbed):
+            return
+        self._restart(wait)
 
-    def _restart(self) -> None:
-        with self._restart_lock:  # the hooks' watchdog and the input helper restart them too
+    def _suppress_live(self, on: bool) -> bool:
+        """Windows: hold input back (or stop) with the hooks already in,
+        rather than new ones. True if that did it.
+
+        New hooks mean new threads, and a thread can't start while another
+        holds Windows' loader lock: on Kyle's PC (0.4.99) the head tracker's
+        ``import cv2`` sat in a DLL load for minutes, and the next switch
+        to the Mac stuck in starting the new mouse hook. The old hooks
+        were already out, the cursor already blank, and Escape had nothing
+        left to hear it. pynput's Windows hooks read ``_suppress`` at every
+        event (let_through uses it too), so flipping it is all a switch needs."""
+        if sys.platform != "win32" or not self._restart_lock.acquire(timeout=RESTART_WAIT_S):
+            return False
+        try:
+            with self._lock:
+                listeners = [x for x in (self._mouse_listener, self._key_listener) if x is not None]
+            if len(listeners) != 2 or not all(hasattr(x, "_suppress") and x.is_alive() and x.running
+                                              for x in listeners):
+                return False
+            for x in listeners:
+                x._suppress = on
+            return True
+        finally:
+            self._restart_lock.release()
+
+    def _restart(self, wait: float | None = None) -> bool:
+        """New hooks. With ``wait``, give up (False) if another thread has
+        been putting them back for that long: a safety net mustn't stick
+        behind the very thing it's there for."""
+        if not self._restart_lock.acquire(timeout=-1 if wait is None else wait):
+            log.warning("input: the hooks are still being put back elsewhere; not waiting for that")
+            return False
+        try:  # the hooks' watchdog and the input helper restart them too
             self._restart_now()
+        finally:
+            self._restart_lock.release()
+        return True
 
     def _restart_now(self) -> None:
         from pynput import keyboard, mouse
@@ -267,6 +309,12 @@ class PynputCapture:
                 )
             self._mouse_listener.start()
             self._key_listener.start()
+            if sys.platform == "win32" and not self._mac and suppress != self._grabbed:
+                # Input came home (or left) while these were starting, which
+                # can take a while (see _suppress_live): hold back what's
+                # wanted now, not what was wanted then.
+                for x in (self._mouse_listener, self._key_listener):
+                    x._suppress = self._grabbed
 
     # -- macOS event taps (run after pynput has called the callbacks) --------
     def let_through(self, inject) -> None:
@@ -340,10 +388,17 @@ class PynputCapture:
         so it's easy to find (the router brings input home there too)."""
         log.warning("input: %s; giving the mouse and keyboard back to this computer", why)
         self.took_back = True
+        # The cursor first: whatever below gets stuck, it's back.
+        if self._hider is not None:
+            self._hider.show()
+        if sys.platform == "win32":
+            from curslink.cursorhide import restore_windows
+
+            restore_windows()
         if self._held_up:
             self.release_held()
         if self._grabbed:
-            self.set_grab(False)
+            self.set_grab(False, wait=RESTART_WAIT_S)
         try:
             if self._mac:
                 _mac_warp(*self.park_at)
@@ -378,10 +433,25 @@ class PynputCapture:
         return self.park_at
 
     def _take_back_soon(self, why: str) -> None:
-        """take_back() from a listener's callback: on a thread of its own,
-        as it stops and restarts the very listener that's calling."""
-        if self._grabbed:
-            threading.Thread(target=self.take_back, args=(why,), name="curslink-take-back", daemon=True).start()
+        """take_back() from a listener's callback: on the take-back thread
+        (started up front), as it stops and restarts the very listener
+        that's calling. Not a new thread each time: starting one can wait
+        on Windows' loader lock, which is when this is needed most."""
+        if self._grabbed or self._held_up:
+            self._take_back_why = why
+            self._take_back_wake.set()
+
+    def _take_back_worker(self) -> None:
+        while not self._closed:
+            self._take_back_wake.wait()
+            self._take_back_wake.clear()
+            if self._closed:
+                return
+            if self._grabbed or self._held_up:
+                try:
+                    self.take_back(self._take_back_why)
+                except Exception:
+                    log.exception("input: couldn't give the mouse and keyboard back")
 
     def _watch_hooks(self) -> None:
         """Windows: while input is grabbed the hooks hold the cursor still
@@ -399,6 +469,12 @@ class PynputCapture:
                 deaf.check()
                 continue
             deaf.reset()
+            if not self.loop_alive():
+                # No hook callback needed: with the loop stuck mid-switch the
+                # hooks may not be in at all (0.4.99), so nothing would hear
+                # the mouse or Escape to notice.
+                self.take_back("Curslink stopped forwarding input")
+                continue
             if self._controller is None or time.monotonic() - self._grabbed_at < 0.5:
                 continue
             try:
@@ -427,8 +503,10 @@ class PynputCapture:
                 self.take_back("Windows kept dropping the input hooks")
                 continue
             try:
-                self._restart()
-                self._controller.position = self.park_at
+                if self._restart(wait=RESTART_WAIT_S):
+                    self._controller.position = self.park_at
+                else:
+                    self.take_back("the input hooks couldn't be put back")
             except Exception:
                 log.exception("input: couldn't put the input hooks back")
                 self.take_back("the input hooks couldn't be put back")
@@ -565,7 +643,7 @@ class PynputCapture:
         """The helper's hooks are in: put ours back in front of them, so the
         helper only gets what ours don't take (and holds back nothing ours do)."""
         if not self._closed:
-            self._restart()
+            self._restart(wait=RESTART_WAIT_S)
 
     def _helper_event(self, command: tuple) -> None:
         """Something the input helper's hooks heard (curslink.winhelper.watch).
@@ -757,6 +835,7 @@ ESCAPE_WINDOW_S = 1.5   # Escape three times within this: input comes home
 HOOK_CHECK_S = 0.25     # Windows: how often the parked cursor is checked (_watch_hooks)
 HOOK_DRIFT_PX = 24      # ... and how far off the park point means the hooks are gone
 HOOK_LOST_MAX = 4       # gone this often in 10 s: input comes home instead
+RESTART_WAIT_S = 1.0    # a safety net waits this long at most for hooks being put back elsewhere
 HELPER_FILL_S = 0.1     # Windows: helper moves count after our own hook heard none for this long
 DEAF_TICKS = 3          # Windows: checks in a row the cursor moved and the hook heard nothing (_DeafHook)
 DEAF_SAY_S = 60.0       # ... said at most this often per app in front
