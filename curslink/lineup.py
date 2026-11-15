@@ -417,6 +417,43 @@ class _Desk:
                 return other, Placed(n, 0.0, 0.0, N.width, N.height, 1.0)
         return None
 
+    def edge_fit(self, behind: str, front: str) -> tuple[float, float, float] | None:
+        """Where ``front`` covers ``behind``, for a fit: ``(x, y, scale)`` with
+        front's pixel (u, v) seen over behind's (x + scale*u, y + scale*v).
+
+        Fitted along the stretches of front's edges that are seen against
+        behind's face: that's where the pointer crosses and where behind's
+        picture carries on (the mirror strip), so that's where it has to be
+        right. (A laptop turned in and tipped back makes a skewed outline
+        against the monitor behind: one rectangle for the whole of it is
+        centimetres out at its top edge.) None if hardly any edge is."""
+        import numpy as np
+
+        from curslink.lineup_scene import project_from
+
+        F, B = self.screens[front], self.screens[behind]
+        along = np.linspace(0.0, 1.0, 41)
+        w, h = F.width, F.height
+        uv = np.concatenate([
+            np.column_stack([along * w, np.zeros_like(along)]), np.column_stack([along * w, np.full_like(along, h)]),
+            np.column_stack([np.zeros_like(along), along * h]), np.column_stack([np.full_like(along, w), along * h])])
+        seen = project_from(self.sol.eye, B, F.at(uv))
+        if seen is None:
+            return None
+        ok = (seen[:, 0] >= 0) & (seen[:, 0] <= B.width) & (seen[:, 1] >= 0) & (seen[:, 1] <= B.height)
+        if ok.sum() < 8:
+            return None
+        uv, seen = uv[ok], seen[ok]
+        # x + s*u = X, y + s*v = Y: least squares over (x, y, s)
+        n = len(uv)
+        a = np.zeros((2 * n, 3))
+        a[:n, 0], a[:n, 2] = 1.0, uv[:, 0]
+        a[n:, 1], a[n:, 2] = 1.0, uv[:, 1]
+        (x, y, scale), *_ = np.linalg.lstsq(a, np.concatenate([seen[:, 0], seen[:, 1]]), rcond=None)
+        if not 0.05 < scale < 20:
+            return None
+        return float(x), float(y), float(scale)
+
     def in_front(self, a: str, b: str) -> bool:
         """Is ``a`` nearer the person than ``b`` where they overlap? The
         smaller one's middle, against the bigger one's plane; when that
@@ -496,8 +533,14 @@ def arrange(screens: list[dict], solution) -> Result:
             return px + (N.x0 - P.x0) * P.k, py - nh
         if r is not None and desk.in_front(p, n):
             # n is behind p: p sits on n at (P - N) in n's pixels.
+            at = desk.edge_fit(n, p)
+            if at is not None:
+                return px - at[0], py - at[1]
             return px - (P.x0 - N.x0) * N.k, py - (P.y0 - N.y0) * N.k
         # n is in front of p (where it covers p, in p's pixels), or apart from it.
+        at = desk.edge_fit(p, n) if r is not None else None
+        if at is not None:
+            return px + at[0], py + at[1]
         return px + (N.x0 - P.x0) * P.k, py + (N.y0 - P.y0) * P.k
 
     # Breadth first along the screens that meet, nearest first.
@@ -556,8 +599,9 @@ def arrange(screens: list[dict], solution) -> Result:
                     joins.append((front, behind, None))
                 if info[a]["device"] != info[b]["device"] and both is not None:
                     Bh, Fr = both
-                    fits.append({"behind": behind, "front": front, "x": float((Fr.x0 - Bh.x0) * Bh.k),
-                                 "y": float((Fr.y0 - Bh.y0) * Bh.k), "scale": float(Bh.k / Fr.k)})
+                    at = desk.edge_fit(behind, front) or (
+                        float((Fr.x0 - Bh.x0) * Bh.k), float((Fr.y0 - Bh.y0) * Bh.k), float(Bh.k / Fr.k))
+                    fits.append({"behind": behind, "front": front, "x": at[0], "y": at[1], "scale": at[2]})
                 continue
             side = r[1]
             both = desk.pair(a, b, side)

@@ -643,3 +643,27 @@ def test_inbox_live_frames_and_how_its_going(tmp_path):
     assert server.sent[-1][2]["done"] is True
     inbox.handle("phone", "lineup_photo", {"id": "L1", "done": True})
     assert events[-1] == ("lineup_photo", {"device": "phone", "id": "L1", "done": True})
+
+
+def test_a_fit_is_right_where_the_screen_behind_shows_past_the_one_in_front():
+    """A laptop turned in and tipped back, in front of a curved monitor: its
+    outline against the monitor is skewed, and what matters is where its
+    edges are seen against the monitor's face (the pointer crosses there,
+    the monitor's picture carries on there). The fit is within a few pixels
+    all along those stretches, not centimetres out as one rectangle
+    averaged over the whole laptop was."""
+    import numpy as np
+
+    from curslink.lineup_scene import project_from
+
+    layout = CURVED_DESK.layout()
+    places = figure_of_eight(30, (0, -60, -900), reach=(15, 10, 8), aim=(0, 120, -50), seed=0)
+    solution = true_solution(CURVED_DESK, "pc/main", places[0][0])
+    fit = next(f for f in lineup.arrange(layout, solution).fits if f["front"] == "pc/main")
+    front, behind = solution.screens["pc/main"], solution.screens["mac/screen2"]
+    edges = np.array([(x, 0.0) for x in np.linspace(0, 2880, 60)] + [(2880.0, y) for y in np.linspace(0, 1620, 40)])
+    seen = project_from(solution.eye, behind, front.at(edges))
+    showing = (seen[:, 0] >= 0) & (seen[:, 0] <= 3440) & (seen[:, 1] >= 0) & (seen[:, 1] <= 1440)
+    assert showing.sum() >= 8
+    said = np.column_stack([fit["x"] + fit["scale"] * edges[:, 0], fit["y"] + fit["scale"] * edges[:, 1]])
+    assert np.abs(said - seen)[showing].max() < 12
