@@ -501,8 +501,15 @@ def test_helper_shows_an_app_in_a_window_of_its_own_and_resizes_it_keeping_its_s
     from PySide6.QtCore import QCoreApplication, QEvent
 
     QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
-    helper.handle("mirror " + json.dumps({"captures": [], "shows": []}))
+    # A state that still lists it, and a picture for it, before the host has heard.
+    helper.handle("mirror " + json.dumps({"captures": [], "shows": [show]}))
+    helper.handle("mirror_image " + json.dumps({"id": show["id"], "jpg": jpeg(40, 30), "w": 40, "h": 30}))
     assert show["id"] not in helper.windows
+    other = {**show, "id": "app:mac:8:2"}
+    helper.handle("mirror " + json.dumps({"captures": [], "shows": [show, other]}))
+    assert list(helper.windows) == [other["id"]]  # the rest of that state still applied
+    helper.handle("mirror " + json.dumps({"captures": [], "shows": [other]}))
+    assert list(helper.windows) == [other["id"]] and not helper.closed
 
 
 def test_helper_brings_the_mirror_in_front_of_other_apps_and_over_them_while_carried(qapp, monkeypatch):

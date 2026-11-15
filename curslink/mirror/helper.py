@@ -1263,6 +1263,17 @@ class MirrorHelper:
         self.captures: dict[str, Capture] = {}
         self.windows: dict[str, MirrorWindow] = {}
         self.shapes: dict[str, dict] = {}  # the pointer's look behind each mirror
+        self.closed: set[str] = set()  # app mirrors closed here, until the host drops them too
+
+    def _window(self, sid) -> MirrorWindow | None:
+        """The window for ``sid``, unless it's been closed here (an app
+        mirror's x): Qt may have deleted it already."""
+        window = self.windows.get(sid)
+        if window is not None and getattr(window, "_gone", False):
+            self.windows.pop(sid, None)
+            self.closed.add(sid)
+            return None
+        return window
 
     def handle(self, line: str) -> bool:
         word, _, rest = line.strip().partition(" ")
@@ -1277,18 +1288,18 @@ class MirrorHelper:
         if word == "mirror":
             self.set(data)
         elif word == "mirror_image":
-            window = self.windows.get(data.get("id"))
+            window = self._window(data.get("id"))
             if window is not None:
                 window.image(data)
         elif word == "mirror_shape":
             sid = data.get("id")
             if isinstance(sid, str):
                 self.shapes[sid] = data
-                window = self.windows.get(sid)
+                window = self._window(sid)
                 if window is not None:
                     window.set_shape(data)
         else:
-            window = self.windows.get(data.get("id"))
+            window = self._window(data.get("id"))
             if window is not None:
                 ok = isinstance(data.get("x"), (int, float)) and isinstance(data.get("y"), (int, float))
                 window.set_pointer((float(data["x"]), float(data["y"])) if ok and not data.get("hide") else None)
@@ -1315,10 +1326,15 @@ class MirrorHelper:
                 else:
                     self.captures[sid] = Capture(spec, self.out)
         for sid in list(self.windows):
+            self._window(sid)  # forget any closed here
+        self.closed &= set(shows)
+        for sid in list(self.windows):
             if sid not in shows:
                 self.windows.pop(sid).close_soon()
         self.shapes = {sid: d for sid, d in self.shapes.items() if sid in shows}
         for sid, spec in shows.items():
+            if sid in self.closed:
+                continue  # closed here; the host is about to drop it
             window = self.windows.get(sid)
             old = None
             if window is not None and window.tune != bool(spec.get("tune")):
