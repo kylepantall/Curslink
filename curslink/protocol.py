@@ -94,7 +94,7 @@ Host -> agent
                                        list "clipboard" in their features (or an
                                        agent's "clipboard_text": text only)
     clip_data    {id, data, end?}      the next bytes of a clip (base64)
-    lineup       {screens, seconds} | {hide}
+    lineup       {screens, seconds, period?} | {hide}
                                        auto line-up (see curslink.lineup): show
                                        these patterns on these monitors until
                                        hidden (screens: [{screen, os, markers,

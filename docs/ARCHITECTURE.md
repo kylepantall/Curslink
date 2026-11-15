@@ -49,18 +49,30 @@ in front of it covers, is hard to judge by eye. "Line up with camera…" on
 the Layout page measures it (`curslink/lineup.py`, `lineup_scene.py`,
 `gui/lineup.py`; `LineupLiveActivity` on the phone).
 
-- **Patterns.** Every screen shows eight ArUco markers (4x4 bits: the
-  coarsest, so they survive distance and a moving phone) at its corners and
-  edge middles, each one's id saying which screen and which spot. Their bits
-  go in the `lineup` frame, so agents draw them without OpenCV.
+- **Patterns that move.** Every screen shows eight ArUco markers at a time
+  (4x4 bits: the coarsest, so they survive distance and a moving phone).
+  The first set is at its corners and edge middles; then set after set in
+  other places, every 320 ms, until its whole face has been covered (up to
+  6 sets; `curslink.lineup.plan`). A marker's id says which screen, which
+  set and which spot, so a frame says by itself what it caught and nothing
+  has to be kept in time. That's some 40 measured points across a screen
+  from wherever the phone is held: what shows a curved monitor's curve, and
+  what's left of a screen half hidden behind another. Their bits go in the
+  `lineup` frame (`sets`; `markers` is the first, all an older agent
+  shows), so agents draw them without OpenCV. The same frame sent again
+  with a screen's `state` "locked" puts a green edge on it.
 - **Many views.** The phone streams grey JPEG frames (about 1600 px, one in
-  flight at a time: `lineup_photo` with a `seq`, answered by `lineup_live`)
-  while it's moved in a figure of 8. Each frame's marker corners are found
-  to a fraction of a pixel; per screen, the patterns must agree on one
-  homography (a misread or reflected one is dropped). Frames that add a new
-  viewpoint are kept (up to 40).
+  flight at a time: `lineup_photo` with a `seq`, answered by `lineup_live`).
+  Each frame's marker corners are found to a fraction of a pixel; per
+  screen, the patterns must agree on one homography (a misread or reflected
+  one is dropped), or roughly on one if the screen turns out curved. A
+  frame is kept if it's a new viewpoint or shows a set of patterns not yet
+  seen from there (up to 48).
 - **The desk in 3D.** Each screen is a rectangle in space: rotation, place
-  and pixel size (7 unknowns; the reference screen is the world). The camera
+  and pixel size (7 unknowns; the reference screen is the world), and a
+  bend: a curved monitor is an arc of a cylinder, and taking a 34" 1500R
+  one for flat puts its middle 5 cm from where it is, which is what skewed
+  the whole desk before the bend was solved for. The camera
   is a pinhole with focal length, principal point and two distortion terms,
   somewhere else in each view. A bundle adjustment (Levenberg-Marquardt,
   Huber loss, numpy only) finds all of them at once from every corner in
