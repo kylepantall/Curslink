@@ -399,6 +399,7 @@ async def run_host(cfg: HostConfig) -> None:
         loop.create_task(camera.pause() if paused else camera.resume(router))
 
     router.on_gaze_paused = gaze_paused
+    head = start_head_follow(cfg, mirror, loop, own_camera=not cfg.gaze.enabled)
 
     async def calibrate_on() -> None:
         """The app is calibrating: give it the camera, and keep input here.
@@ -434,6 +435,9 @@ async def run_host(cfg: HostConfig) -> None:
             lineup_inbox.live(line[12:])
         elif line.startswith("fit "):
             fit_command(mirror, line[4:])
+        elif line == "head home":
+            if head is not None:
+                head.follow.rehome()
         elif line == "pick on":
             # The Layout page is calibrating an edge: clicks on other computers are for it.
             router.picker = lambda data: events.emit("picked", **data)
@@ -460,6 +464,8 @@ async def run_host(cfg: HostConfig) -> None:
             network.cancel()
         wifi.stop()
         keeper.close()
+        if head is not None:
+            head.stop()
         camera.stop()
         capture.close()
         if isolink is not None:
@@ -1229,6 +1235,66 @@ def positions_path():
     from curslink.pairing.store import default_dir
 
     return default_dir() / "pointer-positions.json"
+
+
+class HeadCamera:
+    """Head tracking (curslink.headfollow) and what feeds it: every camera
+    tracker here tells it where the head is; with gaze switching off, a
+    tracker of its own."""
+
+    def __init__(self, follow, tracker, ticker):
+        self.follow = follow
+        self.tracker = tracker
+        self.ticker = ticker
+
+    def stop(self) -> None:
+        from curslink.gaze import tracker as tracking
+
+        tracking.head_listener = None
+        self.ticker.cancel()
+        if self.tracker is not None:
+            self.tracker.stop()
+        self.follow.stop()
+
+
+def head_home_path():
+    from curslink.pairing.store import default_dir
+
+    return default_dir() / "head-home.json"
+
+
+def start_head_follow(cfg: HostConfig, mirror, loop: asyncio.AbstractEventLoop, own_camera: bool):
+    """``[layout] follow_head`` (experimental): overlaps stay lined up as
+    your head moves, by this computer's camera. Needs mirror mode on (it's
+    the mirror and the pointer through it that follow)."""
+    if not cfg.follow_head:
+        return None
+    if mirror is None or not cfg.layout.mirror:
+        log.info("head tracking is on but mirror mode isn't: nothing to keep lined up")
+        return None
+    try:
+        from curslink.gaze import tracker as tracking
+        from curslink.gaze.cameras import resolve
+        from curslink.headfollow import HeadFollow
+    except ImportError as exc:  # pragma: no cover - the gaze extra is missing
+        log.error("head tracking needs the gaze extra (pip install curslink[gaze]): %s", exc)
+        return None
+    follow = HeadFollow(cfg.layout, cfg.device_id, mirror.refresh,
+                        busy=lambda: mirror.tuning is not None or mirror.held is not None,
+                        home_path=head_home_path())
+    tracking.head_listener = lambda t, at: loop.call_soon_threadsafe(follow.sample, t, at)
+    tracker = None
+    if own_camera:
+        # Gaze switching is off, so nothing else has the camera open.
+        tracker = tracking.HeadPoseTracker(lambda *_sample: None, camera=resolve(cfg.gaze.camera, cfg.gaze.camera_name))
+        tracker.start()
+
+    async def tick() -> None:
+        while True:
+            await asyncio.sleep(1.0)
+            follow.tick()
+
+    return HeadCamera(follow, tracker, loop.create_task(tick()))
 
 
 def gaze_off_path():

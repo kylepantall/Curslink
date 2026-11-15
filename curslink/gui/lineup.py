@@ -31,7 +31,9 @@ of points ``[[x, y], ...]`` as shares of the screen, drawn as bright lines
 that should carry straight on across to the next screen. ``pattern``: the
 last step (curslink.lineup_seam): ``{"cell", "seed", "map": [x, y, scale],
 "size": [w, h], "areas": [[x, y, w, h], ...]}``, blocks of black and white
-that carry on unbroken from the screen behind onto the one in front. The
+that carry on unbroken from the screen behind onto the one in front (with
+``"quad"``, eight numbers, for a front screen that leans against the one
+behind: its corners there, and its blocks lean with it). The
 same payload sent again with only the states, lines or pattern changed
 updates the windows in place.
 """
@@ -44,8 +46,8 @@ import threading
 import time
 import uuid
 
-from PySide6.QtCore import QObject, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPainterPath, QPen
+from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPainterPath, QPen, QPolygonF
 from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
@@ -114,13 +116,26 @@ class _MarkerWindow(QWidget):
         if joining:
             # The last step: blocks that should carry on unbroken onto the next screen
             # (curslink.lineup_seam), under the few patterns still up.
-            from curslink.lineup_seam import blocks
+            from curslink.lineup_seam import blocks, tiles
 
             p.setPen(Qt.PenStyle.NoPen)
             white, black = QColor(255, 255, 255), QColor(0, 0, 0)
             for screen in self.screens:
                 pattern = screen.get("pattern")
-                if pattern:
+                if pattern and pattern.get("quad"):
+                    # This screen leans against the one behind: so do its blocks.
+                    sw, sh = pattern["size"]
+                    smooth = bool(p.renderHints() & QPainter.RenderHint.Antialiasing)
+                    p.setRenderHint(QPainter.RenderHint.Antialiasing, False)  # (no hairlines between blocks)
+                    for (x0, y0, x1, y1), shapes in tiles(pattern, sw, sh):
+                        p.save()
+                        p.setClipRect(QRectF(x0 * w / sw, y0 * h / sh, (x1 - x0) * w / sw, (y1 - y0) * h / sh))
+                        for corners, on in shapes:
+                            p.setBrush(white if on else black)
+                            p.drawPolygon(QPolygonF([QPointF(x * w / sw, y * h / sh) for x, y in corners]))
+                        p.restore()
+                    p.setRenderHint(QPainter.RenderHint.Antialiasing, smooth)
+                elif pattern:
                     sw, sh = pattern["size"]
                     for x0, y0, x1, y1, on in blocks(pattern, sw, sh):
                         p.fillRect(QRectF(x0 * w / sw, y0 * h / sh, (x1 - x0) * w / sw, (y1 - y0) * h / sh),
@@ -241,8 +256,11 @@ def screens_of(payload: dict) -> list[tuple[object, dict]]:
                 and isinstance(pattern.get("areas"), list)):
             pattern = None
         else:
+            quad = pattern.get("quad")
             pattern = {"cell": float(pattern["cell"]), "seed": int(pattern["seed"]), "map": pattern["map"],
                        "size": pattern["size"], "areas": [a for a in pattern["areas"][:16] if _numbers(a, 4)]}
+            if _numbers(quad, 8):
+                pattern["quad"] = quad
         out.append((qscreen, {"markers": markers, "sets": sets or [markers], "number": entry.get("number"),
                               "title": entry.get("title"), "lines": lines, "pattern": pattern,
                               "state": entry.get("state") if isinstance(entry.get("state"), str) else None}))

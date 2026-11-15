@@ -86,6 +86,44 @@ def blocks(pattern: dict, width: float, height: float):
                     yield x0, y0, x1, y1, bit(i, j, seed)
 
 
+def _fit_of(d: dict):
+    """A fit as curslink.layout.Fit (for its maps between the two screens)."""
+    from curslink.layout import Fit
+
+    quad = d.get("quad")
+    return Fit(("", ""), ("", ""), float(d["x"]), float(d["y"]), float(d["scale"]),
+               quad=tuple(float(v) for v in quad) if quad is not None and len(quad) == 8 else None)
+
+
+def tiles(pattern: dict, width: float, height: float):
+    """Like ``blocks``, for a screen that leans against the one the pattern
+    is laid out on (``pattern["quad"]``: this screen's four corners there):
+    each block is a leaning four-sided shape here. Yields ``(area, shapes)``
+    for each area: the area ``(x0, y0, x1, y1)`` in the screen's pixels, to
+    cut the shapes off at, and its ``[((x, y) * 4, white), ...]``."""
+    import math
+
+    cell, seed = float(pattern["cell"]), int(pattern["seed"])
+    fit = _fit_of({"x": pattern["map"][0], "y": pattern["map"][1], "scale": pattern["map"][2],
+                   "quad": pattern.get("quad")})
+    if cell <= 0 or fit.scale <= 0:
+        return
+    size = (float(width), float(height))
+    for fx, fy, fw, fh in pattern["areas"]:
+        area = (fx * width, fy * height, (fx + fw) * width, (fy + fh) * height)
+        there = [fit.to_behind(size, x, y) for x, y in
+                 ((area[0], area[1]), (area[2], area[1]), (area[2], area[3]), (area[0], area[3]))]
+        i0, i1 = math.floor(min(p[0] for p in there) / cell), math.ceil(max(p[0] for p in there) / cell)
+        j0, j1 = math.floor(min(p[1] for p in there) / cell), math.ceil(max(p[1] for p in there) / cell)
+        if (i1 - i0) * (j1 - j0) > 20000:
+            continue
+        # every crossing of the pattern's lines once, then the blocks between them
+        at = {(i, j): fit.to_front(size, i * cell, j * cell) for i in range(i0, i1 + 1) for j in range(j0, j1 + 1)}
+        shapes = [((at[i, j], at[i + 1, j], at[i + 1, j + 1], at[i, j + 1]), bit(i, j, seed))
+                  for i in range(i0, i1) for j in range(j0, j1)]
+        yield area, shapes
+
+
 @dataclass
 class Patch:
     """One place the join is read: a piece of the band on the back screen and
@@ -106,12 +144,25 @@ class Join:
     cell: float
     patches: list[Patch]
     draw_band: list[tuple[float, float, float, float]]  # what the back screen draws (its pixels)
-    draw_strip: list[tuple[float, float, float, float]]  # what the front one does (the back screen's pixels)
+    draw_strip: list[tuple[float, float, float, float]]  # what the front one does (its own pixels)
     out: float | None = None  # the break last read, in the back screen's pixels
     good: int = 0
     read: int = 0  # frames it's been read in
     moved: float = 0.0
     wants: list = field(default_factory=list)  # the fit each frame read asked for: (x, y, scale)
+
+
+def _move(fit: dict, x: float, y: float, scale: float) -> None:
+    """Move and resize a fit as a whole (its lean, and the eye it's seen
+    from, along with it: curslink.layout.Fit.moved)."""
+    k = float(scale) / fit["scale"]
+    old = (fit["x"], fit["y"])
+    new = (float(x), float(y))
+    if fit.get("quad") is not None:
+        fit["quad"] = [(v - old[i % 2]) * k + new[i % 2] for i, v in enumerate(fit["quad"])]
+    if fit.get("eye") is not None:
+        fit["eye"] = [fit["eye"][0] + new[0] - old[0], fit["eye"][1] + new[1] - old[1], fit["eye"][2]]
+    fit.update(x=new[0], y=new[1], scale=float(scale))
 
 
 def _sample(gray, xy):
@@ -164,18 +215,14 @@ class Seam:
                     self.joins.append(join)
 
     # ---- where the pattern goes ----
-    def _markers(self, key: str, to_behind=None) -> list[tuple[float, float, float, float]]:
-        """The patterns ``key`` is showing, as rectangles in its pixels (or,
-        with ``to_behind`` (x, y, scale), in the back screen's)."""
+    def _markers(self, key: str) -> list[tuple[float, float, float, float]]:
+        """The patterns ``key`` is showing, as rectangles in its pixels."""
         sp = self.sol.screens[key]
         out = []
         for _bits, fx, fy, fw, fh in self.planned.get(key, {}).get("markers", []):
-            x0, y0 = (fx - fw / 5) * sp.width, (fy - fh / 5) * sp.height  # (with the white round them)
-            x1, y1 = (fx + fw * 1.2) * sp.width, (fy + fh * 1.2) * sp.height
-            if to_behind is not None:
-                x, y, s = to_behind
-                x0, y0, x1, y1 = x + s * x0, y + s * y0, x + s * x1, y + s * y1
-            out.append((x0, y0, x1, y1))
+            # (with the white round them)
+            out.append(((fx - fw / 5) * sp.width, (fy - fh / 5) * sp.height,
+                        (fx + fw * 1.2) * sp.width, (fy + fh * 1.2) * sp.height))
         return out
 
     def _join(self, fit: dict, seed: int) -> Join | None:
@@ -183,26 +230,40 @@ class Seam:
         short = min(B.width, B.height)
         cell = max(8.0, round(CELL * short))
         deep, long_, gap, reach = DEEP * cell, LONG * cell, GAP * short, REACH * cell
-        x, y, s = fit["x"], fit["y"], fit["scale"]
-        fx0, fy0, fx1, fy1 = x, y, x + s * F.width, y + s * F.height  # the front screen, in the back one's pixels
+        s = fit["scale"]
+        # The front screen as it's seen on the back one, in that one's
+        # pixels: a leaning shape (the fit's ``quad``) or a plain rectangle.
+        f = _fit_of(fit)
+        size = (F.width, F.height)
+        tl, tr, br, bl = (f.to_behind(size, u, v) for u, v in ((0, 0), (F.width, 0), (F.width, F.height), (0, F.height)))
         inset = 0.5 * cell
         on_b = self._markers(fit["behind"])
-        on_f: list = []  # (the front screen takes down any of its patterns that are in the way: ``showing``)
 
         def hit(rect, others) -> bool:
             return any(rect[0] < o[2] and o[0] < rect[2] and rect[1] < o[3] and o[1] < rect[3] for o in others)
 
         patches: list[Patch] = []
         band_areas, strip_areas = [], []
+        deep_f = (inset + deep + reach) / s * 1.15 + 4  # the strip's depth on the front screen, with room for a lean
         # Each edge of the front screen with the back one showing beyond it:
-        # (is it a top/bottom edge, where it is, which way is out, and the
-        # stretch of it that lies on the back screen's face).
-        edges = [(True, fy0, -1, max(fx0, 0.0), min(fx1, B.width)), (True, fy1, 1, max(fx0, 0.0), min(fx1, B.width)),
-                 (False, fx0, -1, max(fy0, 0.0), min(fy1, B.height)), (False, fx1, 1, max(fy0, 0.0), min(fy1, B.height))]
-        for flat, at, way, lo, hi in edges:
-            limit = B.height if flat else B.width
-            far = at + way * (gap + deep + reach)  # the band's far side, with room to look about
-            if not (0 <= far <= limit) or not (0 <= at <= limit) or hi - lo < long_ + 2 * reach:
+        # (is it a top/bottom edge, its two ends, which way is out, the strip
+        # along it on the front screen).
+        edges = [(True, tl, tr, -1, (0.0, 0.0, F.width, deep_f)),
+                 (True, bl, br, 1, (0.0, F.height - deep_f, F.width, F.height)),
+                 (False, tl, bl, -1, (0.0, 0.0, deep_f, F.height)),
+                 (False, tr, br, 1, (F.width - deep_f, 0.0, F.width, F.height))]
+        for flat, p0, p1, way, strip_area in edges:
+            i, o = (0, 1) if flat else (1, 0)  # along the edge, and across it
+            limit, length = (B.height, B.width) if flat else (B.width, B.height)
+            if abs(p1[i] - p0[i]) < 1:
+                continue
+
+            def at(a: float, p0=p0, p1=p1, i=i, o=o) -> float:
+                """Where the edge is, at ``a`` along it."""
+                return p0[o] + (p1[o] - p0[o]) * (a - p0[i]) / (p1[i] - p0[i])
+
+            lo, hi = max(min(p0[i], p1[i]), 0.0), min(max(p0[i], p1[i]), float(length))
+            if hi - lo < long_ + 2 * reach:
                 continue
             count = min(MAX_PATCHES, int((hi - lo - 2 * reach) // long_))
             spare = (hi - lo - 2 * reach - count * long_) / max(1, count)
@@ -210,33 +271,38 @@ class Seam:
             for k in range(count):
                 a0 = lo + reach + spare / 2 + k * (long_ + spare)
                 a1 = a0 + long_
-                o0, o1 = sorted((at + way * gap, at + way * (gap + deep)))  # the band, beyond the edge
-                i0, i1 = sorted((at - way * inset, at - way * (inset + deep)))  # the strip, within it
+                ends = (at(a0), at(a1))
+                outer = min(ends) if way < 0 else max(ends)  # a leaning edge: clear of it all along the patch
+                inner = max(ends) if way < 0 else min(ends)
+                far = outer + way * (gap + deep + reach)
+                if not (0 <= far <= limit) or not (0 <= inner <= limit):
+                    continue
+                o0, o1 = sorted((outer + way * gap, outer + way * (gap + deep)))  # the band, beyond the edge
+                i0, i1 = sorted((inner - way * inset, inner - way * (inset + deep)))  # the strip, within it
                 band = (a0, o0, a1, o1) if flat else (o0, a0, o1, a1)
                 strip = (a0, i0, a1, i1) if flat else (i0, a0, i1, a1)
                 m = 0.5 * cell
-                grown = (band[0] - m, band[1] - m, band[2] + m, band[3] + m)
-                grown_s = (strip[0] - m, strip[1] - m, strip[2] + m, strip[3] + m)
-                if hit(grown, on_b) or hit(grown_s, on_f):
+                if hit((band[0] - m, band[1] - m, band[2] + m, band[3] + m), on_b):
                     continue
                 found.append(Patch(band, strip))
             if not found:
                 continue
             patches.extend(found)
-            # What's drawn: all along the stretch, from the far side of the
-            # band right up to the edge, and on into the strip.
-            o0, o1 = sorted((at, far))
-            i0, i1 = sorted((at, at - way * (inset + deep + reach)))
+            # What's drawn: on the back screen, all along the stretch from
+            # the far side of the band right up to (and under) the edge; on
+            # the front one, the strip along that edge.
+            o0 = min(at(lo), at(hi)) + way * (gap + deep + reach) if way < 0 else min(at(lo), at(hi))
+            o1 = max(at(lo), at(hi)) if way < 0 else max(at(lo), at(hi)) + way * (gap + deep + reach)
             band_areas.append((lo, o0, hi, o1) if flat else (o0, lo, o1, hi))
-            strip_areas.append((lo, i0, hi, i1) if flat else (i0, lo, i1, hi))
+            strip_areas.append(strip_area)
         if not patches:
             return None
         # The front screen's own patterns that its strip would run into come down.
         mine = self.drawing.get(fit["front"])
         if mine is not None:
-            grown = [(r[0] - 0.5 * cell, r[1] - 0.5 * cell, r[2] + 0.5 * cell, r[3] + 0.5 * cell) for r in strip_areas]
-            rects = dict(zip((tuple(m) for m in self.planned[fit["front"]]["markers"]),
-                             self._markers(fit["front"], (x, y, s))))
+            m = 0.5 * cell / s
+            grown = [(r[0] - m, r[1] - m, r[2] + m, r[3] + m) for r in strip_areas]
+            rects = dict(zip((tuple(m) for m in self.planned[fit["front"]]["markers"]), self._markers(fit["front"])))
             keep = [m for m in mine["markers"] if not hit(rects[tuple(m)], grown)]
             self.drawing[fit["front"]] = {**mine, "markers": keep}
         return Join(fit["front"], fit["behind"], fit, seed, cell, patches, band_areas, strip_areas)
@@ -248,18 +314,16 @@ class Seam:
     def patterns(self) -> dict[str, dict]:
         """What each screen draws now: ``{key: {"cell", "seed", "map", "size",
         "areas"}}`` (see ``blocks``; ``size``: the screen's own pixels, which
-        ``map`` is in). A screen in two joins draws the first."""
+        ``map`` is in), with ``"quad"`` for a front screen that leans (see
+        ``tiles``). A screen in two joins draws the first."""
         out: dict[str, dict] = {}
         for join in self.joins:
             F, B = self.sol.screens[join.front], self.sol.screens[join.behind]
             x, y, s = join.fit["x"], join.fit["y"], join.fit["scale"]
 
-            def shares(rects, sp, back) -> list[list[float]]:
+            def shares(rects, sp) -> list[list[float]]:
                 areas = []
                 for x0, y0, x1, y1 in rects:
-                    if back is not None:
-                        x0, y0, x1, y1 = (x0 - back[0]) / back[2], (y0 - back[1]) / back[2], \
-                            (x1 - back[0]) / back[2], (y1 - back[1]) / back[2]
                     x0, y0, x1, y1 = max(0.0, x0), max(0.0, y0), min(sp.width, x1), min(sp.height, y1)
                     if x1 - x0 > 1 and y1 - y0 > 1:
                         areas.append([round(x0 / sp.width, 5), round(y0 / sp.height, 5),
@@ -268,11 +332,14 @@ class Seam:
 
             if join.behind not in out:
                 out[join.behind] = {"cell": join.cell, "seed": join.seed, "map": [0.0, 0.0, 1.0],
-                                    "size": [B.width, B.height], "areas": shares(join.draw_band, B, None)}
+                                    "size": [B.width, B.height], "areas": shares(join.draw_band, B)}
             if join.front not in out:
                 out[join.front] = {"cell": join.cell, "seed": join.seed,
                                    "map": [round(x, 2), round(y, 2), round(s, 5)],
-                                   "size": [F.width, F.height], "areas": shares(join.draw_strip, F, (x, y, s))}
+                                   "size": [F.width, F.height], "areas": shares(join.draw_strip, F)}
+                if join.fit.get("quad") is not None:
+                    # (a screen that leans: its blocks lean with it, see ``tiles``)
+                    out[join.front]["quad"] = [round(float(v), 2) for v in join.fit["quad"]]
         return out
 
     def fits(self) -> list[dict]:
@@ -351,6 +418,7 @@ class Seam:
             both = locate([s for s in sightings if s.key in (join.front, join.behind)]) or view
             cam = -(both[0].T @ both[1])
             centres, breaks = [], []
+            shape = _fit_of(join.fit)
             for patch in join.patches:
                 band = self._shift(gray, join, patch.band, view)
                 strip = self._shift(gray, join, patch.strip, view) if band is not None else None
@@ -364,7 +432,7 @@ class Seam:
                 # desk as solved, how much (a small difference, so little
                 # hangs on how right the desk is).
                 middle = np.array([((patch.strip[0] + patch.strip[2]) / 2, (patch.strip[1] + patch.strip[3]) / 2)])
-                there = F.at((middle - (join.fit["x"], join.fit["y"])) / join.fit["scale"])
+                there = F.at([shape.to_front((F.width, F.height), *middle[0])])
                 from_cam, from_eye = project_from(cam, B, there), project_from(self.sol.eye, B, there)
                 if from_cam is not None and from_eye is not None:
                     d = d - (from_cam[0] - from_eye[0])
@@ -398,12 +466,15 @@ class Seam:
             enough = max(DONE_PX, DONE * min(B.width, B.height))
             if join.out <= enough:
                 join.good += 1
+                if join.out > 0.35 * enough:
+                    # Near enough to count, and still eased a little nearer.
+                    _move(fit, fit["x"] + 0.3 * shift[0], fit["y"] + 0.3 * shift[1], fit["scale"] + 0.3 * grow)
+                    join.moved += 0.3 * join.out
+                    moved = True
                 continue
             join.good = 0
             gain = GAIN if join.out > 3 * enough else 0.6 * GAIN
-            fit["x"] = float(fit["x"] + gain * shift[0])
-            fit["y"] = float(fit["y"] + gain * shift[1])
-            fit["scale"] = float(fit["scale"] + gain * grow)
+            _move(fit, fit["x"] + gain * shift[0], fit["y"] + gain * shift[1], fit["scale"] + gain * grow)
             join.moved += gain * join.out
             moved = True
         if any_read:
@@ -416,7 +487,7 @@ class Seam:
             for join in self.joins:
                 if len(join.wants) >= 3 and join.good < AGREE:
                     x, y, scale = np.median(np.array(join.wants[-8:]), axis=0)
-                    join.fit.update(x=float(x), y=float(y), scale=float(scale))
+                    _move(join.fit, x, y, scale)
                     moved = True
         return moved
 

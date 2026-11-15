@@ -205,6 +205,18 @@ class SettingsPage(Page):
             "needs a 120 Hz screen. Auto goes up to 120 while the network is quick and drops to 30 or 15 "
             "when it's busy or slow."),
             self.mirror_fps)
+        self.follow_head = Toggle("Follow my head (experimental)")
+        self.follow_head.clicked.connect(lambda on: self.set_config("layout", "follow_head", on))
+        self.head_home = button("Sit here", None, lambda: self.app.service.send("head home"))
+        self.head_home.setToolTip("Take where your head is now as the place the overlap was lined up from")
+        self.follow_head_row = self.mirror_card.add_row(text_block(
+            "Follow my head (experimental)",
+            "A screen in front of another only lines up from one viewpoint: lean to the side and the mirror "
+            "slides off what it carries on from. With this on, this computer's camera watches where your head "
+            "is and the mirror and the pointer's crossing move to stay lined up, the way near things slide "
+            "across far ones. It needs an overlap lined up with the phone camera (Layout, Line up with a "
+            "camera) and keeps the camera on. Sit here: take where you are sitting now as the place it was "
+            "lined up from."), self.head_home, self.follow_head)
         # Rows for screens behind others: keep mirroring while on a screen joined to it.
         self.joined_rows: list = []
         self.joined_toggles: dict[tuple[str, str | None], Toggle] = {}
@@ -422,6 +434,9 @@ class SettingsPage(Page):
             fps = layout_raw.get("mirror_fps", "auto")
             self.mirror_fps.set_value(str(fps) if str(fps) in ("30", "60", "120") else "auto")
             self.mirror_fps_row.setVisible(overlap and self.mirror.isChecked())
+            self.follow_head.setChecked(bool(layout_raw.get("follow_head", False)))
+            self.follow_head_row.setVisible(overlap and self.mirror.isChecked())
+            self.head_home.setVisible(self.follow_head.isChecked())
             self.mirror_note.setVisible(not overlap)
             self.load_joined(raw, overlap and self.mirror.isChecked() and role == "host")
             self.agent_keys_card.setVisible(role == "agent")

@@ -120,6 +120,34 @@ the Layout page measures it (`curslink/lineup.py`, `lineup_scene.py`,
   of it and the strip redrawn, until the blocks join (a frame taken a little
   away from where the scan began is allowed for by the desk as solved). So
   what's tested is the saved fit itself, not only the 3D desk it came from.
+- **A leaning fit.** A screen turned in or tipped back is seen against the
+  one behind as a four-sided shape that isn't a rectangle (perspective: a
+  16" laptop turned 15 degrees is 15 px out at the ends of its top edge
+  against the best rectangle). So a fit from a live line-up also has
+  `quad`: the front screen's four corners as seen on the one behind, from
+  the eye (`_Desk.lean`). `Fit.to_behind`/`to_front` go through the
+  perspective map those corners make (`layout.homography`, plain Python);
+  the pointer crosses by it (`Layout.map_point`, `_fitted_at`), mirror mode
+  captures the rectangle round the shape and its show spec carries `quad`
+  (where the picture's corners go, as shares of the mirror window), which
+  the helper draws through a `QTransform`. The pattern step draws the front
+  screen's blocks through the same map (`lineup_seam.tiles`), and moves the
+  shape as a whole. `x`, `y`, `scale` stay as the nearest rectangle: what
+  an older agent, the phone app and the fine-tune dialog go by.
+- **Head tracking (experimental, `[layout] follow_head`).** The fit also
+  records `eye` (where it was seen from, in the screen behind's pixels and
+  that far in front of it), `depth` (how far in front each corner is) and
+  `mm` (a pixel's size), so each corner is a known point in the room and
+  `Fit.seen_from(eye)` gives the shape from anywhere else.
+  `curslink/headfollow.py` takes the head's place before this computer's
+  camera from MediaPipe's face matrix (the gaze tracker's, or a tracker of
+  its own when gaze is off), as a move from "home" (where the head first
+  sat still; kept in `head-home.json`, "Sit here" takes it again), turns
+  it into the screen behind's terms (a laptop's own camera looks out of
+  its leaning screen: `screen_axes`), smooths it (1-euro) and rewrites the
+  running layout's fits up to 20 times a second. `Layout.part_grid` keeps
+  the captured rectangle on a 64 px grid meanwhile, so only the show
+  spec's `quad` changes as the head moves, not what's captured.
 - **From 3D to the layout.** The pointer should cross where edges *look*
   as if they meet, so each pair of screens is projected, from the eye,
   onto the plane of one of them, and measured at the edges that touch. The

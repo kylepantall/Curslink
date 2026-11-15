@@ -3,10 +3,14 @@
 Commands (one line each, from :class:`curslink.mirror.MirrorPeer`)::
 
     mirror {"captures": [{"id", "screen", "os": [x, y, w, h], "fps", "cursor"?, "tiles"?}],
-            "shows": [{"id", "screen", "os": [x, y, w, h], "label", "edges"}]}
+            "shows": [{"id", "screen", "os": [x, y, w, h], "label", "edges", "quad"?}]}
     mirror_image {"id", "jpg", "w", "h", "tile"?}
     mirror_pointer {"id", "x", "y"} | {"id", "hide": true}
     mirror_shape {"id", "png", "w", "h", "hx", "hy", "cw"}
+
+A show with ``quad`` (eight numbers: where the picture's top left, top right,
+bottom right and bottom left corners go, as shares of ``os``) is of a screen
+that leans against this one: the picture is drawn in that shape.
 
 A capture with ``cursor`` draws this computer's real cursor (its picture
 and hot spot, :mod:`curslink.mirror.cursorshape`) into each frame where it
@@ -46,7 +50,7 @@ import weakref
 
 from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QPoint, QPointF, QRect, QRectF, Qt, QTimer
 from PySide6.QtGui import (QColor, QCursor, QFont, QFontMetricsF, QGuiApplication, QImage, QLinearGradient,
-                           QPainter, QPainterPath, QPen, QPixmap)
+                           QPainter, QPainterPath, QPen, QPixmap, QPolygonF, QTransform)
 from PySide6.QtWidgets import QWidget
 
 from curslink.overlay import ACCENT
@@ -1140,6 +1144,13 @@ class MirrorWindow(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         r = QRectF(self.rect())
+        lean = self.lean(r)
+        if lean is not None:
+            # A screen that's turned or tipped against the one behind: the
+            # picture goes in the leaning shape it's seen through (cut off at
+            # this window, which is the rectangle round what shows of it).
+            p.save()
+            p.setTransform(lean, True)
         if whole:
             # The screen behind's own pixels, scaled once onto this screen's.
             p.drawImage(r, self.canvas, QRectF(self.canvas.rect()))
@@ -1168,6 +1179,8 @@ class MirrorWindow(QWidget):
                 p.drawLine(a, b)
         if self.pointer is not None:
             self.paint_pointer(p, QPointF(r.x() + self.pointer[0] * r.width(), r.y() + self.pointer[1] * r.height()))
+        if lean is not None:
+            p.restore()
         if self.tune:
             paint_guides(p, self.guide_rect(r))
             pen = QPen(QColor(ACCENT), 3, Qt.PenStyle.DashLine)
@@ -1178,6 +1191,21 @@ class MirrorWindow(QWidget):
         elif age < TAG_S + 0.5:
             self.paint_tag(p, r, 1.0 if age < TAG_S else max(0.0, 1 - (age - TAG_S) / 0.5))
         p.end()
+
+    def lean(self, r: QRectF) -> QTransform | None:
+        """Spec ``quad`` (where the picture's four corners go, as shares of
+        this window) as what takes ``r`` there; None without one."""
+        quad = self.spec.get("quad")
+        if not isinstance(quad, list) or len(quad) != 8:
+            return None
+        try:
+            pts = [QPointF(r.x() + float(quad[i]) * r.width(), r.y() + float(quad[i + 1]) * r.height())
+                   for i in range(0, 8, 2)]
+        except (TypeError, ValueError):
+            return None
+        out = QTransform.quadToQuad(QPolygonF([r.topLeft(), r.topRight(), r.bottomRight(), r.bottomLeft()]),
+                                    QPolygonF(pts))
+        return out if isinstance(out, QTransform) and out.isInvertible() else None
 
     def guide_rect(self, r: QRectF) -> QRectF:
         """Where the guides' area (spec ``guides``, on the screen behind) is

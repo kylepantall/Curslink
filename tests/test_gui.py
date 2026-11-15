@@ -1632,6 +1632,33 @@ def test_line_up_patterns_change_and_show_when_a_screen_is_measured(qapp):
     assert not markers.showing and not markers.cycle.isActive()
 
 
+def test_a_leaning_screen_draws_its_blocks_leaning(qapp):
+    """The pattern step on a screen that's turned against the one behind:
+    its blocks go through the fit's four corners, not a plain rectangle."""
+    from curslink.gui.lineup import Markers
+
+    geo = qapp.primaryScreen().geometry()
+    w, h = geo.width(), geo.height()
+    pattern = {"cell": 40.0, "seed": 3, "map": [100.0, 200.0, 0.5], "size": [w, h], "areas": [[0.0, 0.0, 1.0, 0.3]]}
+    entry = {"screen": "main", "os": [geo.x(), geo.y(), w, h], "number": 1, "title": "This one", "markers": []}
+    markers = Markers()
+    assert markers.show({"screens": [{**entry, "pattern": pattern}], "seconds": 30}) == 1
+    plain = markers.windows[0].grab().toImage()
+    lean = {**pattern, "quad": [100.0, 200.0, 100 + 0.5 * w, 180.0, 104 + 0.5 * w, 200 + 0.5 * h, 98.0, 204 + 0.5 * h]}
+    assert markers.show({"screens": [{**entry, "pattern": lean}], "seconds": 30}) == 1
+    window = markers.windows[0]
+    assert window.screens[0]["pattern"]["quad"] == lean["quad"]
+    leaning = window.grab().toImage()
+    assert leaning != plain
+    # black and white still, all over the strip, and nothing below it
+    strip = [leaning.pixelColor(x, y).lightness() for x in range(20, w - 20, 37) for y in range(10, int(0.3 * h) - 10, 23)]
+    assert min(strip) < 40 and max(strip) > 215 and 0.2 < sum(v > 128 for v in strip) / len(strip) < 0.8
+    # a quad that isn't eight numbers is left out: the plain blocks
+    markers.show({"screens": [{**entry, "pattern": {**pattern, "quad": [1, 2, 3]}}], "seconds": 30})
+    assert "quad" not in markers.windows[0].screens[0]["pattern"]
+    markers.hide()
+
+
 def test_live_line_up_ends_with_lines_across_the_joins(desktop, qapp, tmp_path):
     """Once every screen is measured the screens draw lines across where
     they meet, the camera checks them, and only then is it done."""

@@ -286,9 +286,27 @@ class ConfigFile:
     def fits(self) -> list[dict[str, Any]]:
         return list(self.raw().get("layout", {}).get("fit", []))
 
-    def set_fit(self, behind: str, front: str, x: float, y: float, scale: float) -> None:
+    def set_fit(self, behind: str, front: str, x: float, y: float, scale: float, quad=None, eye=None,
+                depth=None, mm: float | None = None, keep_lean: bool = False) -> None:
         """Calibrate where screen ``front`` really stands on ``behind``
-        ("device/screen", see curslink.layout.Fit); replaces an earlier one."""
+        ("device/screen", see curslink.layout.Fit); replaces an earlier one.
+        ``quad``, ``eye``, ``depth``, ``mm``: how it leans and where it's
+        seen from, as a live line-up measures them. ``keep_lean``: the
+        earlier one's lean is kept, moved and resized along with it (the
+        mirror dragged into place by hand)."""
+        if keep_lean and quad is None:
+            for t in self.fits():
+                if (t.get("behind"), t.get("front")) != (behind, front) or "quad" not in t:
+                    continue
+                try:
+                    ox, oy, k = float(t["x"]), float(t["y"]), scale / float(t["scale"])
+                    quad = [(float(v) - (ox, oy)[i % 2]) * k + (x, y)[i % 2] for i, v in enumerate(t["quad"])]
+                    if "eye" in t and "depth" in t:
+                        eye = [float(t["eye"][0]) + x - ox, float(t["eye"][1]) + y - oy, float(t["eye"][2])]
+                        depth = [float(v) for v in t["depth"]]
+                        mm = float(t["mm"]) if "mm" in t else None
+                except (KeyError, TypeError, ValueError, IndexError, ZeroDivisionError):
+                    quad = eye = depth = mm = None
         self.remove_fit(behind, front)
         layout = self._table("layout", create=True)
         if "fit" not in layout:
@@ -296,6 +314,13 @@ class ConfigFile:
         t = tomlkit.table()
         t["behind"], t["front"] = behind, front
         t["x"], t["y"], t["scale"] = round(x, 1), round(y, 1), round(scale, 4)
+        if quad is not None and len(quad) == 8:
+            t["quad"] = [round(float(v), 1) for v in quad]
+            if eye is not None and depth is not None and len(eye) == 3 and len(depth) == 4:
+                t["eye"] = [round(float(v), 1) for v in eye]
+                t["depth"] = [round(float(v), 1) for v in depth]
+                if mm:
+                    t["mm"] = round(float(mm), 5)
         layout["fit"].append(t)
 
     def remove_fit(self, behind: str, front: str) -> bool:
