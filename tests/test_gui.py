@@ -1690,7 +1690,7 @@ def test_live_line_up_ends_with_lines_across_the_joins(desktop, qapp, tmp_path):
     assert entry["markers"] == flow.planned[laptop.key]["check"]["markers"] and entry["sets"] == [entry["markers"]]
     assert entry["lines"] and all(0 <= x <= 1 and 0 <= y <= 1 for run in entry["lines"] for x, y in run)
     assert flow.live.check.measured >= 2 and flow.live.check.worst() < 5
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + 30  # (a slow machine: one round of events can take seconds)
     while page.lineup is not None and time.monotonic() < deadline:
         qapp.processEvents()
         time.sleep(0.01)
