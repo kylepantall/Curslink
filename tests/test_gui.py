@@ -401,6 +401,7 @@ def test_settings_set_pointer_speed_and_native_feel_per_device(desktop, qapp):
     cfg.save()
     desktop.config_saved(restart=False)
     page = desktop.window.pages["settings"]
+    page.show_section("input")
     page.load()
     assert page.pointer_card.isVisibleTo(page) and list(page.pointer_widgets) == ["laptop"]
     feel, slider, speed_label = page.pointer_widgets["laptop"]
@@ -1810,3 +1811,34 @@ def test_live_line_up_joins_a_pattern_across_an_overlap(desktop, qapp, tmp_path)
     assert page.lineup_result.check["seam"]["state"] == "joined"
     assert "pattern joined up" in page.lineup_note.text()
     assert page.lineup_result.fits[0] == seam.fits()[0]
+
+
+def test_settings_sections_in_the_sidebar_and_gaze_settings_on_calibrate(desktop, qapp):
+    """Settings is split into sections listed under it in the sidebar, and the
+    gaze settings sit on the Calibrate page with the calibration."""
+    desktop.window.pages["setup"].create()
+    desktop.config_saved(restart=False)
+    win = desktop.window
+    settings, calibrate = win.pages["settings"], win.pages["calibrate"]
+    win.show_page("status")
+    assert win.sections_box.isHidden()
+    win.show_page("settings")
+    assert not win.sections_box.isHidden() and settings.current_section() == "general"
+    assert win.section_buttons["general"].isChecked()
+    win.section_buttons["updates"].click()
+    assert win.current_page() == "settings" and settings.current_section() == "updates"
+    assert win.nav_buttons["settings"].isChecked() and win.section_buttons["updates"].isChecked()
+    win.show_page("settings/network")
+    assert settings.current_section() == "network"
+    win.show_page("status")
+    win.show_page("settings")  # back to the start, like opening Settings again
+    assert settings.current_section() == "general"
+    # Gaze switching and the per-monitor jumps are on the Calibrate page now.
+    assert calibrate.isAncestorOf(settings.gaze_card) and calibrate.isAncestorOf(settings.jump_card)
+    assert not settings.isAncestorOf(settings.jump_card)
+    # Each card is in one section, none stray.
+    for card in (settings.pointer_card, settings.keyboard_card):
+        assert settings.sections["input"].isAncestorOf(card)
+    assert settings.sections["overlap"].isAncestorOf(settings.mirror_card)
+    assert settings.sections["sharing"].isAncestorOf(settings.clipboard_card)
+    assert "overlap" in settings.section_keys("host") and "overlap" not in settings.section_keys("agent")

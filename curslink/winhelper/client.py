@@ -176,7 +176,7 @@ class HelperWatch:
             pipe, version = self._open(self.path)
         except OSError as exc:
             self._say("missing", logging.INFO, "input helper not running (%s): the mouse isn't heard over apps "
-                      "that run as administrator (Settings > Control admin apps turns it on)", exc)
+                      "that run as administrator (Settings > Keyboard & mouse > Control admin apps turns it on)", exc)
             return
         self._said.discard("missing")
         self.version = version
