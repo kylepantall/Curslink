@@ -130,6 +130,24 @@ def check_note(check: dict | None) -> str:
     """A sentence on how a line-up's check at the end went (curslink.lineup.Live.check_summary)."""
     if not check:
         return ""
+    return _joins_note(check) + _seam_note(check.get("seam"))
+
+
+def _seam_note(seam: dict | None) -> str:
+    """...and on the pattern of blocks across each overlap (curslink.lineup_seam.Seam.summary)."""
+    if not seam:
+        return ""
+    left = seam.get("left")
+    within = f"to within {max(1, round(left))} px" if isinstance(left, (int, float)) else ""
+    if seam.get("state") == "unseen":
+        return (" The overlap's pattern never showed in the camera, so the overlap is as the scan left it. Every "
+                "computer needs Curslink 0.4.95 or later to draw it.")
+    if seam.get("state") == "joined":
+        return f" The overlap's pattern joined up {within}."
+    return f" The overlap's pattern was still moving when it stopped: joined {within}." if within else ""
+
+
+def _joins_note(check: dict) -> str:
     state, lines, joins = check.get("state"), int(check.get("lines") or 0), int(check.get("joins") or 0)
     step = check.get("step")
     across = f"{lines} line{'s' if lines != 1 else ''} across {joins} join{'s' if joins != 1 else ''}"

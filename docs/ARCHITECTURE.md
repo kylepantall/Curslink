@@ -109,6 +109,17 @@ the Layout page measures it (`curslink/lineup.py`, `lineup_scene.py`,
   running (or after 28 frames; 8 if no line is ever seen, as with an older
   agent that doesn't draw them). Lines across one edge only say how far
   along it the other screen is, which is what the pointer crossing needs.
+- **The pattern.** Last, for each screen in front of another
+  (`curslink/lineup_seam.py`): the screen behind draws random black and
+  white blocks in a band beyond the front screen's edge, and the front
+  screen draws the same pattern in a strip along that edge, by the fit
+  (`x + scale*u`), as the mirror strip draws the monitor's picture. Each
+  frame is laid out flat in the back screen's pixels and matched to the
+  pattern, at the band and at the strip; the difference is the break in the
+  pattern at the edge, which is the fit being out. The fit is moved by most
+  of it and the strip redrawn, until the blocks join (a frame taken a little
+  away from where the scan began is allowed for by the desk as solved). So
+  what's tested is the saved fit itself, not only the 3D desk it came from.
 - **From 3D to the layout.** The pointer should cross where edges *look*
   as if they meet, so each pair of screens is projected, from the eye,
   onto the plane of one of them, and measured at the edges that touch. The

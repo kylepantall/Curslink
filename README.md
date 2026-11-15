@@ -111,7 +111,10 @@ from where you sit each should look like one straight line. The camera
 measures any step in them and moves the layout until they join, so you can
 see for yourself that it's right (they stay up a few seconds, and the
 Layout page says afterwards how many were checked and how close they came).
-A computer's own two screens are checked against each other too. Without the
+A computer's own two screens are checked against each other too. Last, where
+one screen stands in front of another, both draw one pattern of blocks and
+the overlap is nudged until the blocks carry on unbroken across the edge:
+hold the phone close to your eyes for that. Without the
 app, take one photo of the desk with any camera and choose it there: that
 works too, but one photo can't tell how far away each screen is. Check the
 result and press **Save layout**.

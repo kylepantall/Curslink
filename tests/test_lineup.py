@@ -667,3 +667,75 @@ def test_a_fit_is_right_where_the_screen_behind_shows_past_the_one_in_front():
     assert showing.sum() >= 8
     said = np.column_stack([fit["x"] + fit["scale"] * edges[:, 0], fit["y"] + fit["scale"] * edges[:, 1]])
     assert np.abs(said - seen)[showing].max() < 12
+
+
+def test_the_blocks_are_the_same_wherever_they_are_drawn():
+    """A screen draws its part of the pattern from a few numbers; the block
+    at a place in the pattern is the same whichever screen draws it."""
+    from curslink.lineup_seam import bit, blocks
+
+    assert [bit(i, j, 3) for i in range(-2, 3) for j in range(-2, 3)] == \
+        [bit(i, j, 3) for i in range(-2, 3) for j in range(-2, 3)]
+    assert len({bit(i, j, 1) for i in range(8) for j in range(8)}) == 2
+    behind = {"cell": 50.0, "seed": 1, "map": [0.0, 0.0, 1.0], "areas": [[0.25, 0.5, 0.25, 0.25]]}
+    drawn = list(blocks(behind, 2000, 1000))
+    assert all(500 <= x0 < x1 <= 1000 and 500 <= y0 < y1 <= 750 for x0, y0, x1, y1, _w in drawn)
+    assert {(x0, y0): w for x0, y0, _x1, _y1, w in drawn}[(600.0, 550.0)] == bit(12, 11, 1)
+    # the screen in front: its pixel (u, v) shows the pattern at (400 + 0.5u, 300 + 0.5v)
+    front = {"cell": 50.0, "seed": 1, "map": [400.0, 300.0, 0.5], "areas": [[0.0, 0.0, 1.0, 0.2]]}
+    first = next(iter(blocks(front, 1000, 500)))
+    assert first == (0.0, 0.0, 100.0, 100.0, bit(8, 6, 1))
+
+
+@pytest.mark.parametrize("out", [(40.0, -30.0, 1.02), (-55.0, 45.0, 0.985)])
+def test_a_pattern_across_an_overlap_puts_its_fit_right(out):
+    """The last step: the monitor and the laptop in front of it draw one
+    pattern of blocks, the laptop's by the fit. With the fit out, the blocks
+    break at the laptop's edge; the camera (in a hand that isn't still)
+    reads the break and the fit is moved until they join."""
+    import numpy as np
+
+    from curslink.lineup_check import Check
+    from curslink.lineup_scene import project_from
+    from curslink.lineup_seam import Seam
+    from lineup_desk import Camera, render
+
+    desk = Desk([
+        ("host/main", "host", 2560, 1440, 597, (0, 0, 0), 0, 0),
+        ("mac/main", "mac", 1512, 982, 304, (60, 150, -250), 0, 15),
+    ])
+    layout = desk.layout()
+    planned = lineup.plan([{"key": s["key"], "width": s["width"], "height": s["height"]} for s in layout])
+    showing = lineup.check_plan(planned)
+    places = figure_of_eight(30, (0, 0, -900), reach=(15, 10, 8), aim=(0, 60, 0), seed=0)
+    solution = true_solution(desk, "host/main", places[0][0])
+    result = lineup.arrange(layout, solution)
+    cam = Camera(focal=1180, k1=0.04, k2=-0.02, centre=(812, 588))
+    intr = [1180, 812, 588, 0.04, -0.02]
+    locate = Check(solution, result, showing, intr, cam.size).locate
+    fit = dict(result.fits[0])
+    fit.update(x=fit["x"] + out[0], y=fit["y"] + out[1], scale=fit["scale"] * out[2])
+    seam = Seam(solution, [fit], showing, intr, cam.size)
+    assert seam.any and not seam.done
+    drawn = seam.patterns()
+    assert set(drawn) == {"host/main", "mac/main"} and all(p["areas"] for p in drawn.values())
+
+    front, behind = solution.screens["mac/main"], solution.screens["host/main"]
+    edge = np.array([(x, 0.0) for x in np.linspace(100, 1412, 12)])
+    seen = project_from(solution.eye, behind, front.at(edge))  # where the laptop's top edge is really seen
+
+    def off(f: dict) -> float:
+        said = np.column_stack([f["x"] + f["scale"] * edge[:, 0], f["y"] + f["scale"] * edge[:, 1]])
+        return float(np.abs(said - seen).max())
+
+    assert off(fit) > 40
+    dims = {s["key"]: (s["width"], s["height"]) for s in layout}
+    for n in range(24):
+        at, target, roll = places[(n * 7 + 3) % len(places)]  # a centimetre or two from where the scan began
+        frame = render(desk, seam.drawing, cam, cam.look(at, target, roll), patterns=seam.patterns(), seed=n)
+        seam.frame(frame, lineup.read_frame(frame, seam.showing, dims, 6.4, thorough=False), locate)
+        if seam.done:
+            break
+    assert seam.joined and n < 16 and seam.worst() < 6
+    assert off(seam.fits()[0]) < 14
+    assert seam.summary()["state"] == "joined"

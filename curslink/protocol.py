@@ -98,7 +98,8 @@ Host -> agent
                                        auto line-up (see curslink.lineup): show
                                        these patterns on these monitors until
                                        hidden (screens: [{screen, os, markers,
-                                       number, title}]); only to an agent whose
+                                       number, title, sets?, state?, lines?,
+                                       pattern?}]); only to an agent whose
                                        hello.features has "lineup"
     lineup_camera {id, live?} | {id, cancel}
                                        point the camera at the desk for that
