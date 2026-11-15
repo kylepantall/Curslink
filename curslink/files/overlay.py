@@ -85,51 +85,6 @@ def make_catcher(rect):
             p = QPainter(self)
             p.fillRect(self.rect(), QColor(0, 0, 0, 2))
             p.end()
-            if cocoa and not self.painted:
-                self.painted = True
-                # Shown and drawn: give the window server a moment to have it
-                # before the press comes, or the press goes to the app under it.
-                QTimer.singleShot(MAC_SHOWN_MS, self.ready)
-
-        def ready(self) -> None:
-            """Ask for the press (on a Mac, once the window is on screen:
-            0.4.100/0.4.101 pressed as it was still appearing, and the press
-            fell through to the desktop, which rubber-band selected)."""
-            if self.said_ready or self.dragging or self.ended:
-                return
-            self.said_ready = True
-            self.follow()
-            _say(f"nativedrag-ready {tid}")
-            if cocoa:
-                QTimer.singleShot(MAC_PRESS_WAIT_MS, self.missed)
-
-        def missed(self) -> None:
-            """macOS: no press came to this window in time. It went to the
-            app under the pointer, which is now rubber-band selecting or
-            dragging what's under it: let go there and press again, here
-            this time. Then start without a press if that misses too."""
-            if self.dragging or self.ended or not self.isVisible():
-                return
-            if not self.repressed:
-                self.repressed = True
-                self.follow()
-                self.raise_()
-                if mac_repress():
-                    _say("log the press missed the drag source; letting go and pressing again")
-                    QTimer.singleShot(MAC_REPRESS_WAIT_MS, self.start_appkit)
-                    return
-            self.start_appkit()
-
-        def abort(self) -> None:
-            """macOS: the drop was called off: put this window back under
-            the pointer, taking the drop itself, so the drag ends on nothing
-            (letting go elsewhere would drop the file there)."""
-            if not cocoa or self.ended:
-                return
-            pos = QCursor.pos()
-            self.move(pos.x() - size // 2, pos.y() - size // 2)
-            self.raise_()
-            mac_take_clicks(self, True)
 
         def _report(self, e) -> None:
             paths = local_paths(e.mimeData())
@@ -441,6 +396,51 @@ def make_drag_source(tid: str, paths: list[str], info: dict):
             p = QPainter(self)
             p.fillRect(self.rect(), QColor(0, 0, 0, 2))
             p.end()
+            if cocoa and not self.painted:
+                self.painted = True
+                # Shown and drawn: give the window server a moment to have it
+                # before the press comes, or the press goes to the app under it.
+                QTimer.singleShot(MAC_SHOWN_MS, self.ready)
+
+        def ready(self) -> None:
+            """Ask for the press (on a Mac, once the window is on screen:
+            0.4.100/0.4.101 pressed as it was still appearing, and the press
+            fell through to the desktop, which rubber-band selected)."""
+            if self.said_ready or self.dragging or self.ended:
+                return
+            self.said_ready = True
+            self.follow()
+            _say(f"nativedrag-ready {tid}")
+            if cocoa:
+                QTimer.singleShot(MAC_PRESS_WAIT_MS, self.missed)
+
+        def missed(self) -> None:
+            """macOS: no press came to this window in time. It went to the
+            app under the pointer, which is now rubber-band selecting or
+            dragging what's under it: let go there and press again, here
+            this time. Then start without a press if that misses too."""
+            if self.dragging or self.ended or not self.isVisible():
+                return
+            if not self.repressed:
+                self.repressed = True
+                self.follow()
+                self.raise_()
+                if mac_repress():
+                    _say("log the press missed the drag source; letting go and pressing again")
+                    QTimer.singleShot(MAC_REPRESS_WAIT_MS, self.start_appkit)
+                    return
+            self.start_appkit()
+
+        def abort(self) -> None:
+            """macOS: the drop was called off: put this window back under
+            the pointer, taking the drop itself, so the drag ends on nothing
+            (letting go elsewhere would drop the file there)."""
+            if not cocoa or self.ended:
+                return
+            pos = QCursor.pos()
+            self.move(pos.x() - size // 2, pos.y() - size // 2)
+            self.raise_()
+            mac_take_clicks(self, True)
 
         def mousePressEvent(self, e) -> None:  # noqa: N802
             if e.button() == Qt.MouseButton.LeftButton:
