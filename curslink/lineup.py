@@ -576,11 +576,21 @@ def line_up(photo: bytes, screens: list[dict], planned: dict[str, dict], referen
 
 # -- live: frame after frame from a phone moved about ------------------------------
 
-# A screen is lined up when its place is known to this share of the
-# reference screen's shorter side (a 27" monitor: under a millimetre).
-ALIGNED = 0.0025
-MIN_VIEWS = 8  # and from at least this many different places
-STEADY = 3  # and when this many solves in a row agree
+# A screen is lined up when the sums put its place to within this share of
+# the reference screen's shorter side (10 px on a 1620 px one): well under
+# what a pointer crossing an edge shows.
+ALIGNED = 0.006
+# ...or when that's as sure as this camera gets: a real phone's frames (focus
+# breathing, a rolling shutter, a smeared pattern) leave more doubt than the
+# sums can average away in a scan anyone would sit through, while the layout
+# itself stopped moving long before. So: enough views (or enough frames since
+# every screen was placed), the solves agreeing, and the doubt not silly.
+SETTLED_VIEWS = 12
+SETTLED_FRAMES = 30
+ROUGH = 0.03
+MIN_VIEWS = 6  # either way, from at least this many different places
+STEADY = 3  # and when this many solves in a row agree...
+STILL = 0.004  # ...to this share of the reference's shorter side
 
 
 class Live:
@@ -609,13 +619,27 @@ class Live:
         self.fresh = False  # a new view since the last solve
         self.history: list[dict[str, tuple[int, int]]] = []
         self.solves = 0
+        self.placed_at: int | None = None  # the frame at which every screen first had a place
+
+    @property
+    def short_side(self) -> float:
+        ref = self.result.reference if self.result is not None else self.reference
+        w, h = self.dims.get(ref) or next(iter(self.dims.values()), (1920.0, 1080.0))
+        return float(min(w, h))
 
     @property
     def tolerance(self) -> float:
         """What "lined up" asks of each screen's place, in the reference's pixels."""
-        ref = self.result.reference if self.result is not None else self.reference
-        w, h = self.dims.get(ref) or next(iter(self.dims.values()), (1920.0, 1080.0))
-        return max(2.0, ALIGNED * min(w, h))
+        return max(3.0, ALIGNED * self.short_side)
+
+    @property
+    def settled(self) -> bool:
+        """Has the scan gone on long enough that more of it won't change the
+        layout (if the solves agree)?"""
+        if self.result is None or self.result.views < MIN_VIEWS:
+            return False
+        return self.result.views >= SETTLED_VIEWS or (
+            self.placed_at is not None and self.frames - self.placed_at >= SETTLED_FRAMES)
 
     def frame(self, gray, focal: float | None = None) -> bool:
         """Take a frame in (a grey image); True if it gave a new view."""
@@ -630,6 +654,7 @@ class Live:
             self.scene = Scene(self.dims, self.reference, _sizes_mm(self.screens), size, self.focal)
             self.result = None
             self.history = []
+            self.placed_at = None
         self.frames += 1
         sightings = read_frame(gray, self.planned, self.dims, self.scene.tolerance, thorough=False)
         self.last_seen = [s.key for s in sightings]
@@ -652,12 +677,14 @@ class Live:
             return self.result
         self.solves += 1
         self.history = (self.history + [dict(self.result.positions)])[-STEADY:]
+        if self.placed_at is None and all(k in self.result.errors for k in self.wanted):
+            self.placed_at = self.frames
         return self.result
 
     def steady(self) -> bool:
         if len(self.history) < STEADY:
             return False
-        tol = self.tolerance
+        tol = max(2.0, STILL * self.short_side)
         first = self.history[0]
         return all(k in h and abs(h[k][0] - first[k][0]) <= tol and abs(h[k][1] - first[k][1]) <= tol
                    for h in self.history[1:] for k in first)
@@ -669,9 +696,10 @@ class Live:
         out = {}
         tol = self.tolerance
         enough = self.result is not None and self.result.views >= MIN_VIEWS
+        rough = max(tol, ROUGH * self.short_side) if enough and self.settled and self.steady() else tol
         for k in self.wanted:
             if self.result is not None and k in self.result.errors:
-                out[k] = "locked" if enough and self.result.errors[k] <= tol else "placing"
+                out[k] = "locked" if enough and self.result.errors[k] <= rough else "placing"
             else:
                 out[k] = "seen" if k in seen else "unseen"
         return out
@@ -700,7 +728,13 @@ class Live:
                 total += 0.15
                 continue
             err = self.result.errors.get(k, float("inf"))
-            sure = 1.0 if err <= tol else max(0.0, min(1.0, tol / err))
+            if state == "locked":
+                sure = 1.0
+            else:
+                # Either the doubt comes down to what's asked, or the scan settles.
+                sure = max(0.0, min(1.0, tol / err)) if err > 0 else 1.0
+                if self.placed_at is not None:
+                    sure = max(sure, min(0.95, (self.frames - self.placed_at) / SETTLED_FRAMES))
             total += 0.3 + 0.7 * views * sure
         p = total / len(states)
         if p >= 0.999 and not self.aligned:

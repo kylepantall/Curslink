@@ -73,9 +73,15 @@ the Layout page measures it (`curslink/lineup.py`, `lineup_scene.py`,
   likewise.
 - **Knowing when it's done.** The covariance of each screen's place comes
   out of the same equations, scaled by the noise actually seen. A screen is
-  "locked" when its corners are known to 0.25% of the reference's height
-  (under a millimetre on a 27" monitor) from at least 8 views; the scan
-  ends when all are and three solves in a row agree.
+  "locked" when its corners are known to 0.6% of the reference's shorter
+  side from at least 6 views, and the scan ends when all are and three
+  solves in a row agree. A real phone's frames (focus breathing, a rolling
+  shutter, smear) can leave more doubt than that however long the scan
+  goes on, while the layout itself stopped moving long before: so once
+  the scan has settled (12 views, or 30 frames since every screen had a
+  place) agreeing solves are enough, and the doubt is shown with the
+  result. The scan logs how it's going every two seconds (`gui.lineup`),
+  so a diagnostics file shows where a slow one spent its time.
 - **From 3D to the layout.** The pointer should cross where edges *look*
   as if they meet, so each pair of screens is projected, from the eye,
   onto the plane of one of them, and measured at the edges that touch. The

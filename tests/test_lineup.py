@@ -241,6 +241,43 @@ def test_live_scan_lines_up_an_angled_desk():
     assert live.scene.intr[0] == pytest.approx(1180, rel=0.015)
 
 
+def test_live_scan_with_a_real_phones_noise_still_ends_soon(monkeypatch):
+    """A real phone's frames fit worse than drawn ones (focus breathing, a
+    rolling shutter, smear): the doubt in each screen's place may never come
+    down to what a clean scan reaches, but the layout stops moving all the
+    same, and the scan ends when it has."""
+    import numpy as np
+
+    from lineup_desk import Camera, render
+
+    layout = DESK3D.layout()
+    planned = lineup.plan([{"key": s["key"], "width": s["width"], "height": s["height"]} for s in layout])
+    rng = np.random.default_rng(3)
+    find = lineup.find_markers
+    monkeypatch.setattr(lineup, "find_markers",
+                        lambda gray, thorough=True: {k: q + rng.normal(0, 2.0, q.shape) for k, q in find(gray, thorough).items()})
+    live = lineup.Live(layout, planned, "host/main")
+    places = figure_of_eight(24, (-150, 60, -1050), aim=(-200, 80, 0))
+    frames = 0
+    for lap in range(3):
+        for i, (at, target, roll) in enumerate(places):
+            cam = Camera(focal=1180 * (1 + rng.normal(0, 0.012)), k1=0.04, k2=-0.02, centre=(812, 588))
+            live.frame(render(DESK3D, planned, cam, cam.look(at + (rng.normal(0, 15, 3) if frames else 0), target, roll), seed=frames), 1180)
+            live.update()
+            frames += 1
+            if live.aligned:
+                break
+        if live.aligned:
+            break
+    assert live.aligned, (frames, live.result.errors if live.result else None)
+    assert frames <= 45
+    # Less sure than a clean scan, and it says so; but still the desk's layout.
+    assert max(live.result.errors.values()) > lineup.ALIGNED * 1440
+    true = lineup.arrange(layout, true_solution(DESK3D, "host/main", places[0][0]))
+    for key, (x, y) in true.positions.items():
+        assert live.result.positions[key] == pytest.approx((x, y), abs=40), key
+
+
 def test_live_scan_says_which_screen_is_missing():
     layout = DESK3D.layout()
     planned = lineup.plan([{"key": s["key"], "width": s["width"], "height": s["height"]} for s in layout])
