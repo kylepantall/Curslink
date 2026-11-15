@@ -552,7 +552,11 @@ class AppMirrorHost:
                 return None
             u, v = (x - rx) / rw, (y - ry) / rh
             vx, vy, vw, vh = s.view
-            tx, ty = s.target.clamp(vx + u * vw, vy + v * vh)
+            # Out onto the mirror's own edge first (where it's resized), not
+            # past it: moving on leaves it, moving back goes in again.
+            tx = min(max(vx + u * vw, vx + 1), vx + vw - 2)
+            ty = min(max(vy + v * vh, vy + 1), vy + vh - 2)
+            tx, ty = s.target.clamp(tx, ty)
             self.through = None
             self._hover(s, True)
             return (s.target, tx, ty)
