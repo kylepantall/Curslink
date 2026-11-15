@@ -457,6 +457,14 @@ class AppMirrorHost:
             return (1.0, 1.0)
         return (s.rect[2] / max(1.0, s.view[2]), s.rect[3] / max(1.0, s.view[3]))
 
+    def in_use(self):
+        """The screen showing the mirror the pointer is in (None: not in
+        one). Mirror mode treats that screen as the one in use, so going in
+        and out of an app's mirror doesn't switch the boundary mirror off
+        and on."""
+        s = self.sessions.get(self.through) if self.through else None
+        return s.target if s is not None and self.router.active_device == s.source else None
+
     def holds(self, device_id: str) -> bool:
         """Looking at ``device_id`` shouldn't take the pointer: it's showing
         the mirror the pointer is in."""

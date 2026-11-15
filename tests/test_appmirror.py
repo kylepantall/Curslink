@@ -200,6 +200,21 @@ def test_the_pointer_goes_through_the_mirror_to_the_app_and_comes_back_out():
     assert router.x < 500 and router.y == pytest.approx(688)
 
 
+def test_going_in_and_out_of_the_mirror_keeps_mirror_mode_on_the_screen_showing_it():
+    lay, transport, router, host, apps, lines, clock, ops, released = put_down()
+    planned = []
+    real = host._plan
+    host._plan = lambda screen: (planned.append(screen), real(screen))
+    pc = lay.screen("pc", "main")
+    router.on_pointer(900, 688)  # into Safari: input is on the Mac...
+    assert router.active_device == "mac" and apps.in_use() == pc
+    router.on_motion(10, 0)
+    router.on_motion(-500, 0)  # ...and out again
+    assert router.active_device == "pc" and apps.in_use() is None
+    # Mirror mode never thought the Mac's screen was the one in use.
+    assert planned and set(planned) == {pc}
+
+
 def test_looking_at_the_screen_with_the_mirror_doesnt_take_the_pointer_out():
     from curslink.gaze.zones import Target
 
@@ -482,6 +497,30 @@ def test_helper_shows_an_app_in_a_window_of_its_own_and_resizes_it_keeping_its_s
     box = tag.close_box().center()
     tag.mousePressEvent(Ev((box.x(), box.y()), (0, 0)))
     assert json.loads(out[-1].partition(" ")[2]) == {"id": show["id"], "closed": True}
+    # The host's next state drops it, after Qt has deleted it: no error.
+    from PySide6.QtCore import QCoreApplication, QEvent
+
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    helper.handle("mirror " + json.dumps({"captures": [], "shows": []}))
+    assert show["id"] not in helper.windows
+
+
+def test_helper_brings_the_mirror_in_front_of_other_apps_and_over_them_while_carried(qapp, monkeypatch):
+    from curslink.appmirror import helper as apphelper
+    from curslink.mirror.helper import MirrorHelper
+
+    fronts = []
+    monkeypatch.setattr(apphelper, "bring_to_front", lambda w, above_all: fronts.append(above_all))
+    helper = MirrorHelper([].append)
+    show = {"id": "app:mac:7:1", "app": True, "screen": "main", "os": [100, 100, 400, 300], "ratio": 4 / 3,
+            "label": "Safari · MacBook", "edges": [], "hover": False, "corner": 10, "raise": 0, "carried": True}
+    helper.handle("mirror " + json.dumps({"captures": [], "shows": [show]}))
+    helper.handle("mirror_image " + json.dumps({"id": show["id"], "jpg": jpeg(40, 30), "w": 40, "h": 30}))
+    assert fronts == [True]  # shown while carried: over every window
+    helper.handle("mirror " + json.dumps({"captures": [], "shows": [dict(show, carried=False)]}))
+    assert fronts == [True, False]  # put down: an ordinary window, at the front
+    helper.handle("mirror " + json.dumps({"captures": [], "shows": [{**show, "carried": False, "raise": 1}]}))
+    assert fronts == [True, False, False]  # pointed into: to the front again
 
 
 def test_helper_captures_a_window(qapp, monkeypatch):

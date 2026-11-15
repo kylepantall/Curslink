@@ -42,6 +42,43 @@ MAC_APP_FPS = 30
 TAG_H = 26
 
 
+def bring_to_front(widget: QWidget, above_all: bool) -> None:
+    """Put ``widget`` in front of every other app's windows, without taking
+    the focus. ``above_all``: and keep it there (while it's carried, so it
+    passes over every window); otherwise it's an ordinary window again, at
+    the front for now. Qt's raise_() alone can't do this from an app that
+    isn't the active one: other apps' windows stay on top of it."""
+    if not widget.isVisible():
+        return
+    platform = QGuiApplication.platformName()
+    try:
+        if platform == "windows" and sys.platform == "win32":  # pragma: no cover - Windows only
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.windll.user32
+            user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+                                            ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+            user32.SetWindowPos.restype = wintypes.BOOL
+            hwnd = wintypes.HWND(int(widget.winId()))
+            flags = 0x0001 | 0x0002 | 0x0010  # SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE
+            user32.SetWindowPos(hwnd, wintypes.HWND(-1), 0, 0, 0, 0, flags)  # HWND_TOPMOST: over everything
+            if not above_all:
+                user32.SetWindowPos(hwnd, wintypes.HWND(-2), 0, 0, 0, 0, flags)  # HWND_NOTOPMOST: front of the rest
+            return
+        if platform == "cocoa":  # pragma: no cover - macOS only
+            import objc
+
+            window = objc.objc_object(c_void_p=int(widget.winId())).window()
+            if window is not None:
+                window.setLevel_(3 if above_all else 0)  # NSFloatingWindowLevel / NSNormalWindowLevel
+                window.orderFrontRegardless()
+                return
+    except Exception:
+        log.debug("app mirror: couldn't bring the mirror to the front", exc_info=True)
+    widget.raise_()
+
+
 def logical_to_os(spec: dict, lx: float, ly: float, lw: float, lh: float) -> list[float]:
     """A rectangle in Qt's logical pixels back into the OS pixels the host
     placed it in (the inverse of :func:`curslink.mirror.helper.spec_to_logical`)."""
@@ -335,7 +372,9 @@ class AppWindow(MirrorWindow):
         self.tag: AppTag | None = None
         self._resize: tuple[str, QPointF, QRect] | None = None
         self._raised = spec.get("raise", 0)
+        self._carried = bool(spec.get("carried"))
         self.app_out = out
+        self._gone = False
         super().__init__(dict(spec, tune=False), out)
         flags = (Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool | Qt.WindowType.WindowDoesNotAcceptFocus
                  | Qt.WindowType.NoDropShadowWindowHint)
@@ -350,10 +389,13 @@ class AppWindow(MirrorWindow):
         ok = super().set(dict(spec, tune=False))
         if not ok or self.tag is None:
             return ok
-        if spec.get("raise", 0) != self._raised:
+        carried = bool(spec.get("carried"))
+        if spec.get("raise", 0) != self._raised or carried != self._carried:
+            # Pointed into, or picked up / put down: in front of every app
+            # here, and over all of them while it's carried.
             self._raised = spec.get("raise", 0)
-            if self.isVisible():
-                self.raise_()
+            self._carried = carried
+            self._to_front()
         self.setWindowOpacity(0.88 if spec.get("carried") and self.isVisible() else
                               (1.0 if self.isVisible() and time.monotonic() - self.shown_at > FADE_S else self.windowOpacity()))
         self._place_tag()
@@ -373,13 +415,24 @@ class AppWindow(MirrorWindow):
         was = self.isVisible()
         super().image(data)
         if self.isVisible() and not was:
+            self._to_front()
             self._place_tag()
+
+    def _to_front(self) -> None:
+        bring_to_front(self, self._carried)
+        if self.tag is not None and self.tag.isVisible():
+            self.tag.raise_()
 
     def closed(self) -> None:
         self._tell_view(closed=True)
         self.close_soon()
 
     def close_soon(self) -> None:
+        # Closed by its tag's x, then again when the host's next state drops
+        # it: by then Qt may have deleted it.
+        if self._gone:
+            return
+        self._gone = True
         if self.tag is not None:
             self.tag.hide()
             self.tag.deleteLater()
