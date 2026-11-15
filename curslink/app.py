@@ -1388,14 +1388,43 @@ def camera_seen_from_seat(device_id: str, head) -> None:
         log.info("where you sit: this computer's camera placed against the eye point the phone found")
 
 
+HEAD_STATES = {
+    "no_mirror": "not running, mirror mode is off",
+    "no_overlap": "waiting for an overlap lined up with the phone camera",
+    "starting": "the camera is starting",
+    "watching": "the camera sees you",
+    "no_face": "the camera is on but sees no face",
+    "failed": "the camera didn't start",
+}
+HEAD_SEEN_S = 3.0  # a face this recently: watching
+HEAD_STARTING_S = 45.0  # the camera's libraries can take this long to load (22 s on Kyle's PC)
+
+
+def head_state(wanted: bool, now: float, seen_at: float | None, since: float, alive: bool | None) -> str:
+    """What head tracking's camera is doing (a key of HEAD_STATES).
+    ``alive``: is our own camera process running (None: gaze switching has
+    the camera); ``since``: when the camera was asked for."""
+    if not wanted:
+        return "no_overlap"
+    if seen_at is not None and now - seen_at < HEAD_SEEN_S:
+        return "watching"
+    if alive is False:
+        return "failed"
+    if seen_at is None and now - since < HEAD_STARTING_S:
+        return "starting"
+    return "no_face"
+
+
 def start_head_follow(cfg: HostConfig, mirror, loop: asyncio.AbstractEventLoop, own_camera: bool):
     """``[layout] follow_head`` (experimental): overlaps stay lined up as
     your head moves, by this computer's camera. Needs mirror mode on (it's
     the mirror and the pointer through it that follow)."""
     if not cfg.follow_head and not getattr(cfg, "follow_seat", False):
         return None
+    camera_name = cfg.gaze.camera_name or f"camera {cfg.gaze.camera}"
     if mirror is None or not cfg.layout.mirror:
         log.info("head tracking is on but mirror mode isn't: nothing to keep lined up")
+        events.emit("head", state="no_mirror", camera=camera_name)
         return None
     # ``[layout] follow_seat`` alone: slowly, once you've settled somewhere new.
     slow = not cfg.follow_head
@@ -1413,8 +1442,27 @@ def start_head_follow(cfg: HostConfig, mirror, loop: asyncio.AbstractEventLoop, 
                         busy=lambda: mirror.tuning is not None or mirror.held is not None,
                         home_path=head_home_path(), slow=slow, moved=seat_moved if slow else None,
                         home_set=lambda at: camera_seen_from_seat(cfg.device_id, at))
-    tracking.head_listener = lambda t, at: loop.call_soon_threadsafe(follow.sample, t, at)
+    # What the camera is doing, for Settings to say under the switch: asked
+    # for and never seen to come on, it looked as if the switch did nothing.
+    seen: dict = {"at": None, "state": None, "since": time.monotonic()}
+
+    def heard(t, at) -> None:
+        seen["at"] = time.monotonic()
+        loop.call_soon_threadsafe(follow.sample, t, at)
+
+    tracking.head_listener = heard
     head = HeadCamera(follow, None, None)
+
+    def report() -> None:
+        tracker = head.tracker
+        state = head_state(
+            wanted=follow.wanted(), now=time.monotonic(), seen_at=seen["at"], since=seen["since"],
+            alive=tracker.alive() if own_camera and hasattr(tracker, "alive") else None)
+        if state != seen["state"]:
+            seen["state"] = state
+            log.info("head tracking: %s (%s)", HEAD_STATES[state], camera_name)
+            events.emit("head", state=state, camera=camera_name,
+                        error=getattr(tracker, "error", None) if state == "failed" else None)
 
     def camera_if_needed() -> None:
         # Gaze switching is off, so nothing else has the camera open. Only
@@ -1428,14 +1476,17 @@ def start_head_follow(cfg: HostConfig, mirror, loop: asyncio.AbstractEventLoop, 
             log.info("head tracking: an overlap to follow, so starting this computer's camera")
             head.tracker = HeadCameraProcess(cfg.gaze.camera, tracking.head_listener, cfg.gaze.camera_name)
             head.tracker.start()
+            seen["since"] = time.monotonic()
 
     async def tick() -> None:
         while True:
             await asyncio.sleep(1.0)
             camera_if_needed()
             follow.tick()
+            report()
 
     camera_if_needed()
+    report()
     head.ticker = loop.create_task(tick())
     return head
 

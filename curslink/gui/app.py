@@ -63,6 +63,7 @@ class Curslink(QObject):
         self.service.event.connect(self._on_identify)
         self.service.event.connect(self._on_lineup)
         self.calibrating = False  # host: the service gave the camera to calibration
+        self.head_status: dict | None = None  # host: what head tracking's camera is doing
         self.service.event.connect(self._on_calibrating)
         self.service.event.connect(self._on_paired)
         self.service.event.connect(self._on_agent_screens)
@@ -354,6 +355,11 @@ class Curslink(QObject):
             self.calibrating = bool(event.get("on"))
         elif event.get("event") == "seat":
             self._on_seat(event)
+        elif event.get("event") == "head":
+            # What head tracking's camera is doing, for Settings to say.
+            self.head_status = {k: event.get(k) for k in ("state", "camera", "error")}
+            if self.window is not None:
+                self.window.pages["settings"].show_head_status()
 
     def _on_seat(self, event: dict) -> None:
         """The host aimed the overlaps at somewhere new you've settled
@@ -381,6 +387,9 @@ class Curslink(QObject):
     def _on_service_state(self, state: str) -> None:
         if state != RUNNING:
             self.calibrating = False
+            self.head_status = None  # the next host says afresh
+            if self.window is not None:
+                self.window.pages["settings"].show_head_status()
         if state in (STOPPED, FAILED):
             self.status.stopped()
             if self._look is not None:

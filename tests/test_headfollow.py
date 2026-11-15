@@ -421,7 +421,7 @@ def test_follow_seat_alone_starts_the_slow_kind_and_says_when_it_moves(monkeypat
                 t += 0.1
                 head.follow.clock = lambda t=t: t
                 head.follow.sample(t, at)
-        assert said == [("seat", {"across": 0, "down": 0, "back": 160, "moved": [0, 0, 160]})]
+        assert [s for s in said if s[0] == "seat"] == [("seat", {"across": 0, "down": 0, "back": 160, "moved": [0, 0, 160]})]
         head.stop()
 
     asyncio.run(go())
@@ -456,3 +456,15 @@ def test_follow_seat_is_read_from_the_layout_table():
     assert _follow_head({}, "follow_seat") is False and _follow_head({"follow_seat": True}, "follow_seat") is True
     with pytest.raises(ConfigError, match="follow_seat"):
         _follow_head({"follow_seat": 1}, "follow_seat")
+
+
+def test_what_the_head_camera_is_doing():
+    from curslink.app import head_state
+
+    assert head_state(False, 10, None, 0, None) == "no_overlap"
+    assert head_state(True, 10, None, 0, True) == "starting"
+    assert head_state(True, 10, 9, 0, True) == "watching"
+    assert head_state(True, 60, None, 0, True) == "no_face"
+    assert head_state(True, 60, 20, 0, True) == "no_face"
+    assert head_state(True, 10, None, 0, False) == "failed"
+    assert head_state(True, 10, None, 0, None) == "starting"  # gaze switching has the camera

@@ -2219,6 +2219,12 @@ def test_the_seat_card_and_its_settings(desktop, qapp):
     from curslink.config import _follow_head
 
     assert _follow_head(desktop.config().raw().get("layout", {}), "follow_seat") is True
+    # The host says what the camera is doing, and Settings repeats it under the switches.
+    assert settings.head_note.isHidden()
+    desktop._on_calibrating({"event": "head", "state": "no_overlap", "camera": "USB2.0 IR UVC WebCam"})
+    assert not settings.head_note.isHidden() and "Line up with a camera" in settings.head_note.text()
+    desktop._on_calibrating({"event": "head", "state": "watching", "camera": "USB2.0 IR UVC WebCam"})
+    assert "USB2.0 IR UVC WebCam) is on and sees you" in settings.head_note.text()
     sent = []
     desktop.service.send = sent.append
     settings.seat_back.click()
