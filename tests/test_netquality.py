@@ -344,3 +344,23 @@ async def test_emit_check_survives_a_broken_mdns(monkeypatch):
 def test_network_optimise_config():
     assert network_optimise({}) is True
     assert network_optimise({"network": {"optimise": False}}) is False
+
+
+async def test_each_end_tells_the_other_its_interface(monkeypatch):
+    """So both Network pages can say e.g. "USB-C cable to Laptop" or
+    "Wi-Fi here, Ethernet on Laptop"."""
+    import curslink.net.server as server_mod
+
+    monkeypatch.setattr("curslink.net.client.NETSTATS_EVERY_S", 0.05)
+    monkeypatch.setattr(server_mod, "_IFACES", None)
+    monkeypatch.setattr(check, "interfaces", lambda: [
+        {"name": "Thunderbolt Bridge", "device": "bridge0", "ip": "127.0.0.1", "kind": "cable", "cable": "usb-c"}])
+    server, client, task, sink = await start()
+    conn = server.connections["laptop"]
+    await wait_for(lambda: (conn.netstats or {}).get("iface") is not None)
+    await wait_for(lambda: client.session.host_link.get("iface") is not None)
+    host_side = check.finish(server.link_report("laptop"), [])
+    agent_side = check.finish(client.link_report(), [])
+    assert host_side["how"] == "USB-C cable to Laptop"
+    assert agent_side["how"] == "USB-C cable to the host"
+    await stop(server, task)
