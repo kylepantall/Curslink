@@ -60,7 +60,7 @@ log = logging.getLogger(__name__)
 PREFIX = "app:"
 # The outer pixels of a mirror (on the device showing it) are its own:
 # the pointer stays there, to resize it, rather than going to the app.
-GRIP = 6
+GRIP = 10
 # A window counts as dragged by its title bar once it has moved this far
 # (OS pixels) with its size unchanged while the left button is held.
 MOVE_PX = 6
@@ -81,6 +81,11 @@ NEAR_PX = 40
 CORNERS = {"mac": 10, "windows": 8}
 # Moving a carried mirror sends its new place at most this often.
 PLACE_EVERY_S = 1 / 60
+# Frames a second: the app the pointer is in (at least, and at most), and
+# the other apps' while it is.
+IN_USE_FPS = 60
+MAX_IN_USE_FPS = 60
+IDLE_FPS = 10
 
 
 def is_app(stream_id) -> bool:
@@ -241,9 +246,22 @@ class AppMirrorDevice:
         self.skip = skip
         self.drags = WindowDragWatch(self._dragged, submit, call_later, lambda: self.ops.window_at_cursor(self.skip()),
                                      self.ops.window_rect)
-        self.casts = CastWatch(self._cast_moved, submit, call_later, self.ops.window_rect)
+        self.casts = CastWatch(self._cast_moved, submit, call_later, self._rect)
         self.submit = submit
         self.cast: dict[str, dict] = {}
+        # Windows hidden here while their app is cast: id -> [window, home, in use].
+        self.hidden: dict[str, list] = {}
+
+    def _rect(self, win: dict) -> list | None:
+        """Where a cast window is, as far as the host is concerned: a window
+        parked out of sight (macOS) is still at home."""
+        hid = next((h for h in self.hidden.values() if h[0].get("wid") == win.get("wid")), None)
+        if hid is None or hid[2] or not getattr(self.ops, "parks", lambda: False)():
+            return self.ops.window_rect(win)
+        now = self.ops.window_rect(win)
+        if now is None:
+            return list(hid[1]) if self.ops.window_alive(win) else None
+        return [hid[1][0], hid[1][1], now[2], now[3]]
 
     def on_button(self, button: str, pressed: bool) -> None:
         if self.ops.supported():
@@ -267,6 +285,18 @@ class AppMirrorDevice:
                    if is_app(c.get("id")) and isinstance(c.get("window"), dict)}
         self.cast = windows
         self.casts.set(windows)
+        hide = {c["id"]: bool(c.get("use")) for c in captures if c["id"] in windows and c.get("hide")}
+        for sid in [i for i in self.hidden if i not in hide]:
+            win, home, _use = self.hidden.pop(sid)
+            self.submit(lambda w=win, h=home: self.ops.show_window(w, h), lambda _r: None)
+        for sid, use in hide.items():
+            had = self.hidden.get(sid)
+            if had is not None and had[2] == use:
+                continue
+            win = windows[sid]
+            home = list(had[1]) if had is not None else list(win["os"])
+            self.hidden[sid] = [win, home, use]
+            self.submit(lambda w=win, h=home, u=use: self.ops.hide_window(w, h, u), lambda _r: None)
 
     def handle(self, data: dict) -> None:
         """``app_do`` from the host."""
@@ -278,14 +308,44 @@ class AppMirrorDevice:
             self.submit(lambda: self.ops.raise_window(win), lambda _r: None)
         elif what == "restore" and _rect(data.get("os")) is not None:
             rect = list(data["os"])
-            self.submit(lambda: self.ops.move_window(win, rect), lambda _r: None)
+            self.submit(lambda: self._put(sid, win, rect), lambda _r: None)
             # Again in a moment: the drag ending (a Windows snap at the edge,
             # or the window let go of at the parked pointer) can come after.
-            self.call_later(RESTORE_AGAIN_S, lambda: self.submit(lambda: self.ops.move_window(win, rect),
+            self.call_later(RESTORE_AGAIN_S, lambda: self.submit(lambda: self._put(sid, win, rect),
                                                                  lambda _r: None))
+        elif what == "resize" and isinstance(data.get("size"), list) and len(data["size"]) == 2:
+            # Its mirror was resized: the app is too, so it lays itself out
+            # for the new size rather than being stretched.
+            try:
+                w, h = (max(80.0, float(v)) for v in data["size"])
+            except (TypeError, ValueError):
+                return
+            had = self.hidden.get(sid)
+            if had is not None:
+                had[1] = [had[1][0], had[1][1], w, h]
+            self.submit(lambda: self._resize(sid, win, w, h), lambda _r: None)
         elif what == "stop":
             self.cast.pop(sid, None)
             self.casts.set(self.cast)
+
+    def _put(self, sid, win: dict, rect: list) -> None:
+        """Back where it was (off the event loop): or, hidden, parked again."""
+        had = self.hidden.get(sid)
+        if had is not None:
+            had[1] = list(rect)
+            if not had[2] and getattr(self.ops, "parks", lambda: False)():
+                self.ops.hide_window(win, list(rect), False)
+                return
+        self.ops.move_window(win, rect)
+
+    def _resize(self, sid, win: dict, w: float, h: float) -> None:
+        had = self.hidden.get(sid)
+        if had is not None and not had[2] and getattr(self.ops, "parks", lambda: False)():
+            self.ops.hide_window(win, had[1], False)
+            return
+        now = self.ops.window_rect(win)
+        if now is not None:
+            self.ops.move_window(win, [now[0], now[1], w, h])
 
     def helper_line(self, line: str) -> bool:
         """``app_view {...}`` from the helper (a mirror here was resized or
@@ -321,6 +381,9 @@ class AppSession:
     raised: int = 0           # bumped each time the pointer goes into it
     hover: bool = False
     phone: bool = False
+    k: float = 1.0            # its mirror's OS pixels per pixel of the window
+    dpr: float | None = None  # the pixel ratio of the screen showing it (as its helper says)
+    sized: bool = False       # resized where it's shown (so it keeps that size)
     started_at: float = field(default_factory=time.monotonic)
 
     @property
@@ -361,6 +424,8 @@ class AppMirrorHost:
         self._n = 0
         self._phone_press: str | None = None  # a phone the left button went down on
         self.names = {d.id: d.name for d in layout.devices.values()}
+        self.hide = True  # hide a cast app's window on its own computer
+        self.dprs: dict[tuple[str, str], float] = {}  # (device, screen) -> its pixel ratio, as helpers say
 
     # -- who can ------------------------------------------------------------------
     def is_phone(self, device_id: str) -> bool:
@@ -576,9 +641,11 @@ class AppMirrorHost:
             return
         old = s.target
         s.target = event.screen
-        k = 1 / self._scale(old, s.target)
+        s.dpr = self.dprs.get((s.target.device_id, s.target.id))
+        k = 1 / self._scale(old, s.target) if s.phone else self._k(s.source, s.window, s.target) / s.k
         u, v = self.carrying[1], self.carrying[2]
         vw, vh = self._fitted(s.target, s.view[2] * k, s.view[3] * k)
+        s.k = vw / max(1.0, s.rect[2])
         s.view = self._clamped(s.target, self.router.x - u * vw, self.router.y - v * vh, vw, vh)
         s.key += 1
         log.info("app mirror: %s carried on to %s", s.name, event.to_device)
@@ -605,8 +672,8 @@ class AppMirrorHost:
             rect = (lx, ly, w, h)
             app = str(window.get("app") or "App")
             name = f"{app} · {self.names.get(source, source)}"
-        k = self._scale(src_screen, target)
-        vw, vh = self._fitted(target, rect[2] / k, rect[3] / k)
+        k = 1 / self._scale(src_screen, target) if phone else self._k(source, window, target)
+        vw, vh = self._fitted(target, rect[2] * k, rect[3] * k)
         at = window.get("at") if not phone else None
         if not phone:
             u, v = (float(at[0]), float(at[1])) if isinstance(at, list) and len(at) == 2 else (0.5, 0.02)
@@ -615,8 +682,8 @@ class AppMirrorHost:
         view = self._clamped(target, self.router.x - u * vw, self.router.y - v * vh, vw, vh)
         self._n += 1
         sid = f"{PREFIX}{source}:{window.get('wid', 'screen')}:{self._n}"
-        s = AppSession(sid, source, {k2: window[k2] for k2 in ("wid", "pid", "app", "title") if k2 in window},
-                       src_screen, rect, target, view, name, phone=phone)
+        s = AppSession(sid, source, {k2: window[k2] for k2 in ("wid", "pid", "app", "title", "scale") if k2 in window},
+                       src_screen, rect, target, view, name, phone=phone, k=vw / max(1.0, rect[2]))
         self.sessions[sid] = s
         self.carrying = (sid, u, v)
         log.info("app mirror: casting %s from %s to %s/%s (%.0fx%.0f shown at %.0fx%.0f)", name, source,
@@ -698,12 +765,10 @@ class AppMirrorHost:
         screen = self._screen_os(device_id, ox + w / 2, oy + min(h / 2, 20)) or s.src_screen
         lx, ly = screen.from_os(ox, oy)
         resized = abs(w - s.rect[2]) >= 1 or abs(h - s.rect[3]) >= 1
-        old_w = s.rect[2]
         s.src_screen, s.rect = screen, (lx, ly, w, h)
         if resized:
             # The mirror keeps its scale, and its top-left corner.
-            k = s.view[2] / max(1.0, old_w)
-            vw, vh = self._fitted(s.target, w * k, h * k)
+            vw, vh = self._fitted(s.target, w * s.k, h * s.k)
             s.view = self._clamped(s.target, s.view[0], s.view[1], vw, vh)
             s.key += 1
         self.changed()
@@ -715,13 +780,43 @@ class AppMirrorHost:
         if data.get("closed"):
             self.stop(s.id)
             return
+        if isinstance(data.get("dpr"), (int, float)) and 0.5 <= data["dpr"] <= 4:
+            self._got_dpr(s, float(data["dpr"]))
         r = _rect(data.get("os"))
         if r is None or (self.carrying is not None and self.carrying[0] == s.id):
             return
         ox, oy, w, h = r
         screen = self._screen_os(device_id, ox + w / 2, oy + h / 2) or s.target
         lx, ly = screen.from_os(ox, oy)
+        resized = abs(w - s.view[2]) >= 2 or abs(h - s.view[3]) >= 2
         s.target, s.view = screen, (lx, ly, w, h)
+        if resized:
+            s.sized = True
+            if s.phone:
+                s.k = w / max(1.0, s.rect[2])  # a phone's screen can't change: the picture scales
+            else:
+                # The app itself takes the new size (it lays itself out
+                # again, sharp); its mirror follows when it has.
+                self._do(s, "resize", size=[round(w / s.k), round(h / s.k)])
+        self.changed()
+
+    def _got_dpr(self, s: AppSession, dpr: float) -> None:
+        """The helper showing ``s`` said its screen's pixel ratio: a Windows
+        screen's scaling sets how big the app is shown there."""
+        self.dprs[(s.target.device_id, s.target.id)] = dpr
+        if s.dpr == dpr:
+            return
+        s.dpr = dpr
+        if s.phone or s.sized or self.platform(s.target.device_id) != "windows":
+            self.changed()
+            return
+        k = self._k(s.source, s.window, s.target)
+        if abs(k - s.k) > 0.01:
+            vx, vy, vw, vh = s.view
+            nw, nh = self._fitted(s.target, s.rect[2] * k, s.rect[3] * k)
+            s.view = self._clamped(s.target, vx + (vw - nw) / 2, vy + (vh - nh) / 2, nw, nh)
+            s.k = nw / max(1.0, s.rect[2])
+            s.key += 1
         self.changed()
 
     # -- what each device captures and shows ---------------------------------------------
@@ -744,10 +839,22 @@ class AppMirrorHost:
             else:
                 ox, oy = s.src_screen.to_os(s.rect[0], s.rect[1])
                 os_rect = [ox, oy, round(s.rect[2]), round(s.rect[3])]
+            in_use = self.through == s.id
+            rate = fps(s.source, target)
+            # The app in use goes first: as many frames as the link takes;
+            # the others, while it is, fewer.
+            rate = min(MAX_IN_USE_FPS, max(IN_USE_FPS, rate)) if in_use else (
+                min(rate, IDLE_FPS) if self.through is not None else rate)
             capture = {"id": s.id, "screen": s.src_screen.id, "os": os_rect, "screen_os": screen_os(s.src_screen),
-                       "fps": fps(s.source, target), "key": s.key}
+                       "fps": rate, "key": s.key}
             if not s.phone:
-                capture.update(window=dict(s.window), cursor=True)
+                # The pointer isn't in the picture: the mirror draws it where
+                # the host says (no waiting for a frame), in the look sent.
+                capture.update(window=dict(s.window), pointer=True, use=in_use, hide=self.hide)
+                # No more pixels than the mirror has (the app is drawn at its
+                # own resolution, then sent at the screen's).
+                px = (s.dpr or 2.0) if self.platform(target) == "mac" else 1.0
+                capture["out"] = [max(16, round(s.view[2] * px)), max(16, round(s.view[3] * px))]
             if tiles(target):
                 capture.update(tiles=True, quality=quality(s.source, target))
             src["captures"].append(capture)
@@ -775,6 +882,33 @@ class AppMirrorHost:
             if best is None or d < best[0]:
                 best = (d, sc)
         return best[1] if best else None
+
+    def _k(self, source: str, window: dict, target) -> float:
+        """The mirror's OS pixels per pixel of the window: the app is shown at
+        the size it is in its own logical pixels, as the screen showing it
+        counts them (its own scaling), like a window moved to another
+        monitor; so it's sharp and its text the size of that screen's own."""
+        src = float(window.get("scale") or 1.0) if self.platform(source) == "windows" else 1.0
+        dst = 1.0
+        if self.platform(target.device_id) == "windows":
+            dst = self.dprs.get((target.device_id, target.id)) or 1.0
+        k = dst / max(0.25, src)
+        return k if 0.2 <= k <= 5 else 1.0
+
+    def pointers(self) -> dict[str, tuple[str, tuple[float, float] | None]]:
+        """Where the pointer is in each app's mirror: id -> (device showing
+        it, (x, y) as fractions of it, or None when it isn't in it)."""
+        out = {}
+        r = self.router
+        for s in self.sessions.values():
+            p = None
+            if s.id == self.through and not s.phone and r.active_device == s.source:
+                rx, ry, rw, rh = s.rect
+                p = ((r.x - rx) / max(1.0, rw), (r.y - ry) / max(1.0, rh))
+                if not (-0.01 <= p[0] <= 1.01 and -0.01 <= p[1] <= 1.01):
+                    p = None
+            out[s.id] = (s.target.device_id, p)
+        return out
 
     def _scale(self, src, dst) -> float:
         """``src``'s pixels per ``dst`` pixel on the desk, from the two

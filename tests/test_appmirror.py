@@ -59,7 +59,7 @@ class Ops:
     """Window operations, without a desktop."""
 
     def __init__(self):
-        self.raised, self.moved = [], []
+        self.raised, self.moved, self.hidden, self.shown = [], [], [], []
 
     def supported(self):
         return True
@@ -76,6 +76,19 @@ class Ops:
     def move_window(self, win, rect):
         self.moved.append((win, rect))
         return True
+
+    def hide_window(self, win, home, in_use):
+        self.hidden.append((win["wid"], list(home), in_use))
+        return True
+
+    def show_window(self, win, home):
+        self.shown.append((win["wid"], home))
+
+    def window_alive(self, win):
+        return True
+
+    def parks(self):
+        return False
 
 
 def now(fn, done):
@@ -142,7 +155,10 @@ def test_dragging_a_window_over_the_edge_casts_it_and_puts_the_real_one_back():
     assert restore["do"] == "restore" and restore["os"] == [100, 50, 800, 600] and restore["window"]["wid"] == 7
     capture, = transport.of("mirror", "mac")[-1]["captures"]
     assert capture["id"] == sid and capture["window"]["wid"] == 7 and capture["os"] == [100, 50, 800, 600]
-    assert capture["cursor"] is True and capture["tiles"] is True
+    # No pointer in the picture (the mirror draws it); the Mac hides its own
+    # window; no bigger than shown (a Windows screen here: its pixels).
+    assert "cursor" not in capture and capture["pointer"] is True and capture["tiles"] is True
+    assert capture["hide"] is True and capture["use"] is False and capture["out"] == [800, 600]
     # Not a file: the Mac got its button up, no drag_out.
     assert not transport.of("drag_out") and {"button": "left", "pressed": False} in transport.of("button", "mac")
     # This computer shows it, under the pointer where it was grabbed, the
@@ -293,16 +309,71 @@ def test_the_app_resized_on_its_computer_keeps_the_mirrors_scale():
     assert capture["os"] == [100, 50, 1000, 500]
 
 
-def test_resizing_the_mirror_where_its_shown_moves_where_input_goes():
+def test_resizing_the_mirror_where_its_shown_resizes_the_app():
     lay, transport, router, host, apps, lines, clock, ops, released = put_down()
     sid, = apps.sessions
-    apps.local.helper_line('app_view {"id": "%s", "os": [0, 0, 400, 300]}' % sid)
-    assert apps.sessions[sid].view == (0, 0, 400, 300)
-    router.on_pointer(200, 150)  # the middle of the half size mirror
+    # Made wider and shorter where it's shown: any shape.
+    apps.local.helper_line('app_view {"id": "%s", "os": [0, 0, 1000, 400]}' % sid)
+    assert apps.sessions[sid].view == (0, 0, 1000, 400)
+    # The app itself is asked to be that size (it lays itself out again).
+    resize = transport.of("app_do", "mac")[-1]
+    assert resize["do"] == "resize" and resize["size"] == [1000, 400]
+    # The Mac says it is (or the nearest it'll go): the mirror follows it.
+    apps.on_message("mac", "app_window", {"id": sid, "os": [100, 50, 1000, 420]})
+    assert apps.sessions[sid].view[2:] == (1000, 420)
+    router.on_pointer(500, 210)  # the middle of the mirror
     enter = transport.of("enter", "mac")[-1]
-    assert (enter["x"], enter["y"]) == (500, 350)
-    router.on_motion(10, 10)  # one mirror pixel is two of the app's
-    assert transport.of("move", "mac")[-1] == {"x": 520, "y": 370}
+    assert (enter["x"], enter["y"]) == (600, 260)
+    router.on_motion(10, 10)  # one for one
+    assert transport.of("move", "mac")[-1] == {"x": 610, "y": 270}
+
+
+def test_an_app_is_shown_at_its_own_size_in_the_scaling_of_the_screen_its_on():
+    lay, transport, router, host, apps, lines, clock, ops, released = make()
+    apps.platform = lambda device_id: "windows"  # two PCs, here
+    # A window on a 150% screen: 1200 x 900 pixels, 800 x 600 of its own.
+    router.switch_to(lay.screen("mac", "main"), 2400, 300, "edge")
+    router.on_button("left", True)
+    apps.on_message("mac", "app_drag", {"window": dict(SAFARI, os=[100, 50, 1200, 900], start=[100, 50, 1200, 900], scale=1.5)})
+    router.switch_to(lay.screen("pc", "main"), 1900, 300, "edge")
+    sid, = apps.sessions
+    assert apps.sessions[sid].view[2:] == (800, 600)  # this screen's at 100% (until it says)
+    # It says it's at 125%: 1000 x 750 of its pixels.
+    router.on_button("left", False)
+    apps.local.helper_line('app_view {"id": "%s", "dpr": 1.25}' % sid)
+    assert apps.sessions[sid].view[2:] == (1000, 750)
+    capture, = transport.of("mirror", "mac")[-1]["captures"]
+    assert capture["out"] == [1000, 750]  # sent at the size shown, not the window's 1200 x 900
+
+
+def test_the_app_in_use_streams_first_and_the_mirror_draws_its_pointer():
+    lay, transport, router, host, apps, lines, clock, ops, released = put_down()
+    sid, = apps.sessions
+    capture, = transport.of("mirror", "mac")[-1]["captures"]
+    assert capture["use"] is False and capture["fps"] == 30
+    router.on_pointer(900, 688)  # into Safari
+    capture, = transport.of("mirror", "mac")[-1]["captures"]
+    assert capture["use"] is True and capture["fps"] == 60
+    # Where it is in Safari goes to the mirror as it moves, as fractions.
+    clock.t = 5.0
+    router.on_motion(80, 60)
+    pointer = json.loads([ln for ln in lines if ln.startswith("mirror_pointer ")][-1].partition(" ")[2])
+    assert pointer == {"id": sid, "x": 0.6, "y": 0.6}
+    router.on_motion(-900, 0)  # out
+    pointer = json.loads([ln for ln in lines if ln.startswith("mirror_pointer ")][-1].partition(" ")[2])
+    assert pointer == {"id": sid, "hide": True}
+
+
+def test_the_app_is_hidden_on_its_own_computer_while_its_cast():
+    lay, transport, router, host, apps, lines, clock, ops, released = make()
+    router.on_button("left", True)
+    apps.on_drag("pc", {"window": dict(SAFARI, app="Notepad", wid=99)})
+    router.on_pointer(1919, 300)  # over the edge to the Mac: cast
+    router.on_button("left", False)
+    assert ops.hidden[-1] == (99, [100, 50, 800, 600], False)
+    sid, = apps.sessions
+    apps.stop(sid)
+    assert ops.shown == [(99, [100, 50, 800, 600])]
 
 
 def test_this_computers_own_window_cast_to_the_mac():
@@ -457,7 +528,7 @@ def jpeg(w, h, color="tomato"):
     return base64.b64encode(bytes(data.data())).decode()
 
 
-def test_helper_shows_an_app_in_a_window_of_its_own_and_resizes_it_keeping_its_shape(qapp):
+def test_helper_shows_an_app_in_a_window_of_its_own_and_resizes_it(qapp):
     from PySide6.QtCore import QPointF
 
     from curslink.appmirror.helper import AppWindow
@@ -491,7 +562,7 @@ def test_helper_shows_an_app_in_a_window_of_its_own_and_resizes_it_keeping_its_s
     window.mouseMoveEvent(Ev((498, 298), (598, 398)))
     window.mouseReleaseEvent(Ev((498, 298), (598, 398)))
     view = json.loads([ln for ln in out if ln.startswith("app_view ")][-1].partition(" ")[2])
-    assert view["id"] == show["id"] and view["os"][2] == 500 and view["os"][3] == pytest.approx(375, abs=1)
+    assert view["id"] == show["id"] and view["os"][2:] == [500, 300]  # any shape: the app follows
     # The tag's x closes it.
     tag = window.tag
     box = tag.close_box().center()
@@ -553,3 +624,50 @@ def test_helper_captures_a_window(qapp, monkeypatch):
     assert frames and all(f["id"] == capture["id"] and f["w"] == 300 and f["h"] == 200 for f in frames)
     helper.handle('mirror {"captures": [], "shows": []}')
     assert not helper.captures
+
+
+def test_helper_sends_the_app_at_the_size_shown_with_its_menus_on_it(qapp, monkeypatch):
+    from PySide6.QtGui import QColor, QImage
+
+    from curslink.appmirror import helper as apphelper
+    from curslink.appmirror import windows
+    from curslink.mirror.helper import MirrorHelper
+
+    out = []
+    monkeypatch.setattr(apphelper.sys, "platform", "win32")
+    img = QImage(600, 400, QImage.Format.Format_RGB32)
+    img.fill(QColor("steelblue"))
+    monkeypatch.setattr(apphelper, "win_print_window", lambda hwnd: (img, [10, 10, 600, 400]))
+    monkeypatch.setattr(windows, "window_rect", lambda win: [10, 10, 600, 400])
+    # A context menu open on it, 100 x 100 at (310, 210): its own window.
+    monkeypatch.setattr(windows, "popups", lambda win: [(77, [310, 210, 100, 100])])
+    menu = QImage(100, 100, QImage.Format.Format_RGB32)
+    menu.fill(QColor("white"))
+    monkeypatch.setattr(apphelper, "popup_image", lambda wid, rect: menu)
+    helper = MirrorHelper(out.append)
+    capture = {"id": "app:pc:9:1", "screen": "main", "os": [10, 10, 600, 400], "fps": 30, "window": {"wid": 9},
+               "key": 1, "use": True, "out": [300, 200]}
+    helper.handle("mirror " + json.dumps({"captures": [capture], "shows": []}))
+    got = helper.captures[capture["id"]].image()
+    # Half size, as the mirror shows it, with the menu where it is on the window.
+    assert (got.width(), got.height()) == (300, 200)
+    assert QColor(got.pixel(175, 125)).name() == "#ffffff"
+    assert QColor(got.pixel(50, 50)).name() == QColor("steelblue").name()
+    helper.handle('mirror {"captures": [], "shows": []}')
+
+
+def test_helper_mirror_says_its_screens_scaling_and_draws_the_pointer(qapp):
+    from curslink.mirror.helper import MirrorHelper
+
+    out = []
+    helper = MirrorHelper(out.append)
+    show = {"id": "app:mac:7:1", "app": True, "screen": "main", "os": [100, 100, 400, 300], "ratio": 4 / 3,
+            "label": "Safari · MacBook", "edges": [], "hover": False, "corner": 10, "raise": 0}
+    helper.handle("mirror " + json.dumps({"captures": [], "shows": [show]}))
+    helper.handle("mirror_image " + json.dumps({"id": show["id"], "jpg": jpeg(40, 30), "w": 40, "h": 30}))
+    said = [json.loads(ln.partition(" ")[2]) for ln in out if ln.startswith("app_view ")]
+    assert said and said[0]["id"] == show["id"] and said[0]["dpr"] > 0
+    helper.handle("mirror_pointer " + json.dumps({"id": show["id"], "x": 0.5, "y": 0.5}))
+    window = helper.windows[show["id"]]
+    assert window.pointer == (0.5, 0.5)
+    window.grab()  # paints, pointer and all

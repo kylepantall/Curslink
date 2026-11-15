@@ -33,6 +33,12 @@ def supported() -> bool:
     return sys.platform in ("win32", "darwin")
 
 
+def parks() -> bool:
+    """Hiding a window moves it out of sight (macOS), rather than making it
+    see-through where it is (Windows)."""
+    return sys.platform == "darwin"
+
+
 # ------------------------------------------------------------------ Windows
 def _u32():  # pragma: no cover - Windows only
     import ctypes
@@ -104,8 +110,15 @@ def _win_at(x: int, y: int, skip: set[int]) -> dict | None:  # pragma: no cover 
         return None
     title = ctypes.create_unicode_buffer(256)
     u.GetWindowTextW(root, title, 256)
+    scale = 1.0
+    try:
+        dpi = u.GetDpiForWindow(root)
+        if dpi:
+            scale = round(dpi / 96, 3)
+    except (AttributeError, OSError):
+        pass
     return {"wid": int(root), "pid": int(pid.value), "app": _win_process_name(pid.value) or cls.value,
-            "title": title.value, "os": rect}
+            "title": title.value, "os": rect, "scale": scale}
 
 
 def _win_move(win: dict, rect) -> bool:  # pragma: no cover - Windows only
@@ -127,6 +140,107 @@ def _win_move(win: dict, rect) -> bool:  # pragma: no cover - Windows only
     w, ht = int(rect[2]) + left + right, int(rect[3]) + top + bottom
     # SWP_NOZORDER | SWP_NOACTIVATE
     return bool(u.SetWindowPos(h, None, x, y, w, ht, 0x0004 | 0x0010))
+
+
+_GWL_EXSTYLE = -20
+_WS_EX_LAYERED, _WS_EX_TRANSPARENT = 0x00080000, 0x00000020
+_win_styles: dict[int, int] = {}  # hidden windows: their own extended style, to put back
+
+
+def _win_exstyle(hwnd: int, value: int | None = None) -> int:  # pragma: no cover - Windows only
+    import ctypes
+    import ctypes.wintypes as wt
+
+    u = _u32()
+    u.GetWindowLongPtrW.restype = ctypes.c_ssize_t
+    u.GetWindowLongPtrW.argtypes = [wt.HWND, ctypes.c_int]
+    u.SetWindowLongPtrW.restype = ctypes.c_ssize_t
+    u.SetWindowLongPtrW.argtypes = [wt.HWND, ctypes.c_int, ctypes.c_ssize_t]
+    if value is None:
+        return int(u.GetWindowLongPtrW(wt.HWND(hwnd), _GWL_EXSTYLE))
+    return int(u.SetWindowLongPtrW(wt.HWND(hwnd), _GWL_EXSTYLE, value))
+
+
+def _win_hide(win: dict, in_use: bool) -> bool:  # pragma: no cover - Windows only
+    """Invisible where it is (all but see-through: it still draws, so it can
+    still be captured, and still takes the input sent to it while it's in
+    use); clicks pass through it while it isn't."""
+    import ctypes.wintypes as wt
+
+    hwnd = int(win["wid"])
+    u = _u32()
+    if hwnd not in _win_styles:
+        style = _win_exstyle(hwnd)
+        if style & _WS_EX_LAYERED:
+            return False  # it sets its own see-through (and would lose it)
+        _win_styles[hwnd] = style
+    style = _win_styles[hwnd] | _WS_EX_LAYERED | (0 if in_use else _WS_EX_TRANSPARENT)
+    _win_exstyle(hwnd, style)
+    u.SetLayeredWindowAttributes.argtypes = [wt.HWND, wt.DWORD, wt.BYTE, wt.DWORD]
+    return bool(u.SetLayeredWindowAttributes(wt.HWND(hwnd), 0, 1, 0x2))  # LWA_ALPHA, 1 of 255
+
+
+def _win_show(win: dict) -> None:  # pragma: no cover - Windows only
+    import ctypes
+    import ctypes.wintypes as wt
+
+    hwnd = int(win["wid"])
+    style = _win_styles.pop(hwnd, None)
+    if style is None and _u32().IsWindow(hwnd):
+        # Hidden by another of our processes: hidden as we hide (alpha 1)?
+        alpha, flags = wt.BYTE(), wt.DWORD()
+        if (_u32().GetLayeredWindowAttributes(wt.HWND(hwnd), None, ctypes.byref(alpha), ctypes.byref(flags))
+                and flags.value & 0x2 and alpha.value == 1):
+            style = _win_exstyle(hwnd) & ~(_WS_EX_LAYERED | _WS_EX_TRANSPARENT)
+    if style is not None and _u32().IsWindow(hwnd):
+        _win_exstyle(hwnd, style)
+        _u32().RedrawWindow(hwnd, None, None, 0x0001 | 0x0004 | 0x0080 | 0x0400)  # invalidate, erase, children, frame
+
+
+def _win_is_popup(hwnd: int, main: int) -> bool:  # pragma: no cover - Windows only
+    """A menu, a dropdown, a tooltip or a dialog of ``main``'s (not another
+    window of the same app)."""
+    import ctypes
+    import ctypes.wintypes as wt
+
+    u = _u32()
+    u.GetWindow.restype = wt.HWND
+    if int(u.GetWindow(wt.HWND(hwnd), 4) or 0) == main:  # GW_OWNER
+        return True
+    cls = ctypes.create_unicode_buffer(64)
+    u.GetClassNameW(wt.HWND(hwnd), cls, 64)
+    if cls.value == "#32768":  # a menu
+        return True
+    u.GetWindowLongW.restype = ctypes.c_long
+    style = u.GetWindowLongW(wt.HWND(hwnd), -16) & 0xFFFFFFFF  # GWL_STYLE
+    return bool(style & 0x80000000) and (style & 0x00C00000) != 0x00C00000  # WS_POPUP, no WS_CAPTION
+
+
+def _win_popups(win: dict) -> list[tuple[int, list[int]]]:  # pragma: no cover - Windows only
+    """The app's other windows showing now (its menus, dropdowns, tooltips),
+    front last."""
+    import ctypes
+    import ctypes.wintypes as wt
+
+    u = _u32()
+    main, pid = int(win["wid"]), int(win.get("pid") or 0)
+    found: list[tuple[int, list[int]]] = []
+    proc = ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
+
+    def each(hwnd, _l):
+        h = int(hwnd or 0)
+        if h and h != main and u.IsWindowVisible(hwnd):
+            owner = wt.DWORD()
+            u.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+            if owner.value == pid and _win_is_popup(h, main):
+                rect = _win_rect(h)
+                if rect is not None and rect[2] > 0 and rect[3] > 0:
+                    found.append((h, rect))
+        return True
+
+    u.EnumWindows(proc(each), 0)
+    found.reverse()  # EnumWindows goes front to back
+    return found
 
 
 def _win_raise(win: dict) -> None:  # pragma: no cover - Windows only
@@ -209,6 +323,35 @@ def _mac_move(win: dict, rect) -> bool:  # pragma: no cover - macOS only
     size = AX.AXValueCreate(AX.kAXValueCGSizeType, Quartz.CGSizeMake(float(rect[2]), float(rect[3])))
     AX.AXUIElementSetAttributeValue(w, "AXSize", size)
     return ok
+
+
+def _mac_popups(win: dict) -> list[tuple[int, list[float]]]:  # pragma: no cover - macOS only
+    """The app's menus, popovers and tooltips showing now, front last."""
+    import Quartz
+
+    pid, main = int(win.get("pid") or 0), int(win["wid"])
+    infos = Quartz.CGWindowListCopyWindowInfo(Quartz.kCGWindowListOptionOnScreenOnly, Quartz.kCGNullWindowID) or []
+    found = []
+    for info in infos:  # front to back
+        if int(info.get("kCGWindowOwnerPID", 0)) != pid or int(info.get("kCGWindowNumber", 0)) == main:
+            continue
+        if int(info.get("kCGWindowLayer", 0)) <= 0 or float(info.get("kCGWindowAlpha", 1)) <= 0:
+            continue  # its other windows are its own; menus and popovers float above
+        found.append((int(info.get("kCGWindowNumber", 0)), _mac_bounds(info)))
+    found.reverse()
+    return found
+
+
+def _mac_park_at() -> tuple[float, float] | None:  # pragma: no cover - macOS only
+    """The bottom-right corner of the desk (macOS won't put a window
+    wholly off every screen: there, all but a pixel of it is)."""
+    from curslink.displays import os_screens
+
+    screens = os_screens()
+    if not screens:
+        return None
+    s = max(screens, key=lambda d: (d["x"] + d["width"]) + (d["y"] + d["height"]))
+    return (s["x"] + s["width"] - 1, s["y"] + s["height"] - 1)
 
 
 def _mac_raise(win: dict) -> None:  # pragma: no cover - macOS only
@@ -295,6 +438,63 @@ def move_window(win: dict, rect) -> bool:
     except Exception:
         log.debug("app mirror: couldn't move a window", exc_info=True)
     return False
+
+
+def hide_window(win: dict, home, in_use: bool) -> bool:
+    """While its app is cast elsewhere, hide the window on this computer's
+    screens: on Windows it stays where it is, all but see-through (clicks
+    pass through it unless ``in_use``); on macOS, which can't do that to
+    another app's window, it's put in the far corner, and back at ``home``
+    while it's ``in_use`` (input has to land on it). False if it can't be."""
+    try:
+        if sys.platform == "win32":
+            return _win_hide(win, in_use)
+        if sys.platform == "darwin":
+            if in_use:
+                return _mac_move(win, home)
+            at = _mac_park_at()
+            if at is None:
+                return False
+            return _mac_move(win, [at[0], at[1], home[2], home[3]])
+    except Exception:
+        log.debug("app mirror: couldn't hide a window", exc_info=True)
+    return False
+
+
+def show_window(win: dict, home) -> None:
+    """Undo :func:`hide_window`: the window, as it was, at ``home``."""
+    try:
+        if sys.platform == "win32":
+            _win_show(win)
+        elif sys.platform == "darwin" and home is not None:
+            _mac_move(win, home)
+    except Exception:
+        log.debug("app mirror: couldn't show a window again", exc_info=True)
+
+
+def window_alive(win: dict) -> bool:
+    """The window is still there (wherever it is)."""
+    try:
+        if sys.platform == "win32":
+            return bool(_u32().IsWindow(int(win["wid"])))
+        if sys.platform == "darwin":
+            return _mac_info(int(win["wid"])) is not None
+    except Exception:
+        log.debug("app mirror: couldn't look for a window", exc_info=True)
+    return False
+
+
+def popups(win: dict) -> list[tuple[int, list[float]]]:
+    """The app's other windows showing now (menus, dropdowns, tooltips),
+    as (id, os rect), front last."""
+    try:
+        if sys.platform == "win32":
+            return _win_popups(win)
+        if sys.platform == "darwin":
+            return _mac_popups(win)
+    except Exception:
+        log.debug("app mirror: couldn't list an app's menus", exc_info=True)
+    return []
 
 
 def raise_window(win: dict) -> None:

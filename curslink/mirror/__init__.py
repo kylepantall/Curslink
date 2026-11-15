@@ -676,7 +676,7 @@ class MirrorHost:
         # Held (fine-tuning one overlap), only that screen's mirrors.
         streams = streams_for(self.layout, screen, self.can, joined=self.held is None, gap=self.gap)
         self.streams = {s.id: s for s in streams}
-        self._pointer = {sid: p for sid, p in self._pointer.items() if sid in self.streams}
+        self._pointer = {sid: p for sid, p in self._pointer.items() if sid in self.streams or sid.startswith("app:")}
         for s in streams:
             # A mirror that's new on the device in front (or the device came
             # back) starts from nothing: it needs every tile, not just changes.
@@ -811,14 +811,21 @@ class MirrorHost:
         return device_id == self.local_id or self.server.supports(device_id, "mirror_tiles")
 
     def _send_pointer(self) -> None:
-        if not self.streams:
+        apps = self.apps.pointers() if self.apps is not None else {}
+        if not self.streams and not apps:
             return
         now = self.clock()
         x, y = self.router.x, self.router.y
-        for sid, stream in self.streams.items():
-            p = stream.pointer(x, y) if self.router.screen == stream.source else None
-            if p is not None and self._captures_cursor(stream.source.device_id):
-                p = None  # it's in the picture already (a phone draws its pointer on its screen)
+        every = [(sid, stream.target.device_id, None) for sid, stream in self.streams.items()]
+        every += [(sid, device, (p,)) for sid, (device, p) in apps.items()]
+        for sid, device, app in every:
+            if app is not None:
+                p = app[0]  # an app's mirror: drawn by the mirror, never in the picture
+            else:
+                stream = self.streams[sid]
+                p = stream.pointer(x, y) if self.router.screen == stream.source else None
+                if p is not None and self._captures_cursor(stream.source.device_id):
+                    p = None  # it's in the picture already (a phone draws its pointer on its screen)
             if p is not None:
                 p = (round(p[0], 4), round(p[1], 4))
             last = self._pointer.get(sid)
@@ -829,9 +836,9 @@ class MirrorHost:
             self._pointer[sid] = p
             self._pointer_at = now
             if p is None:
-                self._to(stream.target.device_id, "mirror_pointer", id=sid, hide=True)
+                self._to(device, "mirror_pointer", id=sid, hide=True)
             else:
-                self._to(stream.target.device_id, "mirror_pointer", id=sid, x=p[0], y=p[1])
+                self._to(device, "mirror_pointer", id=sid, x=p[0], y=p[1])
 
     def stop(self) -> None:
         for device in list(self.sent):
