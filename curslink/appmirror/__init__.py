@@ -257,9 +257,12 @@ class AppMirrorDevice:
 
     def _rect(self, win: dict) -> list | None:
         """Where a cast window is, as far as the host is concerned: a window
-        parked out of sight (macOS) is still at home."""
+        parked out of sight (macOS) is still at home, in use or not: on its
+        way home (or back to the corner) it mustn't be reported in the
+        corner, or the pointer going into its mirror lands there, falls out,
+        goes in again and the mirror traps and jumps."""
         hid = next((h for h in self.hidden.values() if h[0].get("wid") == win.get("wid")), None)
-        if hid is None or hid[2] or not getattr(self.ops, "parks", lambda: False)():
+        if hid is None or not getattr(self.ops, "parks", lambda: False)():
             return self.ops.window_rect(win)
         now = self.ops.window_rect(win)
         if now is None:
@@ -780,6 +783,10 @@ class AppMirrorHost:
         if r is None:
             return
         ox, oy, w, h = r
+        if self.hide and self.layout.screen_at_os(device_id, ox + w / 2, oy + min(h / 2, 20)) is None:
+            # Off every screen there: parked out of sight while it's cast (an
+            # older Curslink there says so), not moved. It's still where it was.
+            ox, oy = s.src_screen.to_os(s.rect[0], s.rect[1])
         screen = self._screen_os(device_id, ox + w / 2, oy + min(h / 2, 20)) or s.src_screen
         lx, ly = screen.from_os(ox, oy)
         resized = abs(w - s.rect[2]) >= 1 or abs(h - s.rect[3]) >= 1

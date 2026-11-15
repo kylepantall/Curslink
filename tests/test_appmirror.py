@@ -315,6 +315,34 @@ def test_the_app_resized_on_its_computer_keeps_the_mirrors_scale():
     assert capture["os"] == [100, 50, 1000, 500]
 
 
+def test_a_window_parked_out_of_sight_isnt_taken_for_moved():
+    lay, transport, router, host, apps, lines, clock, ops, released = put_down()
+    sid, = apps.sessions
+    before = apps.sessions[sid].rect
+    # An older Mac reports its hidden window in the far corner: it hasn't
+    # moved, or the pointer going into the mirror would land in that corner.
+    apps.on_message("mac", "app_window", {"id": sid, "os": [1439, 899, 800, 600]})
+    assert apps.sessions[sid].rect == before
+
+
+def test_a_parked_window_is_reported_at_home_on_its_way_there_too():
+    class Parks(Ops):
+        def parks(self):
+            return True
+
+        def window_rect(self, win):
+            return [1439, 899, 800, 600]  # still in the corner
+
+    ops = Parks()
+    sent = []
+    device = AppMirrorDevice(lambda t, **d: sent.append((t, d)), now, lambda d, f: None, ops)
+    win = dict(SAFARI, os=[100, 50, 800, 600])
+    capture = {"id": "app:mac:7:1", "window": win, "os": [100, 50, 800, 600], "hide": True}
+    for use in (False, True):  # hidden, then in use (being moved home)
+        device.on_captures([dict(capture, use=use)])
+        assert device._rect(win) == [100, 50, 800, 600]
+
+
 def test_resizing_the_mirror_where_its_shown_resizes_the_app():
     lay, transport, router, host, apps, lines, clock, ops, released = put_down()
     sid, = apps.sessions
