@@ -2042,7 +2042,7 @@ def test_layout_page_draws_a_leaning_screen(desktop, qapp):
     assert laptop.lean is None
 
 
-def test_live_line_up_ends_by_finding_where_you_sit(desktop, qapp, tmp_path):
+def test_live_line_up_ends_by_finding_where_you_sit(desktop, qapp, tmp_path, monkeypatch):
     """After the pattern step the patterns stay up, the phone goes to the
     eyes of someone sitting back, and the overlap is aimed from there: saved,
     with the desk, and shown on the Layout page's card."""
@@ -2056,6 +2056,9 @@ def test_live_line_up_ends_by_finding_where_you_sit(desktop, qapp, tmp_path):
 
     page, home, laptop = _host_with_laptop(desktop)
     assert page.seat_card.isHidden()  # (no line-up yet)
+    # (A slow machine reads a frame in seconds: it mustn't run out of patience, or of sightings recent enough.)
+    monkeypatch.setattr(seat, "GIVE_UP_S", 3600.0)
+    monkeypatch.setattr(seat, "KEPT_S", 600.0)
     sent = []
     desktop.service.send = sent.append
     page.start_lineup()
