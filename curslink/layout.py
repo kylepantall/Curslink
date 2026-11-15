@@ -208,6 +208,17 @@ def through(h: tuple[float, ...], x: float, y: float) -> tuple[float, float] | N
     return (h[0] * x + h[1] * y + h[2]) / w, (h[3] * x + h[4] * y + h[5]) / w
 
 
+@lru_cache(maxsize=256)
+def _quad_maps(quad: tuple[float, ...], width: float, height: float):
+    """:meth:`Fit._maps`, worked out once per shape: each is two 8x8 solves
+    in plain Python, and the router asks for them on every pointer report
+    near an overlap (thousands of times for one "why can't it cross" note,
+    which stalled the PC host's loop for 2-3 s in 0.4.101)."""
+    rect = (0.0, 0.0, width, 0.0, width, height, 0.0, height)
+    out, back = homography(rect, quad), homography(quad, rect)
+    return None if out is None or back is None else (out, back)
+
+
 @dataclass(frozen=True)
 class Fit:
     """Where the screen in front really stands on the screen behind it:
@@ -252,9 +263,7 @@ class Fit:
         """(front -> behind, behind -> front) for a front screen that size, or None."""
         if self.quad is None:
             return None
-        rect = (0.0, 0.0, float(width), 0.0, float(width), float(height), 0.0, float(height))
-        out, back = homography(rect, self.quad), homography(self.quad, rect)
-        return None if out is None or back is None else (out, back)
+        return _quad_maps(tuple(self.quad), float(width), float(height))
 
     def to_behind(self, size: tuple[float, float], u: float, v: float) -> tuple[float, float]:
         """Pixel (u, v) of the front screen (``size`` across and down), on the one behind."""
@@ -441,9 +450,26 @@ class Layout:
         return out
 
     def _stack(self) -> list[Screen]:
-        """All screens, back to front."""
+        """All screens, back to front. Don't change the list: it's kept
+        while the devices stay the same (the router asks for it many times
+        on every pointer report near an overlap)."""
+        return self._order()[0]
+
+    def _order(self) -> tuple[list[Screen], dict[Screen, int]]:
+        """(:meth:`_stack`, each screen's place in it), worked out again
+        only when ``devices`` holds other devices (they're frozen, so
+        anything that changes a screen puts in a new one)."""
+        devices = tuple(self.devices.values())
+        kept = self.__dict__.get("_order_kept")
+        if kept is not None and kept[0] == devices:  # the same objects: no deep compare
+            return kept[1]
         order = list(self.screens())
-        return [s for _, s in sorted(enumerate(order), key=lambda p: (p[1].z, p[0]))]
+        stack = [s for _, s in sorted(enumerate(order), key=lambda p: (p[1].z, p[0]))]
+        rank: dict[Screen, int] = {}
+        for i, screen in enumerate(stack):
+            rank.setdefault(screen, i)
+        self.__dict__["_order_kept"] = (devices, (stack, rank))
+        return stack, rank
 
     def covering(self, screen: Screen) -> list[tuple[Screen, tuple[int, int, int, int]]]:
         """Every screen standing in front of ``screen``, with the part of it
@@ -647,8 +673,8 @@ class Layout:
 
     def in_front(self, a: Screen, b: Screen) -> bool:
         """Is ``a`` drawn in front of ``b``?"""
-        stack = self._stack()
-        return stack.index(a) > stack.index(b)
+        rank = self._order()[1]
+        return rank[a] > rank[b]
 
     def validate(self) -> None:
         seen: set[tuple[str, str]] = set()

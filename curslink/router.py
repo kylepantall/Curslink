@@ -49,6 +49,8 @@ ARM_PX = 24
 # cursor leaving the monitor", and nothing in the log said why).
 STOP_REPORTS = 6
 STOP_SAY_S = 30.0
+# Points tried along an edge to say where it leads (1% steps).
+NOWHERE_SAMPLES = 100
 
 
 _SIDE_NAMES = {(-1, 0): "left", (1, 0): "right", (0, -1): "top", (0, 1): "bottom"}
@@ -333,7 +335,7 @@ class Router:
                 offline = (f"{crossing.screen.device_id} is turned off" if crossing.screen.device_id in self.turned_off
                            else f"{crossing.screen.device_id} isn't connected")
         if pushes:
-            self._pressed(screen, pushes, lambda: offline or self._nowhere(screen, pushes))
+            self._pressed(screen, pushes, offline or (lambda: self._nowhere(screen, pushes)))
         else:
             self._pressed(screen, (), "")
 
@@ -353,6 +355,14 @@ class Router:
         if count != STOP_REPORTS:
             return
         if callable(why):
+            # Working out why is slow (hundreds of crossings tried along the
+            # edge: 2-3 s of the PC host's loop in 0.4.101, every time the
+            # pointer rested on an edge). Only when it'll be said.
+            spot_key = (screen.device_id, screen.id, spot[2])
+            now = self.clock()
+            if now - self._stop_said.get(spot_key, -1e9) < STOP_SAY_S:
+                return
+            self._stop_said[spot_key] = now
             why = why()
         if not pushes:
             clip = self.cursor_clip()
@@ -377,7 +387,7 @@ class Router:
         for ex, ey in pushes:
             along_x = ex == 0
             length = screen.width if along_x else screen.height
-            step = max(1, length // 400)
+            step = max(1, length // NOWHERE_SAMPLES)
             runs: list[list] = []
             for i in range(0, length, step):
                 if along_x:
