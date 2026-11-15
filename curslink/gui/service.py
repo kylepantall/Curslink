@@ -35,6 +35,8 @@ STUCK_SHOW_CURSOR_S = 4.0
 # ... and quiet this long, it's stopped and started again (its hooks go with it).
 STUCK_RESTART_S = 12.0
 WATCH_EVERY_MS = 1000
+# Ctrl+Alt+Delete or Task Manager with the child this quiet: restarted at once.
+STUCK_WAY_OUT_S = 2.0
 
 
 def service_command(role: str, config: Path) -> list[str]:
@@ -81,6 +83,12 @@ class Service(QObject):
         self._cursor_put_back = False
         self._killed_stuck: subprocess.Popen | None = None
         self._stuck_restarts: list[float] = []
+        # Windows: Ctrl+Alt+Delete or Task Manager coming up frees the cursor
+        # (curslink.escapehatch), from here too in case the child is stuck.
+        from curslink.escapehatch import escape_wanted
+
+        self.escape_wanted = escape_wanted
+        self._way_out: str | None = None
         self._watchdog = QTimer(self)
         self._watchdog.setInterval(WATCH_EVERY_MS)
         self._watchdog.timeout.connect(self._watch)
@@ -202,7 +210,26 @@ class Service(QObject):
         late = now - self._watched_at > 3 * WATCH_EVERY_MS / 1000
         self._watched_at = now
         proc = self._proc
+        way_out = self.escape_wanted()
+        came_up, self._way_out = way_out if way_out != self._way_out else None, way_out
+        if came_up:
+            from curslink.cursorhide import restore_windows
+
+            log.info("%s on this PC: putting the cursor back", came_up)
+            restore_windows()
         if proc is None or self._beat_at is None or self._stopping or proc.poll() is not None:
+            return
+        if came_up and now - self._beat_at >= STUCK_WAY_OUT_S:
+            # The user is asking for a way out and the child isn't answering:
+            # don't make them wait for STUCK_RESTART_S.
+            log.error("%s (pid %s) isn't answering (%.0f s) and %s came up: starting it again",
+                      self.role, proc.pid, now - self._beat_at, came_up)
+            self._beat_at = None
+            self._killed_stuck = proc
+            try:
+                proc.kill()
+            except OSError:
+                pass
             return
         if late:
             # This app was stuck itself, or the computer slept: the child

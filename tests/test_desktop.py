@@ -1104,6 +1104,7 @@ def test_the_app_puts_the_cursor_back_and_restarts_a_child_that_stops_beating(mo
     s.role, s._stopping, s._proc = "host", False, Proc()
     s._beat_at, s._cursor_put_back, s._killed_stuck = None, False, None
     s._watched_at = 0.0
+    s.escape_wanted, s._way_out = (lambda: None), None
     for t in range(1, 30):
         s._watch(float(t))
     assert not restored and not s._proc.killed      # never beat (an older version): not watched
@@ -1141,7 +1142,109 @@ def test_the_app_doesnt_count_time_it_was_asleep_against_the_child(monkeypatch):
     s.role, s._stopping, s._proc = "host", False, Proc()
     s._beat_at, s._cursor_put_back, s._killed_stuck = None, False, None
     s._watched_at = 100.0
+    s.escape_wanted, s._way_out = (lambda: None), None
     s.beat(100.0)
     s._watch(400.0)                                 # the computer slept
     s._watch(401.0)
     assert not s._proc.killed and not s._cursor_put_back
+
+
+def test_ctrl_alt_delete_or_task_manager_coming_up_brings_pc_input_home(monkeypatch):
+    # Kyle: "force ctrl+alt+delete on windows to free the cursor too ... or
+    # task manager ctrl+shift+esc ... both". No hook sees Ctrl+Alt+Delete, but
+    # the input moves to the secure desktop; Task Manager shows as the app in front.
+    pb, capture, _, _ = _pc_capture(monkeypatch)
+    monkeypatch.setattr(pb.sys, "platform", "win32")
+
+    class Controller:
+        position = (7, 8)
+
+    capture._controller = Controller()
+    seen = iter([None, None, "Ctrl+Alt+Delete (or the lock screen)"])
+    capture.escape_wanted = lambda: next(seen, None)
+    capture._grabbed, capture._grabbed_at = True, 1.0
+    monkeypatch.setattr(pb.time, "sleep", lambda _s: setattr(capture, "_closed", capture.took_back))
+    capture._watch_hooks()
+    assert capture.took_back and not capture._grabbed
+
+
+def test_task_manager_already_in_front_doesnt_send_input_straight_home(monkeypatch):
+    pb, capture, _, _ = _pc_capture(monkeypatch)
+    monkeypatch.setattr(pb.sys, "platform", "win32")
+
+    class Controller:
+        position = (7, 8)
+
+    capture._controller = Controller()
+    capture.escape_wanted = lambda: "Task Manager"   # in front since before the switch
+    capture._grabbed, capture._grabbed_at = True, 1.0
+    checks = {"n": 0}
+
+    def sleep(_s):
+        checks["n"] += 1
+        capture._closed = checks["n"] > 6
+
+    monkeypatch.setattr(pb.time, "sleep", sleep)
+    capture._watch_hooks()
+    assert capture._grabbed and not capture.took_back
+
+
+def test_ctrl_shift_esc_brings_pc_input_home_at_once(monkeypatch):
+    pb, capture, keys, _ = _pc_capture(monkeypatch)
+    capture.set_grab(True)
+    capture._on_key("ctrl_l", True, False)
+    capture._on_key("esc", True, False)
+    assert capture._grabbed                          # Ctrl+Esc alone: forwarded
+    capture._on_key("shift", True, False)
+    capture._on_key("esc", True, False)
+    assert not capture._grabbed and capture.took_back
+
+
+def test_the_app_frees_the_cursor_on_ctrl_alt_delete_and_restarts_a_stuck_child(monkeypatch):
+    pytest.importorskip("PySide6")
+    import curslink.cursorhide as cursorhide
+    from curslink.gui import service as svc
+
+    restored = []
+    monkeypatch.setattr(cursorhide, "restore_windows", lambda: restored.append(1))
+
+    class Proc:
+        pid = 42
+        killed = False
+
+        def poll(self):
+            return None
+
+        def kill(self):
+            self.killed = True
+
+    s = svc.Service.__new__(svc.Service)
+    s.role, s._stopping, s._proc = "host", False, Proc()
+    s._beat_at, s._cursor_put_back, s._killed_stuck = None, False, None
+    s._watched_at = 9.0
+    way = {"now": None}
+    s.escape_wanted, s._way_out = (lambda: way["now"]), None
+    s.beat(10.0)
+    s._watch(10.5)
+    way["now"] = "Task Manager"
+    s._watch(11.0)                                   # comes up, child answering: cursor only
+    assert restored == [1] and not s._proc.killed
+    s._watch(12.0)
+    assert restored == [1]                           # once each time it comes up
+    way["now"] = None
+    s._watch(13.0)
+    way["now"] = "Ctrl+Alt+Delete (or the lock screen)"
+    s._watch(14.0)                                   # quiet for 4 s by now: restarted at once
+    assert restored[-1] == 1 and s._proc.killed and s._killed_stuck is s._proc
+
+
+def test_escape_hatch_reads_the_secure_desktop_and_task_manager():
+    from curslink.escapehatch import SECURE, TASK_MANAGER, escape_wanted
+
+    assert escape_wanted(lambda: "Default", lambda: "explorer.exe") is None
+    assert escape_wanted(lambda: "Winlogon", lambda: "") == SECURE
+    assert escape_wanted(lambda: None, lambda: "") == SECURE            # can't even open it
+    assert escape_wanted(lambda: "Default", lambda: "taskmgr.exe") == TASK_MANAGER
+    assert escape_wanted(lambda: 1 / 0, lambda: "") is None             # never raises
+    if sys.platform != "win32":
+        assert escape_wanted() is None
