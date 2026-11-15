@@ -30,7 +30,9 @@ Host -> agent
                                        whose hello.features has "netstats" also
                                        rtt_ms, p95_ms, jitter_ms (the host's measure
                                        of the round trip, or null) and tuning (what
-                                       the network optimiser is doing, in words)
+                                       the network optimiser is doing, in words),
+                                       and iface {kind, name, cable?}: the host's
+                                       interface on the link (see netstats)
     drag         {card} | {hide: true} a file drag is being carried onto this
                                        device: show (or take down) the
                                        placeholder that follows the pointer.
@@ -151,13 +153,16 @@ Agent -> host
                                        away or moved): all of them, as in hello;
                                        only to a host whose welcome.features has
                                        "screens"
-    netstats     {udp, loss_pct, rtt_ms, jitter_ms}
+    netstats     {udp, loss_pct, rtt_ms, jitter_ms, iface?}
                                        how the link looks from the agent (every few
                                        seconds; only to a host whose welcome.features
                                        has "netstats"): whether its UDP path is up,
                                        the share of the host's datagrams lost on the
                                        way, and the UDP round trip (see
-                                       curslink.net.quality). Numbers may be null
+                                       curslink.net.quality). Numbers may be null.
+                                       iface: {kind, name, cable?}, the agent's
+                                       interface on the link (wifi, wired, vpn,
+                                       cable with cable usb-c or ethernet)
     lineup_photo {id, size, seq?, focal?} | {id, cancel} | {id, done}
                                        the photo for a lineup_camera (its JPEG
                                        bytes follow in lineup_data frames), or
