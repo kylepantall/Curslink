@@ -313,6 +313,13 @@ class Result:
     stance: dict[str, dict] = field(default_factory=dict)
     views: int = 1  # the frames it's from
     rms: float = 0.0  # how well the patterns fit, in frame pixels
+    # Every pair of screens that meet or overlap as the person sees them, a
+    # computer's own two screens as well (which have no link or fit: its OS
+    # moves the pointer between them): (a, b, side of a that b is at) or
+    # (front, behind, None). The check at the end draws its lines across these.
+    joins: list[tuple[str, str, str | None]] = field(default_factory=list)
+    # How the check at the end went (Live.check_summary), None if there wasn't one.
+    check: dict | None = None
 
 
 def _span(a0: float, a1: float, b0: float, b1: float) -> tuple[float, float] | None:
@@ -535,7 +542,7 @@ def arrange(screens: list[dict], solution) -> Result:
         final[key] = (x, y)
         rects[key] = (x, y, int(s["width"]), int(s["height"]))
 
-    fronts, links, fits = [], [], []
+    fronts, links, fits, joins = [], [], [], []
     for i, a in enumerate(keys):
         for b in keys[i + 1:]:
             r = rel.get((a, b))
@@ -545,17 +552,23 @@ def arrange(screens: list[dict], solution) -> Result:
                 behind, front = (a, b) if desk.in_front(b, a) else (b, a)
                 fronts.append((behind, front))
                 both = desk.pair(behind, front)
+                if both is not None:
+                    joins.append((front, behind, None))
                 if info[a]["device"] != info[b]["device"] and both is not None:
                     Bh, Fr = both
                     fits.append({"behind": behind, "front": front, "x": float((Fr.x0 - Bh.x0) * Bh.k),
                                  "y": float((Fr.y0 - Bh.y0) * Bh.k), "scale": float(Bh.k / Fr.k)})
                 continue
-            if info[a]["device"] == info[b]["device"]:
-                continue  # its own OS moves the pointer between them
             side = r[1]
             both = desk.pair(a, b, side)
             if both is None:
                 continue
+            if info[a]["device"] == info[b]["device"]:
+                A, B = both
+                shared = _span(A.y0, A.y1, B.y0, B.y1) if side in ("left", "right") else _span(A.x0, A.x1, B.x0, B.x1)
+                if shared is not None:
+                    joins.append((a, b, side))
+                continue  # its own OS moves the pointer between them
             A, B = both
             if side in ("left", "right"):
                 shared = _span(A.y0, A.y1, B.y0, B.y1)
@@ -578,7 +591,8 @@ def arrange(screens: list[dict], solution) -> Result:
             if a_span[1] - a_span[0] < 1 or b_span[1] - b_span[0] < 1:
                 continue
             links.append({"a": a, "a_side": side, "a_span": a_span, "b": b, "b_side": OPP[side], "b_span": b_span})
-    return Result(final, fronts, links, fits, found=keys, missing=missing, reference=ref,
+            joins.append((a, b, side))
+    return Result(final, fronts, links, fits, found=keys, missing=missing, reference=ref, joins=joins,
                   errors={k: float(poses[k].error) for k in keys},
                   stance={k: desk.stance(k) for k in keys},
                   views=solution.frames, rms=solution.rms)
@@ -847,7 +861,23 @@ class Live:
             errors, views, rms = self.result.errors, self.result.views, self.result.rms
             self.result = arrange(self.screens, self.check.sol)
             self.result.errors, self.result.views, self.result.rms = errors, views, rms
+        self.result.check = self.check_summary()
         return moved
+
+    def check_summary(self) -> dict | None:
+        """How the check went, for the Layout page: ``{"state", "lines",
+        "joins", "step"}``. ``state``: "none" (no two screens meet where a
+        line could be drawn), "unseen" (lines were drawn, the camera never
+        saw one), "checked" (every join came within a pixel or two) or
+        "part" (it stopped before that). ``step``: the biggest step left."""
+        if not self.aligned:
+            return None
+        if self.check is None:
+            return {"state": "none", "lines": 0, "joins": 0, "step": None}
+        c = self.check
+        drawn = [j for j in c.joins if j.lines]
+        state = "unseen" if not c.measured else "checked" if c.agreed else "part"
+        return {"state": state, "lines": sum(len(j.lines) for j in drawn), "joins": len(drawn), "step": c.worst()}
 
     def hint(self, numbers: dict[str, object] | None = None) -> str:
         """What to do next, in a few words (for the phone's screen)."""

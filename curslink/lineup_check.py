@@ -33,7 +33,7 @@ from curslink.lineup_scene import ScreenPose, exp_so3, pose_from_homography, pro
 
 REACH = 0.16  # how far a line runs into each screen, in that screen's shorter sides
 THICK = 0.008  # how thick it's drawn, same units
-PER_JOIN = 3  # lines across each join (each edge of a screen in front of another: 2)
+PER_JOIN = 4  # lines across each join (each edge of a screen in front of another: 3)
 WINDOW = 14.0  # how far either side of where a line should be it's looked for (px in a 1600 px frame)
 CONTRAST = 28.0  # a line is this much brighter than what's beside it, or it isn't there
 GAIN = 0.7  # how much of a measured step is taken out at a time (a small one: less)
@@ -43,7 +43,7 @@ GAIN = 0.7  # how much of a measured step is taken out at a time (a small one: l
 DONE = 0.003
 DONE_PX = 2.5
 GAP = 6  # how far out from a screen's edge the other's half starts, in hundredths of its shorter side
-AGREE = 2  # frames in a row every join must be right in
+AGREE = 4  # frames in a row every join must be right in
 MAX_FRAMES = 28  # frames read before it's left as it is
 UNSEEN = 8  # ...or this many without a single line seen
 
@@ -153,14 +153,9 @@ class Check:
         self.frames = 0
         self.measured = 0  # frames in which a join was measured
         self.moved = 0.0  # how far the screens have been moved in all (their own px)
-        pairs: list[tuple[str, str, str]] = []
-        for li in result.links:
-            pairs.append((li["a"], li["b"], "link"))
-        for behind, front in result.fronts:
-            if any(f["behind"] == behind and f["front"] == front for f in result.fits):
-                pairs.append((front, behind, "fit"))
-        self.kinds = {(a, b): kind for a, b, kind in pairs if a in solution.screens and b in solution.screens}
-        self.sides = {(li["a"], li["b"]): li["a_side"] for li in result.links}
+        joins = [j for j in result.joins if j[0] in solution.screens and j[1] in solution.screens]
+        self.kinds = {(a, b): "fit" if side is None else "link" for a, b, side in joins}
+        self.sides = {(a, b): side for a, b, side in joins if side is not None}
         self.joins = [Join(a, b) for (a, b) in self.kinds]
         # Which screen of a join moves: the one further from the reference
         # along the joins (and everything beyond it moves with it).
@@ -256,7 +251,7 @@ class Check:
             # a link: across the one edge; a screen in front of another:
             # across each of its edges that has the other showing beyond it
             sides = [(self.sides[(join.a, join.b)], PER_JOIN)] if kind == "link" else \
-                [(side, 2) for side in ("top", "left", "right", "bottom")]
+                [(side, 3) for side in ("top", "left", "right", "bottom")]
             for side, n in sides:
                 found = []
                 for along in tries:
@@ -434,6 +429,12 @@ class Check:
             return True
         if self.frames >= UNSEEN and not self.measured:
             return True  # the lines aren't there to be seen (older Curslink on the screens)
+        return self.agreed
+
+    @property
+    def agreed(self) -> bool:
+        """Has every join the camera can see been right, frames in a row?"""
+        seen = [j for j in self.joins if j.lines]
         return self.measured >= AGREE and all(j.good >= AGREE for j in seen if j.step is not None) \
             and any(j.step is not None for j in seen)
 

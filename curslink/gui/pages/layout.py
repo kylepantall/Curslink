@@ -126,6 +126,24 @@ def detect_screens() -> list[dict]:
     return out
 
 
+def check_note(check: dict | None) -> str:
+    """A sentence on how a line-up's check at the end went (curslink.lineup.Live.check_summary)."""
+    if not check:
+        return ""
+    state, lines, joins = check.get("state"), int(check.get("lines") or 0), int(check.get("joins") or 0)
+    step = check.get("step")
+    across = f"{lines} line{'s' if lines != 1 else ''} across {joins} join{'s' if joins != 1 else ''}"
+    if state == "none":
+        return " The joins weren't checked: no two screens meet where a line could be drawn across them."
+    if state == "unseen":
+        return (" The joins weren't checked: the lines drawn across them never showed in the camera. Every computer "
+                "needs Curslink 0.4.93 or later to draw them.")
+    within = f" within {max(1, round(step))} px" if isinstance(step, (int, float)) else ""
+    if state == "checked":
+        return f" Joins checked with {across}:{within or ' all joined up'}."
+    return f" The check of the joins ({across}) was stopped before it settled{': ' + within.strip() if within else ''}."
+
+
 class ScreenItem(QGraphicsRectItem):
     def __init__(self, page, device_id: str, device_name: str, screen: dict, home: bool):
         super().__init__(0, 0, screen["width"] * SCALE, screen["height"] * SCALE)
@@ -1138,6 +1156,7 @@ class LayoutPage(Page):
         how = describe(result, {i.key: i.device_name for i in self.items})
         if how:
             text += " " + how[:1].upper() + how[1:] + "."
+        text += check_note(getattr(result, "check", None))
         text += " Check it and press Save layout."
         phones = {s["key"] for s in self.lineup_screens() if s["phone"]}  # they take the photo
         missing = [k for k in result.missing if k not in phones]

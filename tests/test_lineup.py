@@ -427,6 +427,11 @@ def test_the_check_lines_take_out_what_the_scan_left(desk, ref, middle, aim):
     assert all(0 <= x <= 1 and 0 <= y <= 1 for runs in lines.values() for run in runs for x, y in run)
     # every join has lines, each with a half on both of its screens
     assert all(len(j.lines) >= 2 for j in check.joins)
+    if desk is CURVED_DESK:
+        # A computer's own two screens are checked against each other as well:
+        # the MacBook's screen in front of its curved monitor.
+        assert {(j.a, j.b) for j in check.joins} == {("pc/main", "mac/screen2"), ("mac/main", "mac/screen2")}
+        assert not any(f["front"] == "mac/main" for f in off.fits)
     dims = {s["key"]: (s["width"], s["height"]) for s in layout}
     for n in range(20):
         at, target, roll = places[(n * 7 + 3) % len(places)]
@@ -445,6 +450,11 @@ def test_the_check_lines_take_out_what_the_scan_left(desk, ref, middle, aim):
         was = abs(off.positions[key][axis] - true.positions[key][axis])
         now = abs(fixed.positions[key][axis] - true.positions[key][axis])
         assert now <= max(6, 0.6 * was), (key, was, now)
+    for front, behind, side in true.joins:
+        if side is None and front != ref:  # in front of another: nearer right both ways
+            was = np.hypot(*np.subtract(off.positions[front], true.positions[front]))
+            now = np.hypot(*np.subtract(fixed.positions[front], true.positions[front]))
+            assert now <= max(8, 0.6 * was), (front, was, now)
     for f in true.fits:
         mine_off = next(g for g in off.fits if g["front"] == f["front"])
         mine = next(g for g in fixed.fits if g["front"] == f["front"])

@@ -452,6 +452,9 @@ class LineupFlow(QObject):
     # After the check's lines move, frames for this long are let go by: the
     # screens (some of them another computer's) have to draw the new ones first.
     check_settle = 0.6
+    # The lines stay up at least this long, however soon the camera is happy:
+    # they're for the person to see too (a check over in a second isn't seen).
+    check_hold = 3.0
     _analysed = Signal(object, str)  # (Result or None, error), from the worker thread
     _status = Signal(object)  # a live frame was read: how it's going (a dict), from the worker thread
 
@@ -676,7 +679,7 @@ class LineupFlow(QObject):
         numbers = {s["key"]: s.get("number") for s in self.screens}
         # For the log (and so a diagnostics file): how the scan went, every couple of seconds.
         began = said = time.monotonic()
-        settle = 0.0
+        settle = held = 0.0
         count = size = 0
         spent = 0.0
         while True:
@@ -710,10 +713,18 @@ class LineupFlow(QObject):
                     else:
                         self.live.frame(gray, focal)
                         self.live.update()
-                        if self.live.aligned and self.live.start_check() is not None:
-                            settle = time.monotonic() + self.check_settle
-                            log.info("line-up check: %d line(s) across %d join(s)",
-                                     sum(len(j.lines) for j in self.live.check.joins), len(self.live.check.joins))
+                        if self.live.aligned:
+                            if self.live.start_check() is not None:
+                                settle = time.monotonic() + self.check_settle
+                                held = time.monotonic() + self.check_hold
+                                log.info("line-up check: %d line(s) across %d join(s): %s",
+                                         sum(len(j.lines) for j in self.live.check.joins), len(self.live.check.joins),
+                                         ", ".join(f"{j.a} | {j.b} ({len(j.lines)})" for j in self.live.check.joins))
+                            else:
+                                log.info("line-up check: none, no line could be drawn across any of %d join(s): %s",
+                                         len(self.live.result.joins),
+                                         ", ".join(f"{a} | {b}" for a, b, _side in self.live.result.joins) or "-")
+                            self.live.result.check = self.live.check_summary()
                     count += 1
                     size += len(data)
                     spent += time.monotonic() - t0
@@ -729,7 +740,7 @@ class LineupFlow(QObject):
                 _remove(path)
             live = self.live
             if live is not None:
-                checking = live.check is not None and not live.check.done
+                checking = live.check is not None and (not live.check.done or time.monotonic() < held)
                 status.update(progress=min(live.progress(), 0.97) if checking else live.progress(),
                               hint=live.hint(numbers), states=live.states(),
                               result=live.result, aligned=live.aligned and not checking, usable=live.usable,
