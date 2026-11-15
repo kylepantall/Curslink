@@ -314,7 +314,7 @@ def _windows_setup_command(setup: Path, relaunch: list[str] | None) -> list[str]
         exe = PureWindowsPath(relaunch[0]).name
         show = "show" if Path(exe).stem.lower() == "curslinkw" else "hide"
         spec.write_text("\r\n".join([exe, subprocess.list2cmdline(relaunch[1:]), show]) + "\r\n",
-                        encoding="utf-8-sig")
+                        encoding="utf-8-sig", newline="")  # already CRLF: no \r\r\n on Windows
         cmd.append(f"/RELAUNCH={spec}")
     return cmd
 
