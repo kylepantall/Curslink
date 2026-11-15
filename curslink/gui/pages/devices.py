@@ -366,6 +366,12 @@ class DevicesPage(Page):
                 f"Open Curslink on {other}, on the same network, and pair with it below."))
         connected = self.app.connected_ids()
         paused = {a.device_id for a in self.app.status.agents.values() if a.paused and not a.connected}
+        turned_off: set[str] = set()
+        if self.app.role == "host":
+            try:  # turned off on the Layout page (Use this device)
+                turned_off = {d.get("id") for d in self.app.config().devices() if d.get("enabled", True) is False}
+            except Exception:
+                pass
         self.draw_phone(peers)
         mine = self.app.role
         # Pairings from this computer's other role (a host's agents and phones
@@ -378,8 +384,10 @@ class DevicesPage(Page):
             if p.role == mine:
                 state = pill(f"Used when this is the {other_role(mine)}", "off")
             else:
-                state = pill("Connected" if on else ("Paused" if p.device_id in paused else "Offline"),
-                             "on" if on else "off")
+                text = "Connected" if on else ("Paused" if p.device_id in paused else "Offline")
+                if p.device_id in turned_off:
+                    text += " · turned off"
+                state = pill(text, "on" if on and p.device_id not in turned_off else "off")
             widgets = [text_block(p.name, f"{p.role.title()} · id {p.device_id} · paired {when}"), state]
             edge = self.edge_picker(p) if mine == "host" and p.role == "agent" else None
             if edge is not None:
