@@ -9,6 +9,7 @@ screen behind when it is, since that part of it is blocked out.
 from __future__ import annotations
 
 import json
+import logging
 import sys
 
 from PySide6.QtCore import QPointF, QRectF, Qt
@@ -32,6 +33,8 @@ from PySide6.QtWidgets import (
 from curslink.configedit import snap, touching_edges
 from curslink.gui import theme
 from curslink.gui.widgets import Card, Page, Toggle, button, label
+
+log = logging.getLogger(__name__)
 
 SCALE = 0.1  # scene units per layout pixel
 CLICK_SLOP_PX = 3  # a press and release this close on screen is a click, not a drag
@@ -124,6 +127,18 @@ def detect_screens() -> list[dict]:
             "width": round(g.width() * ratio), "height": round(g.height() * ratio),
         })
     return out
+
+
+def lineup_passed(check: dict | None) -> bool:
+    """Did a line-up pass its checks at the end (curslink.lineup.Live.check_summary):
+    every join the lines were drawn across agreed, and every overlap's
+    pattern joined up? Not if neither was there to check by."""
+    if not check:
+        return False
+    seam = check.get("seam")
+    if check.get("state") not in ("checked", "none") or (seam and seam.get("state") != "joined"):
+        return False
+    return check.get("state") == "checked" or bool(seam)
 
 
 def check_note(check: dict | None) -> str:
@@ -820,7 +835,7 @@ class LayoutPage(Page):
             return
         for (behind, front), fit in self.lineup_fits().items():
             cmd = {"behind": behind, "front": front, "x": fit["x"], "y": fit["y"], "scale": fit["scale"]}
-            for k in ("quad", "eye", "depth", "mm"):
+            for k in ("quad", "eye", "depth", "mm", "bezel"):
                 if fit.get(k) is not None:
                     cmd[k] = fit[k]
             self.app.service.send("fit " + json.dumps(cmd, separators=(",", ":")))
@@ -839,9 +854,10 @@ class LayoutPage(Page):
                 if t is None:
                     raise KeyError
                 cmd.update(x=float(t["x"]), y=float(t["y"]), scale=float(t["scale"]))
-                for k in ("quad", "eye", "depth", "mm"):
+                for k in ("quad", "eye", "depth", "mm", "bezel"):
                     if k in t:
                         cmd[k] = [float(v) for v in t[k]] if k != "mm" else float(t[k])
+                cmd.setdefault("bezel", [0, 0, 0, 0])
             except (KeyError, TypeError, ValueError):
                 cmd = {"behind": behind, "front": front, "reset": True}
             self.app.service.send("fit " + json.dumps(cmd, separators=(",", ":")))
@@ -1203,7 +1219,10 @@ class LayoutPage(Page):
         self.apply_lineup(result)
 
     def apply_lineup(self, result) -> None:
-        """Put the screens where the photo says (unsaved, to check and save)."""
+        """Put the screens where the photo says: saved straight away if the
+        line-up passed its checks at the end (and nothing else was waiting to
+        be saved), otherwise unsaved, to check and save."""
+        was_dirty = self.dirty
         items = {i.key: i for i in self.items}
         for key, (x, y) in result.positions.items():
             item = items.get(key)
@@ -1249,9 +1268,16 @@ class LayoutPage(Page):
         if how:
             text += " " + how[:1].upper() + how[1:] + "."
         text += check_note(getattr(result, "check", None))
-        text += " Check it and press Save layout."
         phones = {s["key"] for s in self.lineup_screens() if s["phone"]}  # they take the photo
         missing = [k for k in result.missing if k not in phones]
+        if not missing and not was_dirty and lineup_passed(getattr(result, "check", None)) \
+                and not self.blocking_overlap():
+            log.info("line-up passed its checks: saving the layout")
+            self.save()
+            if not self.dirty:
+                self._say_lineup(text + " It passed its checks, so it's saved.")
+                return
+        text += " Check it and press Save layout."
         if missing:
             text += " Not in the photo, so left as they were: " + ", ".join(names.get(k, k) for k in missing) + "."
         self._say_lineup(text, "warn" if missing else "small")
@@ -1276,7 +1302,8 @@ class LayoutPage(Page):
             for fit in result.fits:
                 if unmoved(fit["behind"]) and unmoved(fit["front"]):
                     cfg.set_fit(fit["behind"], fit["front"], fit["x"], fit["y"], fit["scale"], quad=fit.get("quad"),
-                                eye=fit.get("eye"), depth=fit.get("depth"), mm=fit.get("mm"))
+                                eye=fit.get("eye"), depth=fit.get("depth"), mm=fit.get("mm"),
+                                bezel=fit.get("bezel"))
         self._say_lineup("")
 
     def detect(self) -> None:

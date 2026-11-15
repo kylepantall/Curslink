@@ -749,6 +749,52 @@ def test_a_pattern_across_an_overlap_puts_its_fit_right(out, lean):
     assert seam.summary()["state"] == "joined"
 
 
+def test_the_pattern_step_measures_the_frame_round_the_front_screen():
+    """The monitor's pattern is drawn right up to (and under) the laptop's
+    edge, so where the camera first sees it beyond that edge is how wide the
+    laptop's frame is there: the fit comes back with it (``bezel``)."""
+    import numpy as np
+
+    from curslink.lineup_check import Check
+    from curslink.lineup_seam import Seam
+    from lineup_desk import Camera, render
+
+    desk = Desk([
+        ("host/main", "host", 2560, 1440, 597, (0, 0, 0), 0, 0),
+        ("mac/main", "mac", 1512, 982, 304, (60, 150, -250), 14, 15),
+    ])
+    layout = desk.layout()
+    planned = lineup.plan([{"key": s["key"], "width": s["width"], "height": s["height"]} for s in layout])
+    showing = lineup.check_plan(planned)
+    places = figure_of_eight(30, (0, 0, -900), reach=(15, 10, 8), aim=(0, 60, 0), seed=0)
+    solution = true_solution(desk, "host/main", places[0][0])
+    result = lineup.arrange(layout, solution)
+    cam = Camera(focal=1180, k1=0.04, k2=-0.02, centre=(812, 588))
+    intr = [1180, 812, 588, 0.04, -0.02]
+    locate = Check(solution, result, showing, intr, cam.size).locate
+    dims = {s["key"]: (s["width"], s["height"]) for s in layout}
+    mm = 304 / 1512  # one of the laptop's pixels
+
+    def measured(frame_mm):
+        seam = Seam(solution, [dict(result.fits[0])], showing, intr, cam.size)
+        for n in range(24):
+            at, target, roll = places[(n * 7 + 3) % len(places)]
+            frame = render(desk, seam.drawing, cam, cam.look(at, target, roll), patterns=seam.patterns(), seed=n,
+                           bezels={"mac/main": frame_mm} if frame_mm else None)
+            seam.frame(frame, lineup.read_frame(frame, seam.showing, dims, 6.4, thorough=False), locate)
+            if seam.done:
+                break
+        assert seam.joined
+        return seam.fits()[0].get("bezel")
+
+    bezel = measured((9.0, 9.0, 9.0, 9.0))
+    assert bezel is not None and len(bezel) == 4
+    # (the top and the sides are seen against the monitor; within 2 mm of it)
+    assert all(abs(v * mm - 9.0) < 2.0 for v in bezel), [v * mm for v in bezel]
+    thin = measured(None)
+    assert thin is None or all(v * mm < 1.5 for v in thin)
+
+
 def test_a_turned_in_laptop_is_fitted_as_the_leaning_shape_it_is_seen_as():
     """A laptop turned in and tipped back is seen against the monitor as a
     leaning four-sided shape: a rectangle is pixels out at the ends of its
@@ -819,3 +865,31 @@ def test_a_leaning_shape_on_a_curved_monitor_is_fitted_to_what_shows_on_the_glas
     assert off(fit) < 8
     corners = project_from(solution.eye, behind, front.corners())  # (carried on in the plane of its corners)
     assert off({**fit, "quad": [float(v) for v in corners.ravel()]}) > 20
+
+
+def test_a_laptop_under_the_middle_of_a_curved_monitor_can_still_be_followed():
+    """A curved monitor's corners are nearer than its middle: a laptop's top
+    edge close under the middle of the glass is behind the plane of those
+    corners. It's still in front of the glass it's seen against, and its fit
+    says how far (0.4.100 left that out, so head tracking followed nothing)."""
+    import numpy as np
+
+    from curslink.layout import Fit
+
+    desk = Desk([
+        ("pc/main", "pc", 2880, 1620, 345, (0, 200, -10), 0, 20),
+        ("mac/screen2", "mac", 3440, 1440, 800, (0, 0, 0), 0, 0, 0.53),
+    ])
+    places = figure_of_eight(30, (0, -60, -900), reach=(15, 10, 8), aim=(0, 120, -50), seed=0)
+    solution = true_solution(desk, "pc/main", places[0][0])
+    front, behind = solution.screens["pc/main"], solution.screens["mac/screen2"]
+    plane = -(((front.corners() - behind.t) @ behind.r) / behind.scale)[:, 2]
+    assert plane[0] < 0 and plane[1] < 0  # its top corners: behind the plane of the monitor's corners
+    fit, = lineup.arrange(desk.layout(), solution).fits
+    assert len(fit["eye"]) == 3 and len(fit["depth"]) == 4 and all(d > 0 for d in fit["depth"])
+    made = Fit(("mac", "screen2"), ("pc", "main"), fit["x"], fit["y"], fit["scale"], quad=tuple(fit["quad"]),
+               eye=tuple(fit["eye"]), depth=tuple(fit["depth"]))
+    assert made.follows
+    # A head 5 cm to the right sees the laptop over a part of the monitor further left.
+    moved = made.seen_from((made.eye[0] + 50 / (800 / 3440), made.eye[1], made.eye[2]))
+    assert np.mean(moved.quad[0::2]) < np.mean(made.quad[0::2]) - 5

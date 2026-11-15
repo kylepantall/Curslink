@@ -227,7 +227,12 @@ class Fit:
     how far in front of the screen behind each of those four corners is
     (again its pixels), and ``mm`` the size of one of those pixels. From
     them, :meth:`seen_from` gives the fit for an eye somewhere else (head
-    tracking, curslink.headfollow)."""
+    tracking, curslink.headfollow).
+
+    ``bezel``: how wide the frame round the front screen's glass is seen to
+    be (left, top, right, bottom), in the front screen's own pixels, as a
+    live line-up measures it. The frame hides that much more of the screen
+    behind: see :meth:`grown` and ``Layout.bezels``."""
 
     behind: tuple[str, str]  # (device, screen)
     front: tuple[str, str]
@@ -238,6 +243,7 @@ class Fit:
     eye: tuple[float, float, float] | None = None
     depth: tuple[float, float, float, float] | None = None
     mm: float | None = None
+    bezel: tuple[float, float, float, float] | None = None
 
     def _maps(self, width: float, height: float):
         """(front -> behind, behind -> front) for a front screen that size, or None."""
@@ -271,6 +277,25 @@ class Fit:
             eye = (eye[0] + x - self.x, eye[1] + y - self.y, eye[2])
         return replace(self, x=x, y=y, scale=scale, quad=quad, eye=eye)
 
+    def grown(self, size: tuple[float, float], bezel: tuple[float, float, float, float] | None = None) -> "Fit":
+        """This fit with the front screen's frame counted as part of it: the
+        front screen (``size`` across and down) stands for all that it and
+        its frame hide of the screen behind, so nothing of that screen is
+        lost behind the frame. ``bezel``: the frame (left, top, right,
+        bottom, the front screen's pixels) if not this fit's own. Itself
+        with no frame to speak of."""
+        b = bezel if bezel is not None else self.bezel
+        if b is None or len(b) != 4 or not any(v > 0 for v in b):
+            return replace(self, bezel=None) if self.bezel is not None else self
+        left, top, right, bottom = (max(0.0, float(v)) for v in b)
+        w, h = float(size[0]), float(size[1])
+        quad: list[float] = []
+        for u, v in ((-left, -top), (w + right, -top), (w + right, h + bottom), (-left, h + bottom)):
+            quad += self.to_behind(size, u, v)
+        x, y = self.to_behind(size, -left, -top)
+        k = self.scale * ((w + left + right) / w + (h + top + bottom) / h) / 2
+        return replace(self, x=x, y=y, scale=k, quad=tuple(quad), bezel=None)
+
     @property
     def follows(self) -> bool:
         """Does it know enough to be worked out again for an eye elsewhere?"""
@@ -299,6 +324,9 @@ class Fit:
         dy = sum(quad[1::2]) / 4 - sum(self.quad[1::2]) / 4
         return replace(self, x=self.x + dx, y=self.y + dy, quad=tuple(quad))
 
+
+# The frame round a screen in front where no line-up has measured it (Layout.seen_fit).
+DEFAULT_BEZEL_MM = 6.0
 
 # Screens up to this many pixels apart still count as joined (Layout.touching).
 JOIN_GAP = 64
@@ -331,6 +359,10 @@ class Layout:
     # on a screen joined to them (see :meth:`mirrored_while`): (device,
     # screen) behind -> "all" of its joined screens, or just these.
     mirror_joined: dict[tuple[str, str], str | frozenset[tuple[str, str]]] = field(default_factory=dict)
+    # Count the frame round a screen in front as part of it (``[layout]
+    # bezels``): it stands for all that it and its frame hide of the screen
+    # behind, so text there doesn't run under the frame. See :meth:`seen_fit`.
+    bezels: bool = False
 
     @classmethod
     def from_devices(cls, devices: Iterable[Device], allow_overlap: bool = False,
@@ -431,6 +463,25 @@ class Layout:
                 return f
         return None
 
+    def seen_fit(self, behind: Screen, front: Screen) -> Fit | None:
+        """The fit the pointer and mirror mode go by: the calibrated one (or
+        one from the screens' real sizes), and with ``bezels`` on, grown by
+        the frame round ``front`` (:meth:`Fit.grown`): as a line-up measured
+        it, or else ``DEFAULT_BEZEL_MM`` all round where a pixel's size is
+        known."""
+        f = self.fit(behind, front) or self.sized_fit(behind, front)
+        if f is None or not self.bezels:
+            return None if f is None else replace(f, bezel=None) if f.bezel is not None else f
+        bezel = f.bezel
+        if bezel is None:
+            mm = f.mm
+            if mm is None:
+                size = self.physical.get((behind.device_id, behind.id))
+                mm = size[0] / behind.width if size and behind.width else None
+            if mm:
+                bezel = (DEFAULT_BEZEL_MM / (mm * f.scale),) * 4  # (mm per front pixel: behind's, times scale)
+        return f.grown((front.width, front.height), bezel)
+
     def set_physical(self, device_id: str, sizes: list[dict]) -> bool:
         """Take ``device_id``'s monitors' real sizes (as
         curslink.screensize.physical_sizes gives them, from that computer).
@@ -481,7 +532,7 @@ class Layout:
         for behind, front, a_behind in ((a, b, True), (b, a, False)):
             if not self.allow_overlap or not self.in_front(front, behind):
                 continue
-            f = self.fit(behind, front) or self.sized_fit(behind, front)
+            f = self.seen_fit(behind, front)
             if f is not None:
                 return a_behind, f
         return None
@@ -530,7 +581,7 @@ class Layout:
         the pair is calibrated (a :class:`Fit`)."""
         out = []
         for front, rect in self.covering(screen):
-            f = self.fit(screen, front) or self.sized_fit(screen, front)
+            f = self.seen_fit(screen, front)
             if f is None:
                 out.append((front, rect, rect))
                 continue
@@ -581,7 +632,7 @@ class Layout:
         are seen on ``front`` standing before it, in layout pixels (top left,
         top right, bottom right, bottom left): the shape mirror mode draws
         that part of ``screen`` in. None unless their fit has a ``quad``."""
-        f = self.fit(screen, front)
+        f = self.seen_fit(screen, front)
         if f is None or f.quad is None or f._maps(front.width, front.height) is None:
             return None
         x, y, w, h = rect

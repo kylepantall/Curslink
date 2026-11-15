@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import threading
 import time
 import urllib.request
@@ -185,6 +186,11 @@ class HeadPoseTracker:
             log.info("camera %s: not free yet, trying again (%d)", self.camera, attempt + 1)
             time.sleep(1.0)
             cap = cv2.VideoCapture(self.camera)
+        if not cap.isOpened() and sys.platform == "win32" and not self._stop.is_set():
+            # Media Foundation won't open it (Kyle's PC, 0.4.98): DirectShow may.
+            cap.release()
+            log.info("camera %s: trying DirectShow instead", self.camera)
+            cap = cv2.VideoCapture(self.camera, cv2.CAP_DSHOW)
         if not cap.isOpened():
             estimator.close()
             log.error("camera %s: couldn't open it (in use by another app, unplugged, or no camera permission)",
