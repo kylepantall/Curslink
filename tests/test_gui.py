@@ -2319,3 +2319,21 @@ def test_calibrating_finds_where_you_sit_without_a_phone(desktop, qapp, monkeypa
     seat.seat_path().unlink()
     page.begin(seat_only=True)
     assert page.state == "error" and "Line up your screens with the phone camera first" in page.message
+
+
+def test_a_camera_saved_from_the_old_list_gets_the_name_that_goes_with_its_number(desktop):
+    desktop.window.pages["setup"].create()
+    cfg = desktop.config()
+    cfg.set("gaze", "camera", 0)
+    cfg.set("gaze", "camera_name", "USB2.0 IR UVC WebCam")
+    cfg.save()
+    desktop.rename_cameras(["USB2.0 FHD UVC WebCam", "USB2.0 IR UVC WebCam"])
+    cfg = desktop.config()
+    assert (cfg.get("gaze", "camera"), cfg.get("gaze", "camera_name")) == (0, "USB2.0 FHD UVC WebCam")
+    assert cfg.get("gaze", "camera_list") == "mf"
+    # Once: a pick made since is left alone, the infrared one included.
+    cfg.set("gaze", "camera", 1)
+    cfg.set("gaze", "camera_name", "USB2.0 IR UVC WebCam")
+    cfg.save()
+    desktop.rename_cameras(["USB2.0 FHD UVC WebCam", "USB2.0 IR UVC WebCam"])
+    assert desktop.config().get("gaze", "camera_name") == "USB2.0 IR UVC WebCam"

@@ -169,8 +169,14 @@ def main(argv: list[str] | None = None) -> int:
     tracker = tracking.HeadPoseTracker(lambda *_sample: None, camera=camera, fps=20.0)
 
     def until_stdin_closes() -> None:
+        # Never a read left waiting on stdin: on Windows that held up the
+        # camera libraries' DLLs until the host closed the pipe, so the
+        # camera opened only as the host stopped (curslink.pipein).
+        from curslink import pipein
+
         try:
-            sys.stdin.read()
+            for _line in pipein.lines():
+                pass
         except (OSError, ValueError):
             pass
         tracker._stop.set()
