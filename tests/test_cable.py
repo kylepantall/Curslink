@@ -153,3 +153,43 @@ async def test_resolve_host_tries_the_cable_before_the_last_address(tmp_path, mo
     target = await app_mod.resolve_host(cfg, object())
     assert target.host == "169.254.20.7"
     assert orders == [["169.254.20.7", "192.168.68.59"]]
+
+
+# ------------------------------------------------- Settings > Network wording
+def test_how_the_devices_are_linked_is_said_plainly():
+    wifi = {"kind": "wifi", "name": "Intel(R) Wi-Fi 6E AX211 160MHz"}
+    eth = {"kind": "wired", "name": "Dell Universal Hybrid Video Dock"}
+    usbc = {"kind": "cable", "name": "Thunderbolt Bridge", "cable": "usb-c"}
+    direct = {"kind": "cable", "name": "Realtek USB GbE", "cable": "ethernet"}
+    vpn = {"kind": "vpn", "name": "Tailscale"}
+    how = check.how_connected
+    assert how({"name": "WKS82261", "interface": usbc, "peer_interface": usbc}) == "USB-C cable to WKS82261"
+    assert how({"name": "WKS82261", "interface": wifi, "peer_interface": usbc}) == "USB-C cable to WKS82261"
+    assert how({"name": "WKS82261", "interface": direct}) == "Ethernet cable straight to WKS82261"
+    assert how({"name": "WKS82261", "interface": wifi, "peer_interface": eth}) == "Wi-Fi here, Ethernet on WKS82261"
+    assert how({"name": "WKS82261", "interface": eth, "peer_interface": eth}) == \
+        "Ethernet at both ends, here and on WKS82261"
+    assert how({"device_id": "host", "interface": vpn}) == "A VPN (Tailscale) here, to the host"
+    assert how({"name": "Phone", "peer_interface": wifi}) == "To Phone, which is on Wi-Fi"
+    assert how({"name": "Phone", "path": "relay"}) == "Through the relay (over the internet) to Phone"
+    assert how({"name": "Phone"}) == "Over the network to Phone"
+
+
+def test_a_finished_link_takes_the_agents_end_from_its_netstats():
+    ifaces = [{"name": "Wi-Fi", "device": "wlan0", "ip": "192.168.68.59", "kind": "wifi"}]
+    link = check.finish({"name": "WKS82261", "local": "192.168.68.59", "path": "udp",
+                         "agent": {"udp": True, "iface": {"kind": "wired", "name": "Dock"}}}, ifaces)
+    assert link["how"] == "Wi-Fi here, Ethernet on WKS82261"
+    assert link["peer_interface"] == {"kind": "wired", "name": "Dock"}
+
+
+def test_the_network_page_heads_each_link_with_how_it_goes():
+    import pytest
+
+    pytest.importorskip("PySide6.QtWidgets", exc_type=ImportError)
+    from curslink.gui.netpanel import describe
+
+    heading, numbers, _extra = describe({"name": "WKS82261", "path": "udp", "how": "USB-C cable to WKS82261",
+                                         "rtt": {"samples": 3, "p50_ms": 1.2, "p95_ms": 2.0, "jitter_ms": 0.3}})
+    assert heading == "USB-C cable to WKS82261"
+    assert numbers.startswith("Pointer by UDP · Latency 1 ms")

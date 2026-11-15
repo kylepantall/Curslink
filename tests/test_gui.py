@@ -1146,7 +1146,9 @@ def test_settings_network_card_shows_each_link_and_the_check(desktop, qapp):
     desktop.service.event.emit({"event": "network", "links": [link]})
     qapp.processEvents()
     row = card.rows_by_id["laptop"]
-    assert "Work laptop" in row.heading.text() and "UDP" in row.heading.text()
+    # The heading says how the two are linked; the path is on the line under it.
+    assert row.heading.text() == "Wi-Fi here, to Work laptop"
+    assert "UDP" in row.numbers.text()
     assert "Latency 12 ms" in row.numbers.text() and "loss 1.6%" in row.numbers.text()
     assert "Wi-Fi" in row.numbers.text() and "twice" in row.extra.text()
     assert row.grade.text() == "Fair" and not card.empty.isVisibleTo(card)
