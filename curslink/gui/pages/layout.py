@@ -388,6 +388,7 @@ class LayoutPage(Page):
         # overlaps), saved with the layout if the screens are still where it put them.
         self.lineup_result = None
         self.lineup_placed: dict[str, tuple[int, int]] = {}
+        self.previewed: set[tuple[str, str]] = set()  # overlaps the service was shown before saving
         # Overlaps to line up once the layout is saved and the service is back:
         # [(behind key, front key)], see save().
         self.pending_lineups: list[tuple[str, str]] = []
@@ -523,6 +524,8 @@ class LayoutPage(Page):
         # them, and selection_changed then mustn't reach the deleted tag.
         self.items = []
         self.tag = None
+        if self.lineup_result is not None:
+            self.unpreview_fits()  # (dropped without saving)
         self.lineup_result = None
         self.scene.clear()
         if not self.app.has_config():
@@ -760,8 +763,26 @@ class LayoutPage(Page):
         pairs = self.overlap_pairs() if pairs is None else pairs
         out: dict[str, dict] = {}
         entries: dict[str, dict] = {}
+        measured = self.lineup_fits()
         for behind, front, (x, y, w, h) in pairs:
             bx, by, bw, bh = behind.layout_rect()
+            # Just lined up with the camera: where the screen in front was
+            # measured to stand (a leaning shape, for one that's turned or
+            # tipped), not the layout's rectangles, which are each screen's
+            # own pixels and so only roughly right.
+            fit = measured.get((behind.key, front.key))
+            quad = None
+            if fit is not None:
+                _fx, _fy, fw, fh = front.layout_rect()
+                quad = [float(v) for v in fit["quad"]] if fit.get("quad") else [
+                    fit["x"], fit["y"], fit["x"] + fit["scale"] * fw, fit["y"],
+                    fit["x"] + fit["scale"] * fw, fit["y"] + fit["scale"] * fh, fit["x"], fit["y"] + fit["scale"] * fh]
+                x0, y0 = max(0.0, min(quad[0::2])), max(0.0, min(quad[1::2]))
+                x1, y1 = min(float(bw), max(quad[0::2])), min(float(bh), max(quad[1::2]))
+                if x1 - x0 < 1 or y1 - y0 < 1:
+                    quad = None
+                else:
+                    x, y, w, h = round(bx + x0), round(by + y0), round(x1 - x0), round(y1 - y0)
             s = behind.screen
             entry = entries.get(behind.key)
             if entry is None:
@@ -772,7 +793,59 @@ class LayoutPage(Page):
             label = (f"{front.device_name} stands here" if self.allow_overlap
                      else f"Overlaps {front.device_name}: drag apart or allow overlap")
             entry["regions"].append({"rect": [x - bx, y - by, w, h], "label": label, "bad": not self.allow_overlap})
+            if quad is not None:
+                entry["regions"][-1]["quad"] = [round(v, 1) for v in quad]
         return out
+
+    def lineup_fits(self) -> dict[tuple[str, str], dict]:
+        """The overlaps the last line-up measured and that aren't saved yet,
+        for the screens still exactly where it put them: (behind, front) -> fit."""
+        result = self.lineup_result
+        if result is None:
+            return {}
+        items = {i.key: i for i in self.items}
+
+        def unmoved(key: str) -> bool:
+            item = items.get(key)
+            return item is not None and tuple(item.layout_rect()[:2]) == self.lineup_placed.get(key)
+
+        return {(f["behind"], f["front"]): f for f in result.fits if unmoved(f["behind"]) and unmoved(f["front"])}
+
+    def preview_fits(self) -> None:
+        """Show the running service the overlaps just measured, before they're
+        saved: mirror mode and the pointer go by them at once, so what's on
+        the screens while "Check it and press Save layout" is up is the
+        line-up's result and not the overlap as it was saved before."""
+        if not self.app.service.is_alive():
+            return
+        for (behind, front), fit in self.lineup_fits().items():
+            cmd = {"behind": behind, "front": front, "x": fit["x"], "y": fit["y"], "scale": fit["scale"]}
+            for k in ("quad", "eye", "depth", "mm"):
+                if fit.get(k) is not None:
+                    cmd[k] = fit[k]
+            self.app.service.send("fit " + json.dumps(cmd, separators=(",", ":")))
+            self.previewed.add((behind, front))
+
+    def unpreview_fits(self) -> None:
+        """A line-up that's dropped unsaved: the service goes back to the overlaps as saved."""
+        if not self.previewed or not self.app.service.is_alive():
+            self.previewed = set()
+            return
+        saved = {(t.get("behind"), t.get("front")): t for t in self.app.config().fits()} if self.app.has_config() else {}
+        for behind, front in self.previewed:
+            t = saved.get((behind, front))
+            cmd: dict = {"behind": behind, "front": front}
+            try:
+                if t is None:
+                    raise KeyError
+                cmd.update(x=float(t["x"]), y=float(t["y"]), scale=float(t["scale"]))
+                for k in ("quad", "eye", "depth", "mm"):
+                    if k in t:
+                        cmd[k] = [float(v) for v in t[k]] if k != "mm" else float(t[k])
+            except (KeyError, TypeError, ValueError):
+                cmd = {"behind": behind, "front": front, "reset": True}
+            self.app.service.send("fit " + json.dumps(cmd, separators=(",", ":")))
+        self.previewed = set()
 
     def update_hint(self, pairs=None) -> None:
         payload = self.hint_payload(pairs)
@@ -1146,6 +1219,7 @@ class LayoutPage(Page):
         # Where they really landed (as the page rounds them), for save_lineup.
         self.lineup_placed = {k: tuple(items[k].layout_rect()[:2]) for k in result.positions if k in items}
         self.lineup_result = result
+        self.preview_fits()
         for item in self.items:
             item.refresh()
         number_screens(self.items)
@@ -1186,6 +1260,7 @@ class LayoutPage(Page):
         """With Save: the edges and overlaps the last line-up measured, for the
         screens still exactly where it put them."""
         result, self.lineup_result = self.lineup_result, None
+        self.previewed = set()  # (saved: the service starts again with them)
         if result is None:
             return
         items = {i.key: i for i in self.items}

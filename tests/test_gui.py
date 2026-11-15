@@ -555,6 +555,64 @@ def test_overlap_shows_on_the_real_monitor_while_editing(desktop, qapp):
     assert not hint.showing
 
 
+def test_a_line_up_just_measured_shows_as_measured_before_it_is_saved(desktop, qapp):
+    """After a line-up, "Check it and press Save layout": what's on the
+    screens meanwhile is the overlap as measured (its leaning shape on the
+    monitor behind, and the mirror by it), not the layout's rectangles and
+    the overlap saved before."""
+    import json
+
+    from curslink.gui.overlaphint import OverlapHint, shapes_for
+    from curslink.lineup import Result
+    from PySide6.QtGui import QGuiApplication
+
+    page, home, laptop = _host_with_laptop(desktop)
+    page.isVisible = lambda: True
+    sent = []
+    desktop.service.send = sent.append
+    desktop.service.is_alive = lambda: True
+    hx, hy, hw, hh = home.layout_rect()
+    _lx, _ly, lw, lh = laptop.layout_rect()
+    quad = [hw - 300.0, hh - 200.0, hw + 400.0, hh - 230.0, hw + 420.0, hh + 300.0, hw - 310.0, hh + 330.0]
+    fit = {"behind": home.key, "front": laptop.key, "x": hw - 300.0, "y": hh - 215.0, "scale": 0.5, "quad": quad,
+           "eye": [hw / 2, hh / 3, 3000.0], "depth": [1000.0, 800.0, 850.0, 1050.0], "mm": 0.25}
+    result = Result({home.key: (hx, hy), laptop.key: (hx + hw - 400, hy + hh - 300)}, [(home.key, laptop.key)], [],
+                    [fit], found=[home.key, laptop.key], missing=[], reference=home.key)
+    page.apply_lineup(result)
+    # The service is shown the overlap at once: mirror mode and the pointer go by it.
+    cmd, = [json.loads(c[4:]) for c in sent if c.startswith("fit ")]
+    assert cmd == {k: fit[k] for k in ("behind", "front", "x", "y", "scale", "quad", "eye", "depth", "mm")}
+    # On the monitor behind: the leaning shape, with the rectangle round it for an older Curslink.
+    me = desktop.config().get("host", "device_id")
+    (entry,) = page.hint_payload()[me]["screens"]
+    region, = entry["regions"]
+    assert region["quad"] == quad and region["rect"] == [hw - 310, hh - 230, 310, 230]
+    shape, = shapes_for(QGuiApplication.primaryScreen(), entry)
+    assert shape is not None and shape.count() == 4
+    assert page.hint is not None and page.hint.showing
+    page.hint.windows[next(iter(page.hint.windows))].grab()  # paints the shape without error
+    hint = OverlapHint()
+    assert shapes_for(QGuiApplication.primaryScreen(), {"size": [100, 100], "regions": [
+        {"rect": [0, 0, 10, 10]}, {"rect": [0, 0, 10, 10], "quad": "no"}]}) == [None, None]
+    hint.hide()
+    # Moved by hand afterwards, it's the layout's rectangle again (that overlap isn't what was measured).
+    page.scene.clearSelection()
+    laptop.setSelected(True)
+    page.spins["x"].setValue(laptop.layout_rect()[0] + 40)
+    assert "quad" not in page.hint_payload()[me]["screens"][0]["regions"][0]
+    # Dropped without saving: the service goes back to the overlap as saved (here: none).
+    sent.clear()
+    page.load()
+    back, = [json.loads(c[4:]) for c in sent if c.startswith("fit ")]
+    assert back == {"behind": home.key, "front": laptop.key, "reset": True} and not page.previewed
+    # Saved: nothing to put back, the service starts again with it.
+    page.apply_lineup(result)
+    sent.clear()
+    page.save()
+    assert not [c for c in sent if c.startswith("fit ")] and not page.previewed
+    assert desktop.config().fits()[0]["quad"] == quad
+
+
 def test_no_widget_opens_as_a_stray_window(desktop, qapp):
     # A widget shown before it has a parent opens as a window of its own:
     # on Windows that flashed up and vanished, on macOS it left rows piled up.
