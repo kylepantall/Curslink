@@ -1,4 +1,6 @@
-"""Settings: the background behaviour, switching, and updates."""
+"""Settings, in sections: each group of settings is a page of its own,
+picked from under Settings in the sidebar (see window.py). Settings about
+gaze switching live on the Calibrate page with the calibration itself."""
 
 from __future__ import annotations
 
@@ -8,7 +10,16 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QButtonGroup, QFileDialog, QGridLayout, QHBoxLayout, QLineEdit, QSlider, QVBoxLayout
+from PySide6.QtWidgets import (
+    QButtonGroup,
+    QFileDialog,
+    QHBoxLayout,
+    QLineEdit,
+    QSlider,
+    QStackedWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
 from curslink import __version__, diagnostics
 from curslink.autostart import Autostart
@@ -21,13 +32,37 @@ from curslink.gui.widgets import Card, Page, Segmented, Toggle, seg_track, butto
 # The pointer speeds the slider steps through (multipliers).
 POINTER_SPEEDS = (0.25, 0.33, 0.5, 0.67, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 4.0)
 
+# The sections, in sidebar order: (key, title, description).
+SECTIONS = (
+    ("general", "General", "This computer's name and role, how Curslink looks, and how it starts."),
+    ("switching", "Switching", "What you see when the pointer moves to another device."),
+    ("input", "Keyboard & mouse", "How the shared keyboard and mouse behave on the other devices."),
+    ("overlap", "Overlapping screens", "For a screen that stands in front of part of another."),
+    ("sharing", "Clipboard & apps", "Copy and paste, and windows dragged between devices."),
+    ("network", "Network", "How the devices reach each other, and how well."),
+    ("updates", "Updates", "New versions of Curslink."),
+    ("diagnostics", "Files & logs", "Where the settings and logs are, for fixing problems."),
+)
+# Sections with nothing in them on an agent.
+HOST_SECTIONS = ("overlap",)
 
-class SettingsPage(Page):
-    def __init__(self, app):
-        super().__init__("Settings")
+
+class SettingsPage(QStackedWidget):
+    """Every settings section, one shown at a time (``show_section``)."""
+
+    def __init__(self, app, calibrate=None):
+        super().__init__()
         self.app = app
         self.autostart = Autostart()
         self._loading = False
+        self.sections: dict[str, Page] = {}
+        for key, title, description in SECTIONS:
+            page = Page(title, description)
+            page.setObjectName(f"settings-{key}")
+            self.sections[key] = page
+            self.addWidget(page)
+        self.gaze_page = calibrate
+        self._building = "general"
 
         # -- this computer -------------------------------------------------------
         me = Card("This computer")
@@ -81,13 +116,11 @@ class SettingsPage(Page):
             bg.add_row(text_block(title, detail), toggle)
         self.add(bg)
 
+        self._building = "switching"
         # -- switching (host) ---------------------------------------------------
-        self.switching = Card("Switching")
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(24)
-        grid.setVerticalSpacing(10)
-        grid.addWidget(label("Animation where the pointer lands", "small"), 0, 0)
+        self.switching = Card("Switching", rows=True)
         effects = QHBoxLayout()
+        effects.setSpacing(8)
         self.effect_group = QButtonGroup(self)
         track, seg = seg_track()
         for key, text in (("pop", "Halo"), ("blink", "Blink"), ("none", "None")):
@@ -99,46 +132,45 @@ class SettingsPage(Page):
         effects.addWidget(track)
         self.preview_button = button("Preview", None, self.preview_effect)
         self.preview_button.setToolTip("Play the animation here, the way it looks when the pointer switches")
-        effects.addSpacing(8)
         effects.addWidget(self.preview_button)
-        effects.addStretch(1)
         self.effect_group.buttonClicked.connect(self.pick_effect)
-        grid.addLayout(effects, 1, 0)
+        effects_box = QWidget()
+        effects_box.setLayout(effects)
+        effects.setContentsMargins(0, 0, 0, 0)
+        self.switching.add_row(text_block("Animation where the pointer lands",
+                                          "Plays on the screen the pointer moves to, so you can spot it."),
+                               effects_box)
+        self.edge_hint = Toggle("Show where an edge leads")
+        self.edge_hint.clicked.connect(lambda on: self.set_config("host", "edge_indicator", on))
+        self.switching.add_row(text_block(
+            "Show where an edge leads",
+            "Near an edge that leads to another device, the edge glows and a label shows its name. The edge "
+            "it's heading for glows on that device too."), self.edge_hint)
+        self.hotkeys = label("", "small", wrap=True)
+        self.switching.add_row(text_block("Hotkeys", "Work from the keyboard plugged in here, wherever the "
+                                          "pointer is."), self.hotkeys)
+        self.add(self.switching)
 
-        grid.addWidget(label("Camera", "small"), 0, 1)
-        self.camera = CameraPicker()
-        self.camera.picked.connect(self.set_camera)
-        grid.addWidget(self.camera, 1, 1)
-
+        # -- gaze switching (host): on the Calibrate page, beside the calibration --
+        self.gaze_card = Card("Gaze switching", rows=True)
         self.dwell_label = label("", "small")
-        grid.addWidget(self.dwell_label, 2, 0)
         self.dwell = QSlider(Qt.Orientation.Horizontal)
         self.dwell.setRange(150, 1000)
         self.dwell.setSingleStep(50)
         self.dwell.setPageStep(50)
+        self.dwell.setMinimumWidth(200)
         self.dwell.setAccessibleName("How long to look before switching")
-        self.dwell.valueChanged.connect(lambda v: self.dwell_label.setText(f"Look for {v} ms before switching"))
+        self.dwell.valueChanged.connect(lambda v: self.dwell_label.setText(f"{v} ms"))
         self.dwell.sliderReleased.connect(lambda: self.set_config("gaze", "dwell_ms", self.dwell.value()))
-        grid.addWidget(self.dwell, 3, 0)
+        self.gaze_card.add_row(text_block("Look before switching",
+                                          "How long you look at another screen before the pointer moves there. "
+                                          "Longer means fewer switches from a quick glance."),
+                               self.dwell, self.dwell_label)
+        self._building = "gaze"
+        self.add(self.gaze_card)
+        self._building = "switching"
 
-        hot = QVBoxLayout()
-        hot.addWidget(label("Hotkeys", "small"))
-        self.hotkeys = label("", wrap=True)
-        hot.addWidget(self.hotkeys)
-        grid.addLayout(hot, 2, 1, 2, 1)
-        self.switching.body.addLayout(grid)
-        self.edge_hint = Toggle("Show where an edge leads")
-        self.edge_hint.clicked.connect(lambda on: self.set_config("host", "edge_indicator", on))
-        hint_row = QHBoxLayout()
-        hint_row.addWidget(text_block(
-            "Show where an edge leads",
-            "Near an edge that leads to another device, the edge glows and a label shows its name. The edge "
-            "it's heading for glows on that device too."), 1)
-        hint_row.addWidget(self.edge_hint, 0, Qt.AlignmentFlag.AlignVCenter)
-        self.switching.body.addSpacing(6)
-        self.switching.body.addLayout(hint_row)
-        self.add(self.switching)
-
+        self._building = "input"
         # -- keyboard (host) ------------------------------------------------------
         self.keyboard_card = Card("Keyboard", rows=True)
         title = "Use each computer's shortcuts"
@@ -170,6 +202,7 @@ class SettingsPage(Page):
         self.pointer_card.body.addWidget(self.pointer_note)
         self.add(self.pointer_card)
 
+        self._building = "overlap"
         # -- overlapping screens (host) -------------------------------------------
         self.mirror_card = Card("Overlapping screens", rows=True)
         self.mirror = Toggle("Mirror the covered area")
@@ -224,6 +257,7 @@ class SettingsPage(Page):
                                  "another to use this.", "small", wrap=True)
         self.mirror_card.body.addWidget(self.mirror_note)
         self.add(self.mirror_card)
+        self._building = "input"
         # -- keyboard (agent) -----------------------------------------------------
         self.agent_keys_card = Card("Keyboard", rows=True)
         self.fix_keys_button = button("Fix a key…", None, self.check_keyboard)
@@ -233,6 +267,7 @@ class SettingsPage(Page):
         self.agent_keys_card.add_row(self.fix_keys_text, self.fix_keys_button)
         self.add(self.agent_keys_card)
 
+        self._building = "gaze"
         # -- per-monitor jumps (host) ---------------------------------------------
         self.jump_card = Card("Jump to the monitor you look at", rows=True)
         self.jump_all_on = button("Turn all on", None, lambda: self.set_all_jumps(True))
@@ -246,6 +281,7 @@ class SettingsPage(Page):
         self.jump_rows = []
         self.add(self.jump_card)
 
+        self._building = "switching"
         # -- agent ----------------------------------------------------------------
         self.agent_card = Card("Switching", rows=True)
         self.animations = Toggle("Play the switch animation here")
@@ -264,6 +300,7 @@ class SettingsPage(Page):
             text_block("Camera", "The one that faces you when you use this screen."), self.agent_camera_picker)
         self.add(self.agent_card)
 
+        self._building = "input"
         # Windows, both roles: the input helper service (curslink.winhelper).
         self.helper = None
         if sys.platform == "win32":
@@ -280,6 +317,7 @@ class SettingsPage(Page):
             self.helper_card.add_row(self.helper_block, self.helper)
             self.add(self.helper_card)
 
+        self._building = "sharing"
         # -- clipboard (both) -------------------------------------------------------
         self.clipboard_card = Card("Clipboard", rows=True)
         self.clipboard = Toggle("Share the clipboard")
@@ -302,6 +340,7 @@ class SettingsPage(Page):
             "across with the button held to show its screen."), self.app_mirror)
         self.add(self.app_mirror_card)
 
+        self._building = "general"
         # -- screen (both) ----------------------------------------------------------
         self.screen_card = Card("Screen", rows=True)
         self.keep_screen = Toggle("Keep my screen on")
@@ -313,10 +352,12 @@ class SettingsPage(Page):
             self.keep_screen)
         self.add(self.screen_card)
 
+        self._building = "network"
         # -- network (both) ---------------------------------------------------------
         self.network = NetworkCard(lambda on: self.set_config("network", "optimise", on), self.check_network)
         self.add(self.network)
 
+        self._building = "updates"
         # -- updates --------------------------------------------------------------
         upd = Card("Updates", rows=True)
         self.update_art = spot("update", 96, 72)
@@ -342,6 +383,7 @@ class SettingsPage(Page):
         row.layout().setStretch(1, 1)
         self.add(upd)
 
+        self._building = "diagnostics"
         # -- files ------------------------------------------------------------------
         files = Card("Files")
         self.config_text = label("", "mono", wrap=True)
@@ -369,7 +411,8 @@ class SettingsPage(Page):
                                   "line, with the logs, settings and crash reports, not your pairing keys. The "
                                   "debug console shows the same lines live (Ctrl+Shift+D, or Cmd+Shift+D on a Mac).", "small", wrap=True))
         self.add(diag)
-        self.finish()
+        for page in self.sections.values():
+            page.finish()
 
         app.config_changed.connect(self.load)
         app.update_found.connect(self.show_release)
@@ -377,10 +420,31 @@ class SettingsPage(Page):
         app.service.state_changed.connect(self._on_service_state)
         self.load()
 
+    # -- sections -----------------------------------------------------------------
+    def add(self, widget):
+        """Add a card to the section being built. Gaze cards go to the
+        Calibrate page when there is one (``gaze_page``)."""
+        if self._building == "gaze":
+            if self.gaze_page is not None:
+                return self.gaze_page.add_setting(widget)
+            return self.sections["switching"].add(widget)
+        return self.sections[self._building].add(widget)
+
+    def section_keys(self, role: str | None) -> list[str]:
+        return [k for k, _t, _d in SECTIONS if role != "agent" or k not in HOST_SECTIONS]
+
+    def show_section(self, key: str) -> None:
+        if key not in self.sections or key not in self.section_keys(self.app.role):
+            key = "general"
+        self.setCurrentWidget(self.sections[key])
+
+    def current_section(self) -> str:
+        w = self.currentWidget()
+        return next(k for k, p in self.sections.items() if p is w)
+
     def shown(self) -> None:
-        for picker in (self.camera, self.agent_camera_picker):
-            if not picker.loaded:
-                picker.refresh()
+        if not self.agent_camera_picker.loaded:
+            self.agent_camera_picker.refresh()
         self.load()
         self.refresh_helper()
         self.load_diagnostics()
@@ -417,6 +481,7 @@ class SettingsPage(Page):
             self.minimized.setChecked(self.app.prefs.start_minimized)
             self.start_linking.setChecked(self.app.prefs.start_linking)
             self.switching.setVisible(role == "host")
+            self.gaze_card.setVisible(role == "host")
             self.jump_card.setVisible(role == "host")
             self.keyboard_card.setVisible(role == "host")
             self.mirror_card.setVisible(role == "host")
@@ -459,11 +524,10 @@ class SettingsPage(Page):
             self.edge_hint.setChecked(bool(host.get("edge_indicator", True)))
             for b in self.effect_group.buttons():
                 b.setChecked(b.property("effect") == effect)
-            self.camera.set_current(int(gaze.get("camera", 0) or 0), str(gaze.get("camera_name", "") or ""))
             self.theme_choice.set_value(self.app.prefs.theme)
             self.glass.setChecked(self.app.prefs.glass)
             self.dwell.setValue(int(gaze.get("dwell_ms", 250)))
-            self.dwell_label.setText(f"Look for {self.dwell.value()} ms before switching")
+            self.dwell_label.setText(f"{self.dwell.value()} ms")
             self.hotkeys.setText(f"Bring input home: {host.get('return_hotkey', 'ctrl+alt+home')}\n"
                                  f"Gaze on/off: {host.get('gaze_toggle_hotkey', 'ctrl+alt+g')}")
             self.animations.setChecked(bool(raw.get("agent", {}).get("animations", True)))
@@ -745,15 +809,6 @@ class SettingsPage(Page):
             self._overlay = OverlayProcess()
         c = self.window().frameGeometry().center()
         self._overlay.show(effect, c.x(), c.y())
-
-    def set_camera(self, index: int, name: str) -> None:
-        if self._loading:
-            return
-        cfg = self.app.config()
-        cfg.set("gaze", "camera", index)
-        cfg.set("gaze", "camera_name", name)
-        cfg.save()
-        self.app.config_saved()
 
     def set_agent_camera(self, on: bool) -> None:
         self.agent_camera_row.setVisible(on)

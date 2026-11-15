@@ -88,6 +88,7 @@ class CalibratePage(Page):
         cam_row = QHBoxLayout()
         cam_row.addWidget(label("Camera", "small"))
         self.camera = CameraPicker()
+        self.camera.picked.connect(self.set_camera)
         cam_row.addWidget(self.camera)
         cam_row.addStretch(1)
         self.camera_row = QWidget()
@@ -107,6 +108,7 @@ class CalibratePage(Page):
         self.list_card = Card("Screens", rows=True)
         row.addWidget(self.list_card, 2)
         col.addLayout(row)
+        self.body_col = col
         self.add(self.body)
         self.finish()
         self.overlay = LookHere(self.overlay_record, self.cancel, self.skip)
@@ -126,6 +128,21 @@ class CalibratePage(Page):
         self.state = "idle"
         self.show_state()
         app.config_changed.connect(self.load_targets)
+
+    def add_setting(self, card):
+        """A gaze setting, under the calibration (Settings builds them)."""
+        self.body_col.addWidget(card)
+        return card
+
+    def set_camera(self, index: int, name: str) -> None:
+        """Save the camera as soon as it's picked, as Settings did."""
+        cfg = self.app.config()
+        if (int(cfg.get("gaze", "camera", 0) or 0), str(cfg.get("gaze", "camera_name", "") or "")) == (index, name):
+            return
+        cfg.set("gaze", "camera", index)
+        cfg.set("gaze", "camera_name", name)
+        cfg.save()
+        self.app.config_saved()
 
     def shown(self) -> None:
         if not self.camera.loaded:
@@ -218,7 +235,7 @@ class CalibratePage(Page):
                 cal.stop()
                 why = getattr(cal.tracker, "error", None)
                 if why:
-                    raise RuntimeError(f"The camera stopped: {why}. Settings > Diagnostics has the full log.")
+                    raise RuntimeError(f"The camera stopped: {why}. Settings > Files & logs has the full log.")
                 raise RuntimeError("No face found. Check the camera is free and you're facing it in good light.")
             return cal
 

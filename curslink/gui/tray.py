@@ -41,7 +41,7 @@ class Tray(QSystemTrayIcon):
         self.keep_screen.setCheckable(True)
         self.keep_screen.triggered.connect(app.set_keep_screen_on)
         menu.addSeparator()
-        self.update_action = menu.addAction("", lambda: app.show_window("settings"))
+        self.update_action = menu.addAction("", lambda: app.show_window("settings/updates"))
         self.update_action.setVisible(False)
         menu.addAction(_title("Open Curslink") + ("…" if MAC else ""), app.show_window)
         self.run = menu.addAction(_title("Stop linking"), self.toggle_run)

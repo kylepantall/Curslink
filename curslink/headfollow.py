@@ -27,7 +27,7 @@ What it goes by, and where it's rough:
   out of the screen behind.
 * Home is where your head was when it was switched on (or first seen after
   a new line-up), and is kept between runs. If you sat differently then,
-  "Sit here" on the Settings page takes where you are now.
+  "Sit here" in Settings > Overlapping screens takes where you are now.
 
 No camera or ML here: samples come in through :meth:`HeadFollow.sample`.
 """

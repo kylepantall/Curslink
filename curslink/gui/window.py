@@ -47,9 +47,14 @@ HOST_ONLY = ("layout", "calibrate")
 class NavButton(QPushButton):
     """A sidebar entry: glyph and title, drawn per platform."""
 
-    def __init__(self, key: str, title: str):
+    def __init__(self, key: str, title: str, sub: bool = False):
         super().__init__(title)
         self.key = key
+        # A section under a page (Settings): indented under its title, no glyph.
+        self.sub = sub
+        # Its sections are listed under it: the selected section is the one
+        # highlighted, as in Windows' and macOS's own Settings.
+        self.expanded = False
         self.setCheckable(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setObjectName("nav")
@@ -57,7 +62,8 @@ class NavButton(QPushButton):
         self._hover = False
 
     def sizeHint(self) -> QSize:
-        return QSize(200, theme.current().size["nav_h"])
+        h = theme.current().size["nav_h"]
+        return QSize(200, h - 4 if self.sub else h)
 
     def minimumSizeHint(self) -> QSize:
         return self.sizeHint()
@@ -79,23 +85,25 @@ class NavButton(QPushButton):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         r = QRectF(self.rect())
         radius = th.size["r_nav"]
-        if self.isChecked() or self._hover:
+        selected = self.isChecked() and not self.expanded
+        if selected or self._hover:
             bg = theme.qcolor(t["navsel"])
-            if not self.isChecked():
+            if not selected:
                 bg.setAlphaF(bg.alphaF() * 0.6)
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(bg)
             p.drawRoundedRect(r, radius, radius)
-        if self.isChecked() and th.platform == "win":
+        if selected and th.platform == "win":
             p.setBrush(theme.qcolor(t["accent"]))
             p.drawRoundedRect(QRectF(0, r.height() / 2 - 8, 3, 16), 1.5, 1.5)
         ink = t["ink"] if self.isEnabled() else t["ink3"]
         icon_colour = t["accent"] if th.platform == "mac" and self.isEnabled() else ink
         pad = 12 if th.platform != "mac" else 10
-        icon = nav_icon(self.key, icon_colour, 16).pixmap(16, 16)
-        p.drawPixmap(int(pad), int((r.height() - 16) / 2), icon)
+        if not self.sub:
+            icon = nav_icon(self.key, icon_colour, 16).pixmap(16, 16)
+            p.drawPixmap(int(pad), int((r.height() - 16) / 2), icon)
         f = self.font()
-        f.setPixelSize(th.size["font_px"] + (0.5 if th.platform == "mac" else 0))
+        f.setPixelSize(th.size["font_px"] - (1 if self.sub else 0) + (0.5 if th.platform == "mac" else 0))
         f.setWeight(f.Weight.DemiBold if self.isChecked() and th.platform != "win" else f.Weight.Normal)
         p.setFont(f)
         p.setPen(theme.qcolor(ink))
@@ -200,6 +208,8 @@ class MainWindow(QMainWindow):
             self.nav.addButton(b)
             self.nav_buttons[key] = b
             nb.addWidget(b)
+            if key == "settings":
+                nb.addWidget(self._settings_nav())
         sv.addWidget(self.nav_box)
 
         # First run: just the name and version, centred.
@@ -252,12 +262,13 @@ class MainWindow(QMainWindow):
         pv.addWidget(self.stack)
         h.addWidget(pane, 1)
 
+        calibrate = CalibratePage(app)
         self.pages = {
             "status": StatusPage(app),
             "devices": DevicesPage(app),
             "layout": LayoutPage(app),
-            "calibrate": CalibratePage(app),
-            "settings": SettingsPage(app),
+            "calibrate": calibrate,
+            "settings": SettingsPage(app, calibrate=calibrate),  # gaze settings go on the Calibrate page
             "setup": SetupPage(app),
         }
         for page in self.pages.values():
@@ -274,6 +285,27 @@ class MainWindow(QMainWindow):
         theme.manager().changed.connect(self.theme_changed)
         self.refresh_side()
         self.show_page("status")
+
+    def _settings_nav(self) -> QWidget:
+        """The Settings sections, listed under Settings while it's open."""
+        from curslink.gui.pages.settings import SECTIONS
+
+        self.section_nav = QButtonGroup(self)
+        self.section_nav.setExclusive(True)
+        self.section_buttons: dict[str, NavButton] = {}
+        self.sections_box = QWidget()
+        v = QVBoxLayout(self.sections_box)
+        v.setContentsMargins(0, 0, 0, 4)
+        v.setSpacing(1)
+        for key, title, _description in SECTIONS:
+            b = NavButton(key, title, sub=True)
+            b.setAccessibleName(f"Settings: {title}")
+            b.clicked.connect(lambda _=False, k=key: self.show_page(f"settings/{k}"))
+            self.section_nav.addButton(b)
+            self.section_buttons[key] = b
+            v.addWidget(b)
+        self.sections_box.hide()
+        return self.sections_box
 
     def place_side(self) -> None:
         root = self.centralWidget()
@@ -294,12 +326,17 @@ class MainWindow(QMainWindow):
 
     # -- pages ----------------------------------------------------------------
     def show_page(self, key: str) -> None:
+        """Show a page; ``settings/<section>`` opens one Settings section."""
+        key, _, section = key.partition("/")
         configured = self.app.has_config()
         if key != "setup" and not configured:
             key = "setup"
         if key in HOST_ONLY and self.app.role == "agent":
             key = "status"
         page = self.pages[key]
+        if key == "settings":
+            page.show_section(section or (page.current_section() if self.current_page() == "settings"
+                                          else "general"))
         self.stack.setCurrentWidget(page)
         for k, b in self.nav_buttons.items():
             b.setChecked(k == key)
@@ -323,6 +360,17 @@ class MainWindow(QMainWindow):
         self.footer.setVisible(not first_run)
         for key in HOST_ONLY:
             self.nav_buttons[key].setVisible(role != "agent")
+        settings = getattr(self, "pages", {}).get("settings")
+        if settings is not None:
+            on = self.current_page() == "settings"
+            self.sections_box.setVisible(on and not first_run)
+            self.nav_buttons["settings"].expanded = on
+            self.nav_buttons["settings"].update()
+            keys = settings.section_keys(role)
+            current = settings.current_section()
+            for key, b in self.section_buttons.items():
+                b.setVisible(key in keys)
+                b.setChecked(key == current)
         if role:
             self.role_label.setText(f"{role.title()} · {self.app.device_name()}")
         self.version_label.setText(f"Curslink {__version__}" + (f" · {role.title()}" if role else ""))
@@ -350,7 +398,7 @@ class MainWindow(QMainWindow):
     # -- theme and native look ------------------------------------------------
     def theme_changed(self) -> None:
         restyle_pills()
-        for b in self.nav_buttons.values():
+        for b in [*self.nav_buttons.values(), *self.section_buttons.values()]:
             b.update()
         self.refresh_side()
         if self.glass:

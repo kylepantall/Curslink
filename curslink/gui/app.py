@@ -841,7 +841,7 @@ def main(argv: list[str] | None = None) -> int:
     if crashed is not None and tray_ok:
         QTimer.singleShot(1500, lambda: app.tray.say(
             "Curslink closed unexpectedly last time",
-            "A crash report was saved. Settings > Diagnostics has it."))
+            "A crash report was saved. Settings > Files & logs has it."))
     QTimer.singleShot(4000, app.check_for_update)
     daily = QTimer(app)
     daily.timeout.connect(app.check_for_update)

@@ -222,7 +222,7 @@ calibration" and "calibrated host plus agent cameras" all work.
 Gaze picks a *device*, not a monitor: looking at another computer brings
 the pointer back to wherever you left it there, and looking between the
 monitors of the device you're on does nothing. Monitors listed in `[gaze]
-jump_screens` (Settings > "Jump to the monitor you look at") are the
+jump_screens` (Calibrate page, "Jump to the monitor you look at") are the
 exception: looking at one puts the pointer on that monitor, where it last
 was there, even on the device you're already using. Only a calibrated look
 counts; a device's own camera only knows the device, so it still picks the
@@ -489,7 +489,7 @@ nothing bounces back), anything a password manager marks private, and the
 service anything over `clipboard_max_mb` (25). The Android app lists
 `clipboard_text` and only trades text; Android lets it read other apps'
 copies only while Curslink is in front. `[host]`/`[agent] clipboard =
-false` (Settings > Clipboard) turns it off.
+false` (Settings > Clipboard & apps) turns it off.
 
 ### Carrying Isolink's floating chats
 
@@ -664,7 +664,7 @@ logs with `diagnostics.event(log, "name", "text", key=value)`; plain
 `log.info(...)` lines just have `msg`.
 
 - The service forwards each record to the app inside its `log` event
-  (`rec`), so the **debug console** (Settings > Diagnostics, or
+  (`rec`), so the **debug console** (Settings > Files & logs, or
   Ctrl/Cmd+Shift+D; `curslink/gui/console.py`) shows the app's and the
   service's lines live, plus every status event as
   `{"type":"event","event":"switch","fields":{...}}`. Its filter takes
@@ -877,7 +877,7 @@ pairing; UDP moves; the relay), tested in CI against the real Python host
 ## Pointer speed on other devices
 
 `curslink/pointerfeel.py`, `[pointer]` / `[pointer.device."<id>"]` in the
-host's config (Settings > Pointer on other devices). The host's mouse motion
+host's config (Settings > Keyboard & mouse). The host's mouse motion
 comes already shaped by the host OS's pointer speed and acceleration, so by
 default (`feel = "here"`) another device's pointer moves as the host's would.
 `speed` (0.25-4) multiplies it. `feel = "native"` moves it the way the

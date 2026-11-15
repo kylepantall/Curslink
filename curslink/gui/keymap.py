@@ -524,7 +524,7 @@ class KeyboardCheckDialog(QDialog):
         else:
             self.title.setText("Review and save")
             self.lead.setText(f"These fixes are saved on this {self.os_name} device only, on top of the host's "
-                              "mapping. Change or remove any of them here or later in Settings > Keyboard.")
+                              "mapping. Change or remove any of them here or later in Settings > Keyboard & mouse.")
             self.prompt.setText("")
             self.detail.setText("")
 
