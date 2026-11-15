@@ -96,6 +96,9 @@ class Device:
     id: str
     name: str
     screens: tuple[Screen, ...]
+    # Turned off on the Layout page (``enabled = false`` in its [[devices]]):
+    # still paired and laid out, but the pointer and keyboard never go to it.
+    enabled: bool = True
 
 
 SIDES = ("left", "right", "top", "bottom")

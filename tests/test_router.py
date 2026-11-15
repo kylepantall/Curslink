@@ -435,3 +435,38 @@ def test_the_safety_nets_bring_input_home_to_the_middle_of_the_main_screen(parts
     home = router.screen_for_home()
     assert (router.x, router.y) == home.center
     assert sink.calls[-1][0] == "move"
+
+
+def test_turned_off_device_takes_no_input(parts):
+    router, capture, _, transport, _ = parts
+    router.set_device_enabled("laptop", False)
+    assert not router.available("laptop")
+    router.on_pointer(1000, 500)
+    router.on_pointer(3839, 500)
+    assert router.is_local  # the edge leads nowhere while it's off
+    router.on_gaze(Target("laptop", "main"))
+    assert router.is_local and not transport.of_type("enter")
+    router.set_device_enabled("laptop", True)
+    router.on_gaze(Target("laptop", "main"))
+    assert router.active_device == "laptop"
+
+
+def test_turning_off_the_device_in_use_brings_input_home(parts):
+    router, capture, _, transport, _ = parts
+    router.on_gaze(Target("laptop", "main"))
+    assert router.active_device == "laptop"
+    router.set_device_enabled("laptop", False)
+    assert router.is_local and not capture.grabbed
+
+
+def test_turned_off_in_the_config(layout):
+    from dataclasses import replace
+
+    devices = [replace(d, enabled=d.id != "laptop") for d in layout.devices.values()]
+    from curslink.layout import Layout
+
+    router = Router(Layout.from_devices(devices), "desktop", FakeCapture(), FakeSink(),
+                    FakeTransport({"laptop"}), FakeOverlay())
+    assert router.turned_off == {"laptop"}
+    router.on_pointer(3839, 500)
+    assert router.is_local
