@@ -24,7 +24,7 @@ from typing import Callable
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer
 from PySide6.QtGui import (QBrush, QColor, QFont, QFontMetricsF, QGuiApplication, QImage, QLinearGradient,
-                           QPainter, QPainterPath, QPalette, QPen)
+                           QPainter, QPainterPath, QPalette, QPen, QTransform)
 from PySide6.QtWidgets import QWidget
 
 log = logging.getLogger(__name__)
@@ -121,6 +121,10 @@ class Bar(_Overlay):
         self.boost = 0.0    # 0..1 extra while flashing
         self.dark = False
         self.colour = QColor("#007AFF")
+        # A leaning edge ("lean" in the command): where the bar's edge line
+        # is across the window at its start and at its end (logical px from
+        # the window's left, or top). None: straight, the window's own side.
+        self.lean: tuple[float, float] | None = None
 
     def paintEvent(self, _e) -> None:  # noqa: N802
         # Flaring on a crossing it goes from full to nothing in a straight
@@ -129,14 +133,41 @@ class Bar(_Overlay):
         if strength <= 0.003:
             return
         p = QPainter(self)
-        p.drawImage(0, 0, self.render(strength, self.devicePixelRatioF()))
+        self.draw(p, strength, self.devicePixelRatioF())
         p.end()
+
+    def straight_size(self) -> tuple[int, int]:
+        """The bar before it's leant: THICK across, the window's length along."""
+        if self.lean is None:
+            return self.width(), self.height()
+        return (THICK, self.height()) if self.side in ("left", "right") else (self.width(), THICK)
+
+    def draw(self, p: QPainter, strength: float, dpr: float = 1.0) -> None:
+        """The bar, sheared along a leaning edge when there is one: the
+        straight bar drawn so its edge runs from ``lean[0]`` to ``lean[1]``."""
+        image = self.render(strength, dpr)
+        if self.lean is None:
+            p.drawImage(0, 0, image)
+            return
+        w, h = self.straight_size()
+        s0, s1 = self.lean
+        p.save()
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        # Where the bar's own edge (its outer side) sits in the straight image.
+        if self.side in ("left", "right"):
+            edge = w if self.side == "right" else 0
+            p.setTransform(QTransform(1, 0, (s1 - s0) / max(1, h), 1, s0 - edge, 0), True)
+        else:
+            edge = h if self.side == "bottom" else 0
+            p.setTransform(QTransform(1, (s1 - s0) / max(1, w), 0, 1, 0, s0 - edge), True)
+        p.drawImage(0, 0, image)
+        p.restore()
 
     def render(self, strength: float, dpr: float = 1.0) -> QImage:
         """The bar at ``strength``, at the screen's real resolution. Drawn at
         16 bits a channel and dithered down, so its long faint fades don't
         break into bands; the glow across it is one smooth falloff."""
-        w, h = self.width(), self.height()
+        w, h = self.straight_size()
         vertical = self.side in ("left", "right")
         length = h if vertical else w
         img = QImage(max(1, round(w * dpr)), max(1, round(h * dpr)), QImage.Format.Format_RGBA64_Premultiplied)
@@ -526,6 +557,28 @@ class EdgeOverlay:
         colour = accent(dark)
         bar = self.bar
         bar.side, bar.at, bar.dark, bar.colour = side, at - a, dark, colour
+        bar.lean = None
+        lean = d.get("lean")
+        if isinstance(lean, list) and len(lean) == 2 and all(isinstance(v, (int, float)) for v in lean):
+            # The edge leans: the window is widened across to hold the bar
+            # sheared from one end's offset to the other's ("a" end first).
+            across = sx if side in ("left", "right") else sy
+            da, db = float(lean[0]) * across, float(lean[1]) * across
+            if float(d["a"]) > float(d["b"]):
+                da, db = db, da
+            gx, gy, gw, gh = geo
+            line = {"right": gx + gw, "left": gx, "bottom": gy + gh, "top": gy}[side]
+            if side in ("left", "right"):
+                lo = min(gx, line + da - THICK, line + db - THICK)
+                hi = max(gx + gw, line + da + THICK, line + db + THICK)
+                geo = (lo, gy, hi - lo, gh)
+            else:
+                lo = min(gy, line + da - THICK, line + db - THICK)
+                hi = max(gy + gh, line + da + THICK, line + db + THICK)
+                geo = (gx, lo, gw, hi - lo)
+            geo = tuple(round(v) for v in geo)
+            origin = geo[0] if side in ("left", "right") else geo[1]
+            bar.lean = (line + da - origin, line + db - origin)
         bar.setGeometry(*(round(v) for v in geo))
         if d["role"] != "from":
             if self.label is not None:
