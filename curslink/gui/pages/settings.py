@@ -300,7 +300,7 @@ class SettingsPage(QStackedWidget):
             "across far ones. It needs an overlap lined up with the phone camera (Layout, Line up with a "
             "camera) and keeps the camera on. Sit here: take where you are sitting now as the place it was "
             "lined up from."), self.head_home, self.follow_head)
-        # What the camera those two switches use is doing: until 0.4.113 nothing
+        # What the camera those two switches use is doing: until 0.4.114 nothing
         # said why it hadn't come on (no overlap through a line-up yet, say).
         self.head_note = label("", "small", wrap=True)
         self.mirror_card.body.addWidget(self.head_note)
