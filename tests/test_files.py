@@ -715,6 +715,23 @@ async def test_cancel_ends_the_drag_without_dropping(tmp_path):
     assert calls[-1] == "cancel" and not (tmp_path / "drops" / "d5").exists()
 
 
+async def test_a_cancelled_mac_drag_is_ended_by_the_helper_too(tmp_path):
+    """0.4.98: a Mac agent's AppKit drag outlived the Escape and button-up
+    when the drag went back to the PC, so the next one had to end it first."""
+    drop, receiver, helper, calls = native(tmp_path, end_watch=True)
+    drop.begin("d6", CARD)
+    drop.on_helper("nativedrag-started d6 card")
+    drop.cancel()
+    await settle()
+    assert calls[-1] == "cancel" and "nativedrag end" in helper
+    drop2, _r, helper2, _c = native(tmp_path / "win")
+    drop2.begin("d7", CARD)
+    drop2.on_helper("nativedrag-started d7")
+    drop2.cancel()
+    await settle()
+    assert "nativedrag end" not in helper2
+
+
 # ------------------------------------------------- the agent handing a drag back
 
 
@@ -1358,3 +1375,37 @@ def test_the_agent_tells_the_drag_out_where_a_held_pointer_is():
     session.handle(Message("button", {"button": "left", "pressed": True}))
     session.handle(Message("move", {"x": 20, "y": 10, "ts": 2.0}))
     assert watch.seen == [(20, 10)]
+
+
+def test_windows_drag_image_is_hidden_while_the_drag_is_carried_elsewhere():
+    """0.4.98: Windows kept showing what was dragged at the parked pointer
+    while the drag was on the Mac."""
+    from curslink.files.overlay import WinDragImage
+
+    class User32:
+        def __init__(self):
+            self.wins = {11: True, 12: False}
+            self.calls = []
+
+        def FindWindowExW(self, parent, after, cls, title):  # noqa: N802
+            assert cls == "SysDragImage"
+            keys = sorted(self.wins)
+            nxt = [k for k in keys if k > after] if after else keys
+            return nxt[0] if nxt else 0
+
+        def IsWindowVisible(self, h):  # noqa: N802
+            return self.wins[h]
+
+        def IsWindow(self, h):  # noqa: N802
+            return h in self.wins
+
+        def ShowWindow(self, h, cmd):  # noqa: N802
+            self.calls.append((h, cmd))
+            self.wins[h] = cmd != 0
+
+    u = User32()
+    image = WinDragImage(u)
+    image.hide()
+    assert u.calls == [(11, 0)] and not u.wins[11]
+    image.show()
+    assert u.calls[-1] == (11, 4) and u.wins[11] and not u.wins[12]
