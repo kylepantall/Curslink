@@ -114,7 +114,8 @@ Layout page says afterwards how many were checked and how close they came).
 A computer's own two screens are checked against each other too. Last, where
 one screen stands in front of another, both draw one pattern of blocks and
 the overlap is nudged until the blocks carry on unbroken across the edge:
-hold the phone close to your eyes for that. A laptop that's turned in or
+hold the phone close to your eyes for that (once they join they stay up
+five seconds more, still being measured, so you can see it for yourself). A laptop that's turned in or
 tipped back is seen against the monitor as a leaning shape, not a
 rectangle: the line-up measures that shape, and the mirror and the pointer
 go by it. (What lines up still depends on where you look from. **Settings >
