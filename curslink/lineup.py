@@ -746,6 +746,8 @@ class Live:
         self.result: Result | None = None
         self.solution = None  # the curslink.lineup_scene.Solution it's from
         self.check = None  # curslink.lineup_check.Check, once the scan is done
+        self.seam = None  # curslink.lineup_seam.Seam, after that: each overlap's pattern joined up
+        self._locator = None
         self.error = ""
         self.fresh = False  # a new view since the last solve
         self.history: list[dict[str, tuple[int, int]]] = []
@@ -908,6 +910,41 @@ class Live:
         self.result.check = self.check_summary()
         return moved
 
+    # ---- and last: a pattern across each overlap, joined up (curslink.lineup_seam) ----
+    def start_seam(self):
+        """After the check: the pattern each screen in front of another and
+        the one behind it draw, to put that overlap's fit right by. None if
+        no screen stands in front of another (or too little of one shows)."""
+        from curslink.lineup_check import Check
+        from curslink.lineup_seam import Seam
+
+        if self.seam is None and self.aligned and self.solution is not None and self.scene is not None \
+                and self.result is not None and self.result.fits:
+            solution = self.check.sol if self.check is not None else self.solution
+            planned = check_plan(self.planned)
+            seam = Seam(solution, self.result.fits, planned, self.scene.intr, self.scene.image_size)
+            if seam.any:
+                self.seam = seam
+                self._locator = self.check or Check(solution, self.result, planned, self.scene.intr,
+                                                    self.scene.image_size)
+        return self.seam
+
+    def seam_frame(self, gray) -> bool:
+        """A frame taken while the pattern is up: each overlap's fit is moved
+        by the break the camera sees in it. True if one moved (the strips
+        want drawing again)."""
+        if self.seam is None or self.scene is None:
+            return False
+        sightings = read_frame(gray, self.seam.showing, self.dims, self.scene.tolerance, thorough=False,
+                               curved=self.scene.curved)
+        self.frames += 1
+        self.last_seen = [s.key for s in sightings]
+        moved = self.seam.frame(gray, sightings, self._locator.locate)
+        mine = {(f["behind"], f["front"]): f for f in self.seam.fits()}
+        self.result.fits = [mine.get((f["behind"], f["front"]), f) for f in self.result.fits]
+        self.result.check = self.check_summary()
+        return moved
+
     def check_summary(self) -> dict | None:
         """How the check went, for the Layout page: ``{"state", "lines",
         "joins", "step"}``. ``state``: "none" (no two screens meet where a
@@ -916,16 +953,22 @@ class Live:
         "part" (it stopped before that). ``step``: the biggest step left."""
         if not self.aligned:
             return None
+        seam = {"seam": self.seam.summary()} if self.seam is not None else {}
         if self.check is None:
-            return {"state": "none", "lines": 0, "joins": 0, "step": None}
+            return {"state": "none", "lines": 0, "joins": 0, "step": None, **seam}
         c = self.check
         drawn = [j for j in c.joins if j.lines]
         state = "unseen" if not c.measured else "checked" if c.agreed else "part"
-        return {"state": state, "lines": sum(len(j.lines) for j in drawn), "joins": len(drawn), "step": c.worst()}
+        return {"state": state, "lines": sum(len(j.lines) for j in drawn), "joins": len(drawn), "step": c.worst(),
+                **seam}
 
     def hint(self, numbers: dict[str, object] | None = None) -> str:
         """What to do next, in a few words (for the phone's screen)."""
         numbers = numbers or {}
+        if self.seam is not None:
+            if self.seam.done:
+                return "Lined up"
+            return "Hold the phone close to your eyes: the pattern is being joined up"
         if self.check is not None:
             if self.check.done:
                 return "Lined up"

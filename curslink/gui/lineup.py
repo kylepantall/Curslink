@@ -28,9 +28,12 @@ ms, so the camera gets points all over the screen from wherever it's held
 how the scan is going for that screen ("locked": it's measured, shown as a
 green edge). ``lines``: the check at the end (curslink.lineup_check): runs
 of points ``[[x, y], ...]`` as shares of the screen, drawn as bright lines
-that should carry straight on across to the next screen. The same payload
-sent again with only the states or lines changed updates the windows in
-place.
+that should carry straight on across to the next screen. ``pattern``: the
+last step (curslink.lineup_seam): ``{"cell", "seed", "map": [x, y, scale],
+"size": [w, h], "areas": [[x, y, w, h], ...]}``, blocks of black and white
+that carry on unbroken from the screen behind onto the one in front. The
+same payload sent again with only the states, lines or pattern changed
+updates the windows in place.
 """
 
 from __future__ import annotations
@@ -85,7 +88,7 @@ class _MarkerWindow(QWidget):
         self.restart()
 
     def restart(self) -> None:
-        if any(s.get("lines") is not None for s in self.screens):
+        if any(s.get("lines") is not None or s.get("pattern") for s in self.screens):
             self.shown = 0  # the check: its own patterns, staying put
 
     def step(self) -> None:
@@ -97,6 +100,7 @@ class _MarkerWindow(QWidget):
         for mine, new in zip(self.screens, screens):
             mine["state"] = new.get("state")
             mine["lines"] = new.get("lines")
+            mine["pattern"] = new.get("pattern")
         self.restart()
         self.update()
 
@@ -106,6 +110,21 @@ class _MarkerWindow(QWidget):
         # Dark behind, so the white around each pattern stands out in the photo.
         p.fillRect(self.rect(), QColor(16, 18, 24, 235))
         first = True
+        joining = any(s.get("pattern") for s in self.screens)
+        if joining:
+            # The last step: blocks that should carry on unbroken onto the next screen
+            # (curslink.lineup_seam), under the few patterns still up.
+            from curslink.lineup_seam import blocks
+
+            p.setPen(Qt.PenStyle.NoPen)
+            white, black = QColor(255, 255, 255), QColor(0, 0, 0)
+            for screen in self.screens:
+                pattern = screen.get("pattern")
+                if pattern:
+                    sw, sh = pattern["size"]
+                    for x0, y0, x1, y1, on in blocks(pattern, sw, sh):
+                        p.fillRect(QRectF(x0 * w / sw, y0 * h / sh, (x1 - x0) * w / sw, (y1 - y0) * h / sh),
+                                   white if on else black)
         for screen in self.screens:
             sets = screen.get("sets") or [screen["markers"]]
             first = first and self.shown % len(sets) == 0
@@ -113,7 +132,7 @@ class _MarkerWindow(QWidget):
                 bits, fx, fy, fw, fh = marker
                 draw_marker(p, int(bits), QRectF(fx * w, fy * h, fw * w, fh * h))
         checking = any(s.get("lines") is not None for s in self.screens)
-        if checking:
+        if checking and not joining:
             # The check: bright lines that should carry straight on across to the next screen.
             p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             pen = QPen(QColor(255, 255, 255), max(3.0, 0.008 * min(w, h)))
@@ -126,7 +145,7 @@ class _MarkerWindow(QWidget):
                         (path.lineTo if i else path.moveTo)(fx * w, fy * h)
                     p.drawPath(path)
         locked = bool(self.screens) and all(s.get("state") == "locked" for s in self.screens)
-        if locked and not checking:
+        if locked and not checking and not joining:
             # Measured: a green edge all round, seen from across the desk.
             edge = max(6, round(min(w, h) * 0.012))
             p.setPen(QPen(STATE_COLOURS["locked"], edge))
@@ -149,7 +168,8 @@ class _MarkerWindow(QWidget):
         if lines:
             s = lines[0]
             number, title = str(s.get("number") or ""), str(s.get("title") or "")[:80]
-            note = ("Checking: the lines should carry on straight across to the next screen" if checking else
+            note = ("Joining up: the blocks should carry on unbroken onto the next screen" if joining else
+                    "Checking: the lines should carry on straight across to the next screen" if checking else
                     "Measured \u2713" if locked else "Lining up: keep these patterns in the camera's view")
             bw = max(mb.horizontalAdvance(number), ms.horizontalAdvance(title), ms.horizontalAdvance(note)) + 2 * ms.height()
             bh = mb.height() + 2.6 * ms.height() + ms.height()
@@ -197,7 +217,7 @@ def screens_of(payload: dict) -> list[tuple[object, dict]]:
         if not isinstance(entry, dict) or not isinstance(entry.get("screen"), str):
             continue
         markers = [m for m in entry.get("markers", []) if _numbers(m, 5)] if isinstance(entry.get("markers"), list) else []
-        if not markers:
+        if not markers and not isinstance(entry.get("pattern"), dict):
             continue
         os_rect = entry.get("os") if _numbers(entry.get("os"), 4) else None
         qscreen = find_qscreen(entry["screen"], os_rect)
@@ -214,8 +234,17 @@ def screens_of(payload: dict) -> list[tuple[object, dict]]:
             lines = [[(float(pt[0]), float(pt[1])) for pt in run if _numbers(pt, 2)]
                      for run in entry["lines"][:64] if isinstance(run, list)]
             lines = [run[:32] for run in lines if len(run) >= 2]
+        pattern = entry.get("pattern")
+        if not (isinstance(pattern, dict) and _numbers([pattern.get("cell"), pattern.get("seed")], 2)
+                and _numbers(pattern.get("map"), 3) and _numbers(pattern.get("size"), 2)
+                and pattern["cell"] >= 4 and pattern["map"][2] > 0 and min(pattern["size"]) > 0
+                and isinstance(pattern.get("areas"), list)):
+            pattern = None
+        else:
+            pattern = {"cell": float(pattern["cell"]), "seed": int(pattern["seed"]), "map": pattern["map"],
+                       "size": pattern["size"], "areas": [a for a in pattern["areas"][:16] if _numbers(a, 4)]}
         out.append((qscreen, {"markers": markers, "sets": sets or [markers], "number": entry.get("number"),
-                              "title": entry.get("title"), "lines": lines,
+                              "title": entry.get("title"), "lines": lines, "pattern": pattern,
                               "state": entry.get("state") if isinstance(entry.get("state"), str) else None}))
     return out
 
@@ -244,7 +273,7 @@ class Markers:
         by_screen: dict[int, tuple[object, list[dict]]] = {}
         for qscreen, screen in found:
             by_screen.setdefault(id(qscreen), (qscreen, []))[1].append(screen)
-        what = [(id(q), [{k: v for k, v in s.items() if k not in ("state", "lines")} for s in ss])
+        what = [(id(q), [{k: v for k, v in s.items() if k not in ("state", "lines", "pattern")} for s in ss])
                 for q, ss in by_screen.values()]
         if self.windows and what == self.what:
             # The same patterns, only how it's going has changed: no need to start again.
@@ -488,6 +517,8 @@ class LineupFlow(QObject):
         self.locked: set[str] = set()
         self.period = 320
         self.sent_lines: dict | None = None
+        self.sent_patterns: dict | None = None
+        self.seam_showing: dict | None = None
 
     def start(self) -> bool:
         from curslink import lineup
@@ -575,6 +606,31 @@ class LineupFlow(QObject):
 
         self.markers.show({"screens": checking(self.shown_local), "seconds": SECONDS})
         remote = {d: {**p, "screens": checking(p["screens"])} for d, p in self.shown_remote.items()}
+        if remote:
+            self.send("lineup " + json.dumps({"devices": remote}, separators=(",", ":")))
+
+    def show_seam(self, patterns: dict, showing: dict) -> None:
+        """The last step: each screen in front of another, and the one behind
+        it, show their blocks (again whenever an overlap is moved), and
+        those of their check patterns that aren't in the blocks' way."""
+        import json
+
+        if patterns == self.sent_patterns:
+            return
+        self.sent_patterns = patterns
+        self.seam_showing = showing
+
+        def joining(entries: list[dict]) -> list[dict]:
+            out = []
+            for e in entries:
+                markers = (showing.get(e.get("key")) or {}).get("markers")
+                if markers is not None:
+                    out.append({**e, "markers": markers, "sets": [markers], "state": "locked",
+                                "pattern": patterns.get(e.get("key"))})
+            return out
+
+        self.markers.show({"screens": joining(self.shown_local), "seconds": SECONDS})
+        remote = {d: {**p, "screens": joining(p["screens"])} for d, p in self.shown_remote.items()}
         if remote:
             self.send("lineup " + json.dumps({"devices": remote}, separators=(",", ":")))
 
@@ -680,6 +736,7 @@ class LineupFlow(QObject):
         # For the log (and so a diagnostics file): how the scan went, every couple of seconds.
         began = said = time.monotonic()
         settle = held = 0.0
+        stage = "scan"  # then "check" (lines across the joins), "seam" (blocks across each overlap), "done"
         count = size = 0
         spent = 0.0
         while True:
@@ -700,7 +757,15 @@ class LineupFlow(QObject):
                         self.live = lineup.Live(self.screens, self.planned, self.reference)
                         log.info("line-up scan: first frame %dx%d, %d kB, focal %s", gray.shape[1], gray.shape[0],
                                  len(data) // 1024, focal)
-                    if self.live.check is not None:
+                    if stage == "seam":
+                        # The last step: the blocks are up; each overlap is moved by the break seen in them.
+                        if time.monotonic() >= settle and not self.live.seam.done:
+                            if self.live.seam_frame(gray):
+                                settle = time.monotonic() + self.check_settle
+                            if self.live.seam.done:
+                                log.info("line-up pattern ended: %d frames, %d with the pattern read, %s",
+                                         self.live.seam.frames, self.live.seam.measured, self.live.seam.summary())
+                    elif stage == "check":
                         # The check: the lines are up; nudge the layout by what's seen of them
                         # (not in a frame taken before the screens had drawn the latest ones).
                         if time.monotonic() >= settle and not self.live.check.done:
@@ -710,21 +775,35 @@ class LineupFlow(QObject):
                                 log.info("line-up check ended: %d frames, %d with lines seen, screens moved %.1f px "
                                          "in all, biggest step left %s px", self.live.check.frames,
                                          self.live.check.measured, self.live.check.moved, self.live.check.worst())
-                    else:
+                    elif stage == "scan":
                         self.live.frame(gray, focal)
                         self.live.update()
                         if self.live.aligned:
                             if self.live.start_check() is not None:
+                                stage = "check"
                                 settle = time.monotonic() + self.check_settle
                                 held = time.monotonic() + self.check_hold
                                 log.info("line-up check: %d line(s) across %d join(s): %s",
                                          sum(len(j.lines) for j in self.live.check.joins), len(self.live.check.joins),
                                          ", ".join(f"{j.a} | {j.b} ({len(j.lines)})" for j in self.live.check.joins))
                             else:
+                                stage = "checked"
                                 log.info("line-up check: none, no line could be drawn across any of %d join(s): %s",
                                          len(self.live.result.joins),
                                          ", ".join(f"{a} | {b}" for a, b, _side in self.live.result.joins) or "-")
                             self.live.result.check = self.live.check_summary()
+                    if stage == "checked" or (stage == "check" and self.live.check.done and time.monotonic() >= held):
+                        # On to the blocks, where a screen stands in front of another.
+                        if self.live.start_seam() is not None:
+                            stage = "seam"
+                            settle = time.monotonic() + self.check_settle
+                            held = time.monotonic() + self.check_hold
+                            log.info("line-up pattern: %s", ", ".join(
+                                f"{j.front} over {j.behind} ({len(j.patches)} place(s), fit {j.fit['x']:.0f},"
+                                f"{j.fit['y']:.0f} x{j.fit['scale']:.4f})" for j in self.live.seam.joins))
+                        else:
+                            stage = "done"
+                            log.info("line-up pattern: none (no screen in front of another with enough showing)")
                     count += 1
                     size += len(data)
                     spent += time.monotonic() - t0
@@ -740,12 +819,17 @@ class LineupFlow(QObject):
                 _remove(path)
             live = self.live
             if live is not None:
-                checking = live.check is not None and (not live.check.done or time.monotonic() < held)
-                status.update(progress=min(live.progress(), 0.97) if checking else live.progress(),
+                checking = stage == "check"
+                joining = stage == "seam" and (not live.seam.done or time.monotonic() < held)
+                busy = checking or joining
+                status.update(progress=min(live.progress(), 0.97) if busy else live.progress(),
                               hint=live.hint(numbers), states=live.states(),
-                              result=live.result, aligned=live.aligned and not checking, usable=live.usable,
+                              result=live.result, aligned=live.aligned and not busy, usable=live.usable,
                               frames=live.frames, lines=live.check.lines() if checking else None,
-                              step=live.check.worst() if live.check is not None else None)
+                              pattern=live.seam.patterns() if joining else None,
+                              showing=live.seam.drawing if joining else None,
+                              step=live.check.worst() if live.check is not None else None,
+                              left=live.seam.worst() if live.seam is not None else None)
             self._status.emit(status)
 
     def send_live(self, device, data: dict) -> None:
@@ -784,16 +868,24 @@ class LineupFlow(QObject):
             how = describe(result, {s["key"]: f"screen {s.get('number')}" for s in self.screens})
             if how:
                 detail += ". " + how[:1].upper() + how[1:] + "."
-        lines = status.get("lines")
-        if lines is not None:
+        lines, pattern = status.get("lines"), status.get("pattern")
+        if pattern is not None:
+            self.show_seam(pattern, status.get("showing") or {})
+            detail = "The screen behind and the one in front of it are drawing one pattern of blocks. It should " \
+                     "carry on unbroken across the edge from where you sit: the camera is measuring any break " \
+                     "and moving the overlap until there's none. Hold the phone close to your eyes."
+            if isinstance(status.get("left"), (int, float)):
+                detail += f" Break now: {max(1, round(status['left']))} px."
+        elif lines is not None:
             self.show_check(lines)
             detail = "Bright lines are drawn across where your screens meet: each should look like one straight " \
                      "line from where you sit. The camera is measuring any step in them and moving the layout to fit."
-        elif self.sent_lines is None:  # (after the check the lines stay up until it closes)
+        elif self.sent_lines is None and self.sent_patterns is None:  # (afterwards they stay up until it closes)
             self.show_states(states)
-        if result is not None and lines is None and isinstance(status.get("step"), (int, float)):
+        if result is not None and lines is None and pattern is None and isinstance(status.get("step"), (int, float)):
             detail += f" Joins checked to {max(1, round(status['step']))} px."
-        self.dialog.say("Lined up" if aligned else "Checking the joins" if lines is not None else "Scanning your desk",
+        self.dialog.say("Lined up" if aligned else "Joining up the overlap" if pattern is not None else
+                        "Checking the joins" if lines is not None else "Scanning your desk",
                         status.get("hint") or "Reading the patterns…")
         self.dialog.show_live(status.get("progress", 0.0), rects, detail, bool(status.get("usable")) and not aligned)
         if aligned and self.latest is not None:

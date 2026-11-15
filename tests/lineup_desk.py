@@ -107,12 +107,20 @@ DESK = Desk([
 
 # -- drawn as a camera would see it (needs OpenCV) ------------------------------
 
-def draw_screen(w: int, h: int, markers: list, cells: int = 6, lines=None):
+def draw_screen(w: int, h: int, markers: list, cells: int = 6, lines=None, pattern=None, size=None):
     """A screen showing its patterns (and the check's ``lines``: runs of
-    points as shares of its size), as curslink.gui.lineup draws them."""
+    points as shares of its size; and the seam's ``pattern`` of blocks, for
+    a screen really ``size`` pixels), as curslink.gui.lineup draws them."""
     import cv2
 
     img = np.full((h, w), 45, np.uint8)  # whatever's on the screen behind the patterns
+    if pattern:
+        from curslink.lineup_seam import blocks
+
+        sw, sh = size or (w, h)
+        for x0, y0, x1, y1, white in blocks(pattern, sw, sh):
+            cv2.rectangle(img, (round(x0 * w / sw), round(y0 * h / sh)),
+                          (round(x1 * w / sw) - 1, round(y1 * h / sh) - 1), 255 if white else 0, -1)
     for bits, fx, fy, fw, _fh in markers:
         x, y, side = fx * w, fy * h, fw * w
         cell = side / cells
@@ -130,7 +138,7 @@ def draw_screen(w: int, h: int, markers: list, cells: int = 6, lines=None):
 
 
 def render(desk: Desk, planned: dict, cam: Camera, pose, blur: float = 0.8, noise: float = 2.0,
-           glare=None, motion: int = 0, seed: int = 0, shown: int = 0, lines=None):
+           glare=None, motion: int = 0, seed: int = 0, shown: int = 0, lines=None, patterns=None):
     """The grey frame ``cam`` takes of ``desk`` from ``pose``, every screen
     in ``planned`` showing its patterns (its set number ``shown``, as they
     change through the scan). ``glare``: ``[(key, u, v, radius
@@ -149,7 +157,8 @@ def render(desk: Desk, planned: dict, cam: Camera, pose, blur: float = 0.8, nois
         iw = 1100
         ih = round(iw * s["h"] / s["w"])
         sets = planned[s["key"]].get("sets") or [planned[s["key"]]["markers"]]
-        img = draw_screen(iw, ih, sets[shown % len(sets)], lines=(lines or {}).get(s["key"])).astype(np.float32)
+        img = draw_screen(iw, ih, sets[shown % len(sets)], lines=(lines or {}).get(s["key"]),
+                          pattern=(patterns or {}).get(s["key"]), size=(s["w"], s["h"])).astype(np.float32)
         for key, u, v, rad in glare or []:
             if key == s["key"]:
                 yy, xx = np.mgrid[0:ih, 0:iw]

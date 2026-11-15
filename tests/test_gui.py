@@ -1709,3 +1709,74 @@ def test_live_line_up_ends_with_lines_across_the_joins(desktop, qapp, tmp_path):
     assert "no two screens meet" in check_note({"state": "none", "lines": 0, "joins": 0, "step": None})
     assert check_note({"state": "checked", "lines": 3, "joins": 1, "step": 2.4}) == \
         " Joins checked with 3 lines across 1 join: within 2 px."
+
+
+def test_live_line_up_joins_a_pattern_across_an_overlap(desktop, qapp, tmp_path):
+    """A laptop in front of the monitor: after the lines, both draw one
+    pattern of blocks (the laptop's by the overlap as measured), the camera
+    reads the break in it and the overlap is moved until there's none."""
+    import time
+
+    cv2 = pytest.importorskip("cv2")
+    from lineup_desk import Camera, Desk, figure_of_eight, render
+
+    from curslink import lineup
+
+    page, home, laptop = _host_with_laptop(desktop)
+    sent = []
+    desktop.service.send = sent.append
+    page.start_lineup()
+    flow = page.lineup
+    flow.check_settle = 0.0
+    flow.check_hold = 0.0
+    _hx, _hy, hw, hh = home.layout_rect()
+    _lx, _ly, lw, lh = laptop.layout_rect()
+    desk = Desk([(home.key, home.device_id, hw, hh, 600, (0, 0, 0), 0, 0),
+                 (laptop.key, "laptop", lw, lh, 340, (40, 160, -240), 0, 15)])
+    page._on_service_event({"event": "lineup_sizes", "devices": {"laptop": [
+        {"x": 0, "y": 0, "width": lw, "height": lh, "width_mm": 340.0, "height_mm": 340.0 * lh / lw}]}})
+    places = figure_of_eight(30, (0, 0, -900), reach=(15, 10, 8), aim=(0, 60, 0))
+    cam = Camera()
+    titles, answer, drew = [], None, []
+    for seq in range(90):
+        at, target, roll = places[seq % len(places)]
+        after = flow.sent_lines is not None or flow.sent_patterns is not None
+        showing = flow.seam_showing or (lineup.check_plan(flow.planned) if after else flow.planned)
+        frame = render(desk, showing, cam, cam.look(at, target, roll), seed=seq, shown=seq,
+                       lines=None if flow.sent_patterns is not None else flow.sent_lines, patterns=flow.sent_patterns)
+        path = tmp_path / f"frame{seq}.jpg"
+        path.write_bytes(cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])[1].tobytes())
+        page._on_service_event({"event": "lineup_photo", "id": flow.id, "device": "phone", "path": str(path),
+                                "seq": seq, "focal": 1200.0})
+        deadline = time.monotonic() + 20
+        answer = None
+        while answer is None and time.monotonic() < deadline:
+            qapp.processEvents()
+            time.sleep(0.005)
+            answer = next((json.loads(c[len("lineup_live "):]) for c in sent
+                           if c.startswith("lineup_live ") and json.loads(c[len("lineup_live "):]).get("seq") == seq),
+                          None)
+        assert answer is not None
+        titles.append(flow.dialog.title.text())
+        if flow.sent_patterns is not None and flow.markers.windows and not drew:
+            assert flow.markers.windows[0].screens[0]["pattern"]["areas"]
+            flow.markers.windows[0].grab()  # paints the blocks without error
+            drew.append(seq)
+        if answer.get("done"):
+            break
+    assert answer.get("done") and answer["hint"] == "Lined up" and drew
+    assert "Joining up the overlap" in titles
+    # The laptop was sent the pattern, with the overlap to draw it by.
+    told = [json.loads(c[len("lineup "):]) for c in sent if c.startswith("lineup {") and '"pattern"' in c]
+    entry = told[-1]["devices"]["laptop"]["screens"][0]
+    assert entry["pattern"]["areas"] and entry["pattern"]["size"] == [lw, lh] and entry["pattern"]["map"][2] > 0
+    seam = flow.live.seam
+    assert seam.measured >= 4 and seam.joined and seam.worst() < 6
+    deadline = time.monotonic() + 30
+    while page.lineup is not None and time.monotonic() < deadline:
+        qapp.processEvents()
+        time.sleep(0.01)
+    assert page.lineup is None and sent[-1] == 'lineup {"hide":true}'
+    assert page.lineup_result.check["seam"]["state"] == "joined"
+    assert "pattern joined up" in page.lineup_note.text()
+    assert page.lineup_result.fits[0] == seam.fits()[0]
