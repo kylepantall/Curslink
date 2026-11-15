@@ -64,6 +64,10 @@ IN_FLIGHT = 2
 QUALITIES = {"lossless": "png", "high": 95, "standard": 80}
 # Tiles (see the helper's Capture) a capture may have on their way at once.
 TILES_IN_FLIGHT = 16
+# An app's mirror (App mirror) is used, not just looked at: more of its tiles
+# can be on their way at once, so a whole new picture (scrolling) needn't
+# wait a round trip for answers.
+APP_TILES_FACTOR = 4
 # The pointer in a mirror is sent at most this often.
 POINTER_EVERY_S = 1 / 90
 # An agent's idle cursor is moved off a mirror this long after it shows
@@ -337,7 +341,8 @@ class MirrorSource:
         if sid not in self.flying:
             return  # a capture that has stopped
         key = self._key(frame)
-        if self.flying[sid] >= (IN_FLIGHT if key is None else TILES_IN_FLIGHT):
+        tiles = TILES_IN_FLIGHT * (APP_TILES_FACTOR if str(sid).startswith("app:") else 1)
+        if self.flying[sid] >= (IN_FLIGHT if key is None else tiles):
             waiting = self.waiting.setdefault(sid, {})
             older = waiting.pop(key, None)
             if key is None:
