@@ -151,14 +151,35 @@ def test_portable_update_replaces_folder(tmp_path, monkeypatch):
     assert not (tmp_path / "curslink.old").exists()
 
 
-def test_windows_script_waits_installs_and_relaunches():
-    script = update._windows_script(
-        update.Path(r"C:\Temp\setup.exe"), [r"C:\Apps\curslink.exe", "host", "-c", "my config.toml"], 4242
-    )
-    assert 'PID eq 4242' in script
-    assert '"C:\\Temp\\setup.exe" /VERYSILENT' in script
-    assert script.index("/VERYSILENT") < script.index('"C:\\Apps\\curslink.exe" "host" "-c" "my config.toml"')
-    assert "set CURSLINK_NO_UPDATE=just-updated" in script
+def test_windows_setup_runs_directly_and_relaunches_itself(tmp_path):
+    setup = tmp_path / "curslink-9.9.9-windows-x64-setup.exe"
+    cmd = update._windows_setup_command(setup, [r"C:\Apps\curslink.exe", "host", "-c", "my config.toml"])
+    # No cmd.exe: antivirus blocks cmd.exe starting an unsigned Curslink.
+    assert cmd[0] == str(setup) and "cmd" not in [c.lower() for c in cmd]
+    assert "/VERYSILENT" in cmd and "/CLOSEAPPLICATIONS" in cmd
+    spec = tmp_path / "curslink-9.9.9-windows-x64-setup.relaunch"
+    assert cmd[-1] == f"/RELAUNCH={spec}"
+    lines = spec.read_text(encoding="utf-8-sig").splitlines()
+    assert lines == ["curslink.exe", 'host -c "my config.toml"', "hide"]
+
+
+def test_windows_setup_relaunches_the_windowed_app_shown(tmp_path):
+    setup = tmp_path / "setup.exe"
+    cmd = update._windows_setup_command(setup, [r"C:\Apps\curslinkw.exe"])
+    assert (tmp_path / "setup.relaunch").read_text(encoding="utf-8-sig").splitlines() == ["curslinkw.exe", "", "show"]
+    assert update._windows_setup_command(setup, None)[-1] == "/CLOSEAPPLICATIONS"
+    assert cmd[-1].startswith("/RELAUNCH=")
+
+
+def test_no_cmd_exe_launches_anywhere():
+    import pathlib
+    import re
+
+    root = pathlib.Path(update.__file__).parent
+    for path in root.rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        assert not re.search(r"""\[\s*["']cmd(\.exe)?["']""", text, re.I), path
+        assert "shell=True" not in text, path
 
 
 def test_on_start_respects_settings(monkeypatch):

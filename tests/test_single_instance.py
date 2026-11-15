@@ -139,3 +139,19 @@ def test_restart_waits_for_this_copy_to_exit(tmp_path):
     old.wait()
     waiter.wait(timeout=10)
     assert marker.exists() and time.monotonic() - started >= 1.4
+
+
+def test_wait_for_exit():
+    import subprocess
+    import sys
+    import time
+
+    from curslink.gui.app import wait_for_exit
+
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(0.6)"])
+    started = time.monotonic()
+    threading_reaper = __import__("threading").Thread(target=proc.wait, daemon=True)
+    threading_reaper.start()  # reap it, so a POSIX zombie doesn't look alive
+    assert wait_for_exit(proc.pid, 10.0)
+    assert time.monotonic() - started >= 0.4
+    assert not wait_for_exit(__import__("os").getpid(), 0.1)
