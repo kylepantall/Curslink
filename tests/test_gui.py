@@ -1471,9 +1471,10 @@ def test_live_line_up_follows_the_phone_until_every_screen_is_sure(desktop, qapp
             break
     assert answer.get("done") and answer["hint"] == "Lined up" and answer["progress"] == 1
     assert {state for _n, state in answer["screens"]} == {"locked"}
-    # The laptop was told its screen is measured (it shows a green edge), with the same patterns.
+    # The laptop was told its screen is measured (these frames don't show the check's lines:
+    # an older Curslink on the screens; the check gives up after a few frames and it ends).
     told = [json.loads(c[len("lineup "):]) for c in sent if c.startswith("lineup {") and '"state":"locked"' in c]
-    assert told and told[-1]["devices"]["laptop"]["screens"][0]["sets"] == flow.planned[laptop.key]["sets"]
+    assert told and told[-1]["devices"]["laptop"]["screens"][0]["screen"] == "main"
     assert flow.markers.windows[0].screens[0]["state"] == "locked"
     flow.markers.windows[0].grab()
     deadline = time.monotonic() + 5
@@ -1629,3 +1630,70 @@ def test_line_up_patterns_change_and_show_when_a_screen_is_measured(qapp):
     assert markers.windows[0] is not window and not markers.cycle.isActive()
     markers.hide()
     assert not markers.showing and not markers.cycle.isActive()
+
+
+def test_live_line_up_ends_with_lines_across_the_joins(desktop, qapp, tmp_path):
+    """Once every screen is measured the screens draw lines across where
+    they meet, the camera checks them, and only then is it done."""
+    import time
+
+    cv2 = pytest.importorskip("cv2")
+    from lineup_desk import Camera, Desk, figure_of_eight, render, true_solution
+
+    from curslink import lineup
+
+    page, home, laptop = _host_with_laptop(desktop)
+    sent = []
+    desktop.service.send = sent.append
+    page.start_lineup()
+    flow = page.lineup
+    flow.check_settle = 0.0
+    hx, hy, hw, hh = home.layout_rect()
+    _lx, _ly, lw, lh = laptop.layout_rect()
+    desk = Desk([(home.key, home.device_id, hw, hh, 600, (0, 0, 0), 0, 0),
+                 (laptop.key, "laptop", lw, lh, 340, (-470, 60, -90), 25, 0)])
+    page._on_service_event({"event": "lineup_sizes", "devices": {"laptop": [
+        {"x": 0, "y": 0, "width": lw, "height": lh, "width_mm": 340.0, "height_mm": 340.0 * lh / lw}]}})
+    places = figure_of_eight(30, (-150, 40, -900), reach=(15, 10, 8), aim=(-180, 40, 0))
+    cam = Camera()
+    titles, answer = [], None
+    for seq in range(60):
+        at, target, roll = places[seq % len(places)]
+        checking = flow.sent_lines is not None
+        showing = lineup.check_plan(flow.planned) if checking else flow.planned
+        frame = render(desk, showing, cam, cam.look(at, target, roll), seed=seq, shown=seq, lines=flow.sent_lines)
+        path = tmp_path / f"frame{seq}.jpg"
+        path.write_bytes(cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])[1].tobytes())
+        page._on_service_event({"event": "lineup_photo", "id": flow.id, "device": "phone", "path": str(path),
+                                "seq": seq, "focal": 1200.0})
+        deadline = time.monotonic() + 20
+        answer = None
+        while answer is None and time.monotonic() < deadline:
+            qapp.processEvents()
+            time.sleep(0.005)
+            answer = next((json.loads(c[len("lineup_live "):]) for c in sent
+                           if c.startswith("lineup_live ") and json.loads(c[len("lineup_live "):]).get("seq") == seq),
+                          None)
+        assert answer is not None
+        titles.append(flow.dialog.title.text())
+        if checking and flow.markers.windows:
+            assert flow.markers.windows[0].screens[0]["lines"]
+            flow.markers.windows[0].grab()  # paints the lines without error
+        if answer.get("done"):
+            break
+    assert answer.get("done") and answer["hint"] == "Lined up"
+    assert "Checking the joins" in titles and titles.index("Checking the joins") > titles.index("Scanning your desk")
+    # The laptop was sent its check patterns and its half of the lines.
+    told = [json.loads(c[len("lineup "):]) for c in sent if c.startswith("lineup {") and '"lines"' in c]
+    entry = told[-1]["devices"]["laptop"]["screens"][0]
+    assert entry["markers"] == flow.planned[laptop.key]["check"]["markers"] and entry["sets"] == [entry["markers"]]
+    assert entry["lines"] and all(0 <= x <= 1 and 0 <= y <= 1 for run in entry["lines"] for x, y in run)
+    assert flow.live.check.measured >= 2 and flow.live.check.worst() < 5
+    deadline = time.monotonic() + 5
+    while page.lineup is not None and time.monotonic() < deadline:
+        qapp.processEvents()
+        time.sleep(0.01)
+    assert page.lineup is None and sent[-1] == 'lineup {"hide":true}'
+    true = lineup.arrange(flow.screens, true_solution(desk, home.key, places[0][0]))
+    x, y, *_ = laptop.layout_rect()
+    assert (x, y) == pytest.approx(true.positions[laptop.key], abs=8)

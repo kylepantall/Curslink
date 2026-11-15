@@ -88,6 +88,7 @@ def marker_boxes(width: float, height: float) -> list[tuple[float, float, float,
 # shows a curved monitor's curve, and what's left of a screen partly hidden
 # behind another one.
 MAX_SETS = 6  # per screen, the first included
+CHECK_SPOTS = ((0.27, 0.3), (0.73, 0.3), (0.73, 0.7), (0.27, 0.7))  # the middles of the check's patterns
 PERIOD_MS = 320  # how long each set shows
 SPACING = 0.25  # between the middles of neighbouring places, in shorter sides
 
@@ -127,11 +128,13 @@ def plan(screens: list[dict]) -> dict[str, dict]:
 
     A screen's sets take slots ``slot, slot + 1, ...``; a set's marker ids
     are ``its slot * 8 .. + 7``. At most :data:`MAX_SCREENS` slots in all,
-    so many screens get fewer sets each.
+    so many screens get fewer sets each. ``"check"``: ``{"slot", "markers"}``,
+    the four patterns shown while the result is checked (see :func:`check_plan`).
     """
-    screens = screens[:MAX_SCREENS]
+    screens = screens[:MAX_SCREENS // 2]
     grids = [marker_grid(float(s["width"]), float(s["height"])) for s in screens]
-    most = max(1, min(MAX_SETS, MAX_SCREENS // max(1, len(screens))))
+    # (One slot each is kept for the check's patterns.)
+    most = max(1, min(MAX_SETS, MAX_SCREENS // max(1, len(screens)) - 1))
     out = {}
     slot = 0
     for s, grid in zip(screens, grids):
@@ -140,9 +143,23 @@ def plan(screens: list[dict]) -> dict[str, dict]:
             sets.append([grid[(k * PER_SCREEN + i) % len(grid)] for i in range(PER_SCREEN)])
         coded = [[[marker_bits((slot + k) * PER_SCREEN + i), *(round(v, 5) for v in box)]
                   for i, box in enumerate(boxes)] for k, boxes in enumerate(sets)]
-        out[s["key"]] = {"slot": slot, "markers": coded[0], "sets": coded}
         slot += len(sets)
+        # For the check at the end (curslink.lineup_check): four patterns in
+        # from the edges, which are left clear for the lines across the joins.
+        w, h = float(s["width"]), float(s["height"])
+        side = MARKER * min(w, h)
+        check = [[marker_bits(slot * PER_SCREEN + i), round(fx - side / w / 2, 5), round(fy - side / h / 2, 5),
+                  round(side / w, 5), round(side / h, 5)]
+                 for i, (fx, fy) in enumerate(CHECK_SPOTS)]
+        out[s["key"]] = {"slot": slot - len(sets), "markers": coded[0], "sets": coded,
+                         "check": {"slot": slot, "markers": check}}
+        slot += 1
     return out
+
+
+def check_plan(planned: dict[str, dict]) -> dict[str, dict]:
+    """``planned`` as it is during the check: each screen showing its check patterns only."""
+    return {k: {"slot": p["check"]["slot"], "markers": p["check"]["markers"]} for k, p in planned.items() if "check" in p}
 
 
 # -- finding the patterns in a frame ---------------------------------------------
@@ -669,6 +686,8 @@ class Live:
         self.frames = 0  # every frame taken in
         self.last_seen: list[str] = []  # the screens in the latest one
         self.result: Result | None = None
+        self.solution = None  # the curslink.lineup_scene.Solution it's from
+        self.check = None  # curslink.lineup_check.Check, once the scan is done
         self.error = ""
         self.fresh = False  # a new view since the last solve
         self.history: list[dict[str, tuple[int, int]]] = []
@@ -731,7 +750,8 @@ class Live:
             return self.result
         self.fresh = False
         try:
-            self.result = arrange(self.screens, self.scene.solve())
+            self.solution = self.scene.solve()
+            self.result = arrange(self.screens, self.solution)
             self.error = ""
         except (SceneError, LineupError) as exc:
             self.error = str(exc)
@@ -801,9 +821,41 @@ class Live:
             p = 0.97  # all sure, waiting for the solves to agree
         return p
 
+    # ---- the check at the end: lines across the joins (curslink.lineup_check) ----
+    def start_check(self):
+        """Once it's lined up: the lines to draw across the screens' joins, to
+        check the layout by. None if no two screens meet (nothing to check)."""
+        from curslink.lineup_check import Check
+
+        if self.check is None and self.aligned and self.solution is not None and self.scene is not None:
+            check = Check(self.solution, self.result, check_plan(self.planned), self.scene.intr, self.scene.image_size)
+            if check.any:
+                self.check = check
+        return self.check
+
+    def check_frame(self, gray) -> bool:
+        """A frame taken while the lines are up: the layout is nudged by any
+        step the camera sees in them. True if it moved (the lines have too)."""
+        if self.check is None or self.scene is None:
+            return False
+        sightings = read_frame(gray, check_plan(self.planned), self.dims, self.scene.tolerance, thorough=False,
+                               curved=self.scene.curved)
+        self.frames += 1
+        self.last_seen = [s.key for s in sightings]
+        moved = self.check.frame(gray, sightings)
+        if moved:
+            errors, views, rms = self.result.errors, self.result.views, self.result.rms
+            self.result = arrange(self.screens, self.check.sol)
+            self.result.errors, self.result.views, self.result.rms = errors, views, rms
+        return moved
+
     def hint(self, numbers: dict[str, object] | None = None) -> str:
         """What to do next, in a few words (for the phone's screen)."""
         numbers = numbers or {}
+        if self.check is not None:
+            if self.check.done:
+                return "Lined up"
+            return "Checking: keep the screens in the picture while the lines are lined up"
 
         def name(keys: list[str]) -> str:
             ns = [str(numbers.get(k) or "") for k in keys]

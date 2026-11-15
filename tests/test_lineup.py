@@ -196,7 +196,7 @@ def test_marker_bits_match_opencv():
 def test_plan_gives_each_screen_its_own_markers():
     planned = lineup.plan([{"key": "a/main", "width": 1920, "height": 1080},
                            {"key": "b/main", "width": 1080, "height": 1920}])
-    assert planned["a/main"]["slot"] == 0 and planned["b/main"]["slot"] == len(planned["a/main"]["sets"])
+    assert planned["a/main"]["slot"] == 0 and planned["b/main"]["slot"] == len(planned["a/main"]["sets"]) + 1
     assert len(planned["a/main"]["markers"]) == lineup.PER_SCREEN
     assert planned["a/main"]["sets"][0] == planned["a/main"]["markers"]
     bits = set()
@@ -217,10 +217,16 @@ def test_plan_gives_each_screen_its_own_markers():
                     assert ax + aw <= bx or bx + bw <= ax or ay + ah <= by or by + bh <= ay, (key, k)
         # After the first, the sets reach the middle of the screen too.
         assert any(0.3 < x + w / 2 < 0.7 and 0.3 < y + h / 2 < 0.7 for m in p["sets"][1:] for _b, x, y, w, h in m)
-    assert len(bits) == sum(len(p["sets"]) for p in planned.values()) * lineup.PER_SCREEN  # every one its own
+        # The check's patterns: its own, in from the edges.
+        assert p["check"]["slot"] == p["slot"] + len(p["sets"]) and len(p["check"]["markers"]) == 4
+        for b, x, y, w, h in p["check"]["markers"]:
+            assert 0.15 < x and x + w < 0.85 and 0.15 < y and y + h < 0.85
+            bits.add(b)
+    assert len(bits) == sum(len(p["sets"]) * lineup.PER_SCREEN + 4 for p in planned.values())  # every one its own
+    assert lineup.check_plan(planned)["b/main"] == planned["b/main"]["check"]
     # Many screens: fewer sets each, never more ids than there are.
     many = lineup.plan([{"key": f"s{i}", "width": 1920, "height": 1080} for i in range(12)])
-    assert sum(len(p["sets"]) for p in many.values()) <= lineup.MAX_SCREENS
+    assert sum(len(p["sets"]) + 1 for p in many.values()) <= lineup.MAX_SCREENS
     # Square on the screen itself.
     _b, _x, _y, w, h = planned["a/main"]["markers"][0]
     assert w * 1920 == pytest.approx(h * 1080, rel=1e-3)
@@ -386,6 +392,65 @@ def test_seen_against_a_curved_screen():
     # Its middle is behind the line between its side edges, by the sagitta.
     assert sp.at([(1720, 0)])[0][2] - 20.0 == pytest.approx(1.5 * 3440 / 0.6 * (1 - np.cos(0.3)), rel=1e-6)
     assert sp.at([(0, 0)])[0] == pytest.approx([100.0, 50.0, 20.0])
+
+
+@pytest.mark.parametrize("desk, ref, middle, aim", [
+    (DESK3D, "host/main", (-150, 60, -1050), (-200, 80, 0)),
+    (CURVED_DESK, "pc/main", (0, -60, -900), (0, 120, -50)),
+])
+def test_the_check_lines_take_out_what_the_scan_left(desk, ref, middle, aim):
+    """The last step: lines drawn across the joins, as they'd look straight
+    from where the person sits. The camera (held somewhere near, not at the
+    eye) sees a step in them wherever the layout is off, and the screens
+    are moved until there's none."""
+    import numpy as np
+
+    from curslink.lineup_check import Check
+    from lineup_desk import Camera, render
+
+    layout = desk.layout()
+    planned = lineup.plan([{"key": s["key"], "width": s["width"], "height": s["height"]} for s in layout])
+    showing = lineup.check_plan(planned)
+    places = figure_of_eight(30, middle, reach=(15, 10, 8), aim=aim, seed=0)
+    solution = true_solution(desk, ref, places[0][0])
+    true = lineup.arrange(layout, solution)
+    # The scan got it a little wrong: every screen but the reference is off.
+    rng = np.random.default_rng(1)
+    for key, sp in solution.screens.items():
+        if key != ref:
+            sp.t = sp.t + sp.r[:, :2] @ (rng.normal(0, 14, 2) * sp.scale)
+    off = lineup.arrange(layout, solution)
+    cam = Camera(focal=1180, k1=0.04, k2=-0.02, centre=(812, 588))
+    check = Check(solution, off, showing, [1180, 812, 588, 0.04, -0.02], cam.size)
+    assert check.any and not check.done
+    lines = check.lines()
+    assert all(0 <= x <= 1 and 0 <= y <= 1 for runs in lines.values() for run in runs for x, y in run)
+    # every join has lines, each with a half on both of its screens
+    assert all(len(j.lines) >= 2 for j in check.joins)
+    dims = {s["key"]: (s["width"], s["height"]) for s in layout}
+    for n in range(20):
+        at, target, roll = places[(n * 7 + 3) % len(places)]
+        # 4 cm to the side of where the scan began: the lines needn't look straight from here
+        frame = render(desk, showing, cam, cam.look(at + np.array([40.0, 0, 0]), target, roll), lines=check.lines(), seed=n)
+        check.frame(frame, lineup.read_frame(frame, showing, dims, 6.4, thorough=False, curved=48))
+        if check.done:
+            break
+    assert check.done and n < 12 and check.worst() < 5
+    fixed = lineup.arrange(layout, solution)
+    # Each join is nearer right than it was, along the edge its lines cross
+    # (what they can't tell, how far apart the screens are, is left alone).
+    for li in true.links:
+        axis = 1 if li["a_side"] in ("left", "right") else 0
+        key = li["b"]
+        was = abs(off.positions[key][axis] - true.positions[key][axis])
+        now = abs(fixed.positions[key][axis] - true.positions[key][axis])
+        assert now <= max(6, 0.6 * was), (key, was, now)
+    for f in true.fits:
+        mine_off = next(g for g in off.fits if g["front"] == f["front"])
+        mine = next(g for g in fixed.fits if g["front"] == f["front"])
+        was = max(abs(mine_off["x"] - f["x"]), abs(mine_off["y"] - f["y"]))
+        now = max(abs(mine["x"] - f["x"]), abs(mine["y"] - f["y"]))
+        assert was > 8 and now <= 0.75 * was, (f["front"], was, now)
 
 
 def test_live_scan_says_which_screen_is_missing():
