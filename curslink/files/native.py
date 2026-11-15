@@ -398,8 +398,10 @@ class NativeDrop:
                 if self.end_watch:
                     # A Mac's AppKit drag can outlive the Escape and button-up
                     # (0.4.98: still going when the next drag came, which had
-                    # to end it first): the helper ends it itself.
-                    self.helper("nativedrag end")
+                    # to end it first): the helper ends it itself, on its
+                    # own window, so it isn't dropped where the pointer is
+                    # (0.4.101: a cancelled drag copied into Finder).
+                    self.helper("nativedrag abort")
         else:
             self.helper("card hide")
         shutil.rmtree(drop.staging, ignore_errors=True)

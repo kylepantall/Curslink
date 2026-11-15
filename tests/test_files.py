@@ -723,13 +723,33 @@ async def test_a_cancelled_mac_drag_is_ended_by_the_helper_too(tmp_path):
     drop.on_helper("nativedrag-started d6 card")
     drop.cancel()
     await settle()
-    assert calls[-1] == "cancel" and "nativedrag end" in helper
+    # Called off on its own window, not let go where the pointer is (0.4.101:
+    # that copied the cancelled file into Finder).
+    assert calls[-1] == "cancel" and "nativedrag abort" in helper and "nativedrag end" not in helper
     drop2, _r, helper2, _c = native(tmp_path / "win")
     drop2.begin("d7", CARD)
     drop2.on_helper("nativedrag-started d7")
     drop2.cancel()
     await settle()
-    assert "nativedrag end" not in helper2
+    assert "nativedrag abort" not in helper2 and "nativedrag end" not in helper2
+
+
+def test_the_helper_calls_off_running_mac_drags_on_their_own_windows():
+    from curslink.files.overlay import FilesOverlay
+
+    class Src:
+        def __init__(self, dragging, ended=False):
+            self.dragging, self.ended, self.aborted = dragging, ended, False
+
+        def abort(self):
+            self.aborted = True
+
+    ov = FilesOverlay(lambda x, y: (x, y))
+    going, done, waiting = Src(True), Src(True, ended=True), Src(False)
+    ov.running = [going, done]
+    ov.source = waiting
+    assert ov.handle("nativedrag abort")
+    assert going.aborted and not done.aborted and not waiting.aborted
 
 
 # ------------------------------------------------- the agent handing a drag back
