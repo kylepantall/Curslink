@@ -26,7 +26,7 @@ import sys
 import time
 
 from PySide6.QtCore import QPointF, QRect, QRectF, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QFontMetricsF, QGuiApplication, QImage, QLinearGradient, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QColor, QCursor, QFont, QFontMetricsF, QGuiApplication, QImage, QLinearGradient, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QWidget
 
 from curslink.appmirror import GRIP
@@ -37,8 +37,9 @@ from curslink.overlay import ACCENT
 log = logging.getLogger(__name__)
 
 # PrintWindow is work for the app being captured: never more than this a second.
-WIN_APP_FPS = 30
-MAC_APP_FPS = 30
+WIN_APP_FPS = 60
+MAC_APP_FPS = 60
+POPUP_CHECK_S = 0.25  # how often to look for the app's menus, while it's in use
 TAG_H = 26
 
 
@@ -156,6 +157,34 @@ def win_print_window(hwnd: int) -> tuple[QImage, list[int]] | None:  # pragma: n
     return img.copy(dx, dy, inner[2], inner[3]), inner
 
 
+def fit_in(r: QRectF, w: float, h: float) -> QRectF:
+    """``w`` x ``h`` made as big as fits in ``r`` (the same shape), centred:
+    while the app catches up with its mirror's new shape. Within a pixel or
+    two, all of ``r``."""
+    if w <= 0 or h <= 0 or r.width() <= 0 or r.height() <= 0:
+        return r
+    k = min(r.width() / w, r.height() / h)
+    fw, fh = w * k, h * k
+    if r.width() - fw < 3 and r.height() - fh < 3:
+        return r
+    return QRectF(r.x() + (r.width() - fw) / 2, r.y() + (r.height() - fh) / 2, fw, fh)
+
+
+def popup_image(wid: int, rect) -> QImage | None:
+    """A menu's picture: it shows on the screen, so it's copied from there
+    (on Windows; PrintWindow gives menus black), or taken by itself (macOS)."""
+    try:
+        if sys.platform == "win32":  # pragma: no cover - Windows only
+            from curslink.mirror.helper import win_grab
+
+            return win_grab(*rect)
+        if sys.platform == "darwin":  # pragma: no cover - macOS only
+            return mac_window_image(wid)
+    except Exception:
+        log.debug("app mirror: couldn't take a menu's picture", exc_info=True)
+    return None
+
+
 def mostly_black(img: QImage) -> bool:
     """A picture some apps give PrintWindow when they draw with the GPU."""
     small = img.scaled(16, 16, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.FastTransformation)
@@ -188,7 +217,86 @@ class AppCapture(Capture):
     def __init__(self, spec: dict, out):
         self.window_stream = None
         self.window_seq = 0
+        self.shape_key: str | None = None  # the pointer's look last sent
+        self.popups: list = []  # the app's menus showing, as last found
+        self.popups_at = 0.0
         super().__init__(spec, out)
+
+    def grab(self) -> None:
+        if self.spec.get("pointer"):
+            try:
+                self.send_shape()
+            except Exception:  # pragma: no cover - platform trouble
+                log.debug("app mirror: couldn't send the pointer's look", exc_info=True)
+        super().grab()
+
+    def send_shape(self) -> None:
+        """The pointer's look, when it changed while it's over the window
+        (the mirror draws the pointer itself, where the host says)."""
+        if self.area is None:
+            return
+        lx, ly, lw, lh, index = self.area
+        pos = QCursor.pos()
+        if not (lx <= pos.x() <= lx + lw and ly <= pos.y() <= ly + lh):
+            return
+        from curslink.mirror import cursorshape
+
+        screens = QGuiApplication.screens()
+        found = cursorshape.current(screens[index].devicePixelRatio() if 0 <= index < len(screens) else 1.0)
+        if found is None or found["key"] == self.shape_key:
+            return
+        self.shape_key = found["key"]
+        look = {k: found[k] for k in ("png", "w", "h", "hx", "hy")}
+        look["cw"] = round(lw, 2)
+        # A frame with no picture, only the look: it goes the way the
+        # picture's tiles go, and is drawn by nothing.
+        frame = {"id": self.id, "jpg": "", "w": 1, "h": 1, "tile": [0, 0, 0, 0], "cursor": look}
+        self.out("mirror_frame " + json.dumps(frame, separators=(",", ":")))
+
+    def finish(self, img: QImage | None) -> QImage | None:
+        """The window's picture with its menus on it (while it's in use),
+        and no bigger than the mirror shows it."""
+        if img is None:
+            return None
+        if self.spec.get("use"):
+            img = self.with_popups(img)
+        out = self.spec.get("out")
+        if isinstance(out, list) and len(out) == 2:
+            try:
+                ow, oh = max(16, int(out[0])), max(16, int(out[1]))
+            except (TypeError, ValueError):
+                return img
+            if img.width() > ow * 1.05 or img.height() > oh * 1.05:
+                img = img.scaled(ow, oh, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        return img
+
+    def with_popups(self, img: QImage) -> QImage:
+        """The app's menus, dropdowns and tooltips drawn onto its window:
+        they're windows of their own, which the window's picture leaves out."""
+        from curslink.appmirror import windows
+
+        win = self.spec.get("window") or {}
+        now = time.monotonic()
+        if now - self.popups_at >= POPUP_CHECK_S:
+            self.popups_at = now
+            self.popups = windows.popups(win)
+        if not self.popups:
+            return img
+        home = windows.window_rect(win)
+        if home is None or home[2] <= 0:
+            return img
+        k = img.width() / home[2]  # the picture's pixels per OS pixel
+        img = img.copy() if img.format() == QImage.Format.Format_RGB32 else img.convertToFormat(QImage.Format.Format_RGB32)
+        p = QPainter(img)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        for wid, rect in self.popups:
+            part = popup_image(wid, rect)
+            if part is None:
+                continue
+            p.drawImage(QRectF((rect[0] - home[0]) * k, (rect[1] - home[1]) * k, rect[2] * k, rect[3] * k), part,
+                        QRectF(part.rect()))
+        p.end()
+        return img
 
     def fps(self) -> int:
         cap = WIN_APP_FPS if sys.platform == "win32" else MAC_APP_FPS
@@ -223,27 +331,30 @@ class AppCapture(Capture):
             got = win_print_window(wid)
             if got is not None and not mostly_black(got[0]):
                 self._area(got[1])
-                return got[0]
+                return self.finish(got[0])
             # Drawn by the GPU where PrintWindow can't see it: the screen
-            # where the window is (it's in front while it's used).
+            # where the window is (it's in front while it's used), so it
+            # can't be hidden there.
+            if self.spec.get("hide"):
+                windows.show_window(win, None)
             if rect is not None:
                 self.spec = dict(self.spec, os=list(rect))
-            return super().image()
+            return self.finish(super().image())
         if sys.platform == "darwin":
             if not mac_screen_recording(ask=True):
                 self.why = MAC_NO_RECORDING
                 return None
             img = self.mac_window_stream(wid, rect)
             if img is not None or self.skip:
-                return img
+                return self.finish(img)
             img = mac_window_image(wid)
             if img is not None:
-                return img
+                return self.finish(img)
             self.why = "macOS didn't give the window's picture"
             return None
         if rect is not None:
             self.spec = dict(self.spec, os=list(rect))
-        return super().image()
+        return self.finish(super().image())
 
     def mac_window_stream(self, wid: int, rect) -> QImage | None:  # pragma: no cover - macOS only
         from curslink.mirror import macstream
@@ -417,6 +528,11 @@ class AppWindow(MirrorWindow):
         if self.isVisible() and not was:
             self._to_front()
             self._place_tag()
+            # Its screen's pixel ratio (a Windows screen's scaling): the host
+            # sizes the app for it, and sends pictures at its pixels.
+            sc = self.screen()
+            if sc is not None:
+                self._tell_view(dpr=round(float(sc.devicePixelRatio() or 1.0), 3))
 
     def _to_front(self) -> None:
         bring_to_front(self, self._carried)
@@ -479,12 +595,10 @@ class AppWindow(MirrorWindow):
         sides, start, g = self._resize
         now = e.globalPosition()
         dx, dy = now.x() - start.x(), now.y() - start.y()
-        ratio = float(self.spec.get("ratio") or (g.width() / max(1, g.height())))
-        grow_w = (dx if "r" in sides else -dx if "l" in sides else 0)
-        grow_h = (dy if "b" in sides else -dy if "t" in sides else 0)
-        w = g.width() + (grow_w if abs(grow_w) >= abs(grow_h * ratio) else grow_h * ratio)
-        w = max(160.0, w)
-        h = w / ratio
+        # Any shape: the app itself is resized to it, and lays itself out
+        # again (the picture is fitted in until it has).
+        w = max(160.0, g.width() + (dx if "r" in sides else -dx if "l" in sides else 0))
+        h = max(100.0, g.height() + (dy if "b" in sides else -dy if "t" in sides else 0))
         x = g.right() + 1 - w if "l" in sides else g.x()
         y = g.bottom() + 1 - h if "t" in sides else g.y()
         self.setGeometry(QRect(round(x), round(y), round(w), round(h)))
@@ -507,14 +621,21 @@ class AppWindow(MirrorWindow):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-        r = QRectF(self.rect())
+        pic = QRectF(self.canvas.rect()) if whole else QRectF(self.pixmap.rect())
+        r = fit_in(QRectF(self.rect()), pic.width(), pic.height())
+        p.save()
         corner = float(self.spec.get("corner") or 0)
         if corner > 0:
             path = QPainterPath()
             path.addRoundedRect(r, corner, corner)
             p.setClipPath(path)
         if whole:
-            p.drawImage(r, self.canvas, QRectF(self.canvas.rect()))
+            p.drawImage(r, self.canvas, pic)
         else:
-            p.drawPixmap(r, self.pixmap, QRectF(self.pixmap.rect()))
+            p.drawPixmap(r, self.pixmap, pic)
+        p.restore()
+        if self.pointer is not None:
+            # Drawn here, where the host says it is: it moves as fast as the
+            # pointer does, not as fast as pictures come.
+            self.paint_pointer(p, QPointF(r.x() + self.pointer[0] * r.width(), r.y() + self.pointer[1] * r.height()))
         p.end()
