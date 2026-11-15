@@ -134,6 +134,11 @@ class PynputCapture:
         # - a held button-up goes after HOLD_MAX_S, or at the next click.
         # took_back is set when one of them fires, for the router to catch up.
         self.loop_alive: Callable[[], bool] = lambda: True
+        # Windows: Ctrl+Alt+Delete or Task Manager in use (curslink.escapehatch).
+        from curslink.escapehatch import escape_wanted
+
+        self.escape_wanted: Callable[[], str | None] = escape_wanted
+        self._pc_mods: set[str] = set()  # ctrl/shift held, as this process's hooks heard them
         self.took_back = False
         self.hooks_lost = 0  # Windows: times the hooks were found gone (_watch_hooks)
         self._hook_heard_at = 0.0  # when the mouse hook (or the input helper) last reported a move
@@ -462,6 +467,7 @@ class PynputCapture:
         cursor wanders off the park point, put the hooks back."""
         seen: tuple[float, tuple[float, float]] | None = None  # (grab it's for, where the cursor sat)
         lost: list[float] = []
+        escape: tuple[float, str | None] | None = None  # (grab it's for, way out seen last)
         deaf = _DeafHook(self)
         while not self._closed:
             time.sleep(HOOK_CHECK_S)
@@ -469,6 +475,16 @@ class PynputCapture:
                 deaf.check()
                 continue
             deaf.reset()
+            way_out = self.escape_wanted() if sys.platform == "win32" else None
+            if escape is None or escape[0] != self._grabbed_at:
+                escape = (self._grabbed_at, way_out)  # Task Manager already in front isn't a way out
+            elif way_out and way_out != escape[1]:
+                # Ctrl+Alt+Delete (no hook ever sees it) or Task Manager
+                # coming up: Windows' own ways out free the cursor too.
+                self.take_back(f"{way_out} on this PC")
+                continue
+            else:
+                escape = (self._grabbed_at, way_out)
             if not self.loop_alive():
                 # No hook callback needed: with the loop stuck mid-switch the
                 # hooks may not be in at all (0.4.99), so nothing would hear
@@ -725,6 +741,13 @@ class PynputCapture:
         if injected or self._handler is None:
             return
         name = key_to_name(key)
+        if not self._mac and name and family(name) in ("ctrl", "shift"):
+            (self._pc_mods.add if pressed else self._pc_mods.discard)(family(name))
+        if (not self._mac and self._grabbed and pressed and name == "esc"
+                and self._pc_mods >= {"ctrl", "shift"}):
+            # Ctrl+Shift+Esc (Task Manager) brings input home at once.
+            self._take_back_soon("Ctrl+Shift+Esc pressed")
+            return
         if not self._mac and (self._grabbed or self._held_up):
             # The same safety nets as the Mac's event tap (_mac_key_tap), on
             # the listener's own thread: Escape three times quickly always
