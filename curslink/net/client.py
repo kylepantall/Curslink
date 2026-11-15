@@ -127,7 +127,7 @@ class AgentSession:
         t = msg.t
         if t == "ping":
             if "rtt_ms" in msg.data:
-                self.host_link = {k: msg.data.get(k) for k in ("rtt_ms", "p95_ms", "jitter_ms", "tuning")}
+                self.host_link = {k: msg.data.get(k) for k in ("rtt_ms", "p95_ms", "jitter_ms", "tuning", "iface")}
             reply = {"n": msg.get("n")}
             if "ts" in msg.data:
                 reply["ts"] = msg.data["ts"]  # lets the host time the round trip
@@ -407,6 +407,7 @@ class AgentClient:
             "optimise": self.optimise,
             "tuning": {"reason": host.get("tuning") or ""},
             "local": local,
+            "peer_interface": host.get("iface") if isinstance(host.get("iface"), dict) else None,
         }
 
     async def _report_netstats(self) -> None:
@@ -416,8 +417,28 @@ class AgentClient:
             if udp is None:
                 continue
             rtt = udp.rtt.stats()
+            extra = {}
+            iface = self._our_end()
+            if iface:
+                extra["iface"] = iface  # so the host can say how the two are linked
             self.send("netstats", udp=udp.heard_lately(), loss_pct=udp.loss.stats()["loss_pct"],
-                      rtt_ms=rtt["p50_ms"], jitter_ms=rtt["jitter_ms"])
+                      rtt_ms=rtt["p50_ms"], jitter_ms=rtt["jitter_ms"], **extra)
+
+    def _our_end(self) -> dict | None:
+        """Our interface on the link to the host, briefly (``{kind, name, cable?}``)."""
+        writer = self._writer
+        if writer is None or not self._direct:
+            return None
+        from curslink.net.check import InterfaceCache, brief, interface_for
+
+        if getattr(self, "_ifaces", None) is None:
+            self._ifaces = InterfaceCache()
+        try:
+            name = writer.get_extra_info("sockname")
+            local = str(name[0]) if isinstance(name, tuple) and name else ""
+            return brief(interface_for(local, self._ifaces.get()))
+        except Exception:  # noqa: BLE001 - it's only for the Network page
+            return None
 
     async def _watch_screens(self) -> None:
         """Tell the host when this device's monitors change (one plugged in,

@@ -235,8 +235,16 @@ def apply_fit(layout: Layout, data: dict) -> tuple[float, float, float] | None:
     if new is not None and not new[2] > 0:
         return None
     keep = tuple(f for f in layout.fits if (f.behind, f.front) != (behind_ref, front_ref))
+    # The frame round the front screen: as now measured, or as it was.
+    if isinstance(data.get("bezel"), (list, tuple)) and len(data["bezel"]) == 4:
+        try:
+            lean["bezel"] = tuple(max(0.0, float(v)) for v in data["bezel"])
+        except (TypeError, ValueError):
+            pass
+    elif old is not None and old.bezel is not None and "bezel" not in data:
+        lean["bezel"] = old.bezel
     if new is not None:
-        if not lean and not any(k in data for k in ("x", "place")) and old is not None and old.quad is not None:
+        if not any(k in data for k in ("x", "place")) and old is not None and old.quad is not None:
             keep += (old.moved(*new),)  # moved or resized: its lean goes along
         else:
             keep += (Fit(behind_ref, front_ref, *new, **lean),)

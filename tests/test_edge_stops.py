@@ -133,3 +133,21 @@ def test_the_hook_hearing_the_mouse_is_not_deaf(caplog):
         deaf.check()
         now[0] += 0.25
     assert not caplog.records
+
+
+def test_resting_on_a_dead_edge_works_out_why_only_when_it_says_so(router, monkeypatch):
+    # 0.4.101: working out where an edge leads tried hundreds of crossings and
+    # froze the PC host's loop for 2-3 s each time the pointer rested on an
+    # edge, even when the note had just been said and stayed quiet.
+    calls = []
+    real = router._nowhere
+    monkeypatch.setattr(router, "_nowhere", lambda *a: calls.append(1) or real(*a))
+    for _ in range(4):
+        for _ in range(STOP_REPORTS + 1):
+            router.on_pointer(3839, 1050)
+        router.on_pointer(3000, 1050)  # off the edge and back: a new push
+    assert len(calls) == 1
+    router.now[0] += 31
+    for _ in range(STOP_REPORTS):
+        router.on_pointer(3839, 1050)
+    assert len(calls) == 2

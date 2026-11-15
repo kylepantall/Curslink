@@ -22,6 +22,7 @@ packaged app) and only :func:`find_screens` and :func:`marker_bits` use it.
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass, field
 
@@ -45,6 +46,9 @@ JOIN = 0.18
 # Screens sharing more than this share of the smaller one's area overlap; less
 # is a bezel over a bezel, so they only meet.
 OVERLAP = 0.03
+
+
+log = logging.getLogger(__name__)
 
 
 class LineupError(RuntimeError):
@@ -493,9 +497,23 @@ class _Desk:
         e = (B.r.T @ (np.asarray(self.sol.eye, np.float64) - B.t)) / B.scale
         p = ((F.corners() - B.t) @ B.r) / B.scale
         depth = -p[:, 2]
-        if -e[2] > 0 and np.all(depth >= 0) and np.all(depth < 0.9 * -e[2]):
+        if B.bend:
+            # A curved screen's corners are in that plane and its glass is
+            # behind it, the middle most (centimetres on a wide one): a
+            # laptop's top edge near the middle of the glass is *behind* the
+            # plane, and well in front of the glass it's seen against. How
+            # far before the glass there, then (0.4.100 left these out for
+            # Kyle's curved monitor, so head tracking had nothing to follow).
+            from curslink.lineup_scene import bent
+
+            across = np.clip(quad[:, 0] / B.width, 0.0, 1.0)
+            depth = depth + bent(across, B.bend)[1] * B.width
+        if -e[2] > 0 and np.all(depth > -0.1 * -e[2]) and np.all(depth < 0.9 * -e[2]):
             out["eye"] = [float(e[0]), float(e[1]), float(-e[2])]
-            out["depth"] = [float(d) for d in depth]
+            out["depth"] = [float(max(0.0, d)) for d in depth]
+        else:
+            log.info("line-up: %s before %s: can't say where it's seen from (eye %.0f px away, corners %s px before "
+                     "it), so head tracking can't follow it", front, behind, -e[2], [round(float(d)) for d in depth])
         return out
 
     def _fitted_quad(self, F, B):
