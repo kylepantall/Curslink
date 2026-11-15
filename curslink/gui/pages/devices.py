@@ -113,7 +113,8 @@ class QrSession:
             qr = QrPairing(self.me, paired)
             await qr.start()
             try:
-                addresses = list(rank_addresses(local_addresses()))
+                # A phone can't use a computer's cable link: LAN addresses only.
+                addresses = list(rank_addresses(local_addresses(link_local=False)))
                 relay = self.relay
                 call_on_main(lambda: self.on_ready(qr.url(addresses, self.control_port,
                                                           relay.address if relay else "", relay.key if relay else "")))

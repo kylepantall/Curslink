@@ -970,6 +970,78 @@ async def upgrade_path(cfg: AgentConfig, store: PairingStore, client: AgentClien
             client.reconnect()
 
 
+CABLE_GONE_EVERY_S = 2.0
+CABLE_LOOK_FIRST_S = 4.0   # after a cable link comes up: the host's end may take a few seconds
+CABLE_LOOK_MAX_S = 120.0   # then less and less often, while it doesn't answer there
+
+
+async def follow_cable(cfg: AgentConfig, store: PairingStore, client: AgentClient, session: AgentSession,
+                       every_s: float = CABLE_GONE_EVERY_S, first_s: float = CABLE_LOOK_FIRST_S,
+                       max_s: float = CABLE_LOOK_MAX_S, find=None, reachable=None, cable_networks=None,
+                       clock=time.monotonic) -> None:
+    """Keep the link to the host on a USB-C/Thunderbolt cable while there is one.
+
+    * Connected over the LAN and a cable link comes up (it's plugged in, or
+      macOS/Windows just gave it its 169.254.x.x address): when the host
+      answers on the cable, reconnect over it. Not while input is on this
+      device, so nothing is cut off mid-move; the reconnect takes well under
+      a second once it's back on the host.
+    * Connected over the cable and the cable link goes (unplugged): reconnect
+      straight away, over the LAN, rather than waiting for the old
+      connection to time out.
+
+    Everything to and from the host (control, pointer moves by UDP,
+    clipboard, files, App mirror) goes on that one connection and its UDP
+    path, so moving it moves all of them."""
+    from curslink.pairing import discovery
+
+    find = find or discovery.find
+    reachable = reachable or discovery.reachable
+    cable_networks = cable_networks or discovery.cable_networks
+    cable_host = ""      # the host's address while the link is on a cable
+    last_nets: list = []
+    wait_s = first_s     # until the next look for the host on the cable
+    look_at = 0.0
+    while True:
+        await asyncio.sleep(every_s)
+        if not client.path or client.path == "relay" or not client.host:
+            continue
+        try:
+            nets = await asyncio.to_thread(cable_networks)
+        except OSError:
+            continue
+        if nets != last_nets:  # a cable link came, went or changed: look again soon
+            last_nets, wait_s, look_at = nets, first_s, clock() + first_s
+        on_cable = bool(discovery.cable_addresses([client.host], nets))
+        if not on_cable and cable_host == client.host:
+            cable_host = ""
+            log.info("network: the cable link to the host (%s) went; reconnecting over the LAN", client.host)
+            client.reconnect()
+            continue
+        cable_host = client.host if on_cable else ""
+        if on_cable or not nets or session.active or clock() < look_at:
+            continue
+        look_at, wait_s = clock() + wait_s, min(wait_s * 2, max_s)
+        try:
+            peer = paired_host(cfg, store)
+            if peer is None:
+                continue
+            found = await find(peer.device_id, timeout=3.0)
+            if found is None or not found.control_port:
+                continue
+            cable = discovery.cable_addresses(found.addresses, nets)
+            if not cable:
+                continue
+            address = await reachable(cable, found.control_port, ssl=client.ssl_context)
+        except (OSError, NotReady, ValueError) as exc:
+            log.debug("network: looking for the host on the cable: %s", exc)
+            continue
+        if address is not None and client.path and not session.active:
+            log.info("network: %s answers on the cable at %s; moving the link from %s onto it",
+                     peer.name, address, client.host)
+            client.reconnect()
+
+
 def input_blocked_reason():
     """For Router.blocked: on macOS, input can't be captured (so it mustn't
     leave this Mac) until Accessibility and Input Monitoring are allowed.
@@ -1439,7 +1511,11 @@ async def run_agent(cfg: AgentConfig) -> None:
         keeper.linked(state == "connected")
         if state == "connected" and client.host and not detail.startswith("relay"):
             peer = paired_host(cfg, store)
-            if peer is not None and peer.address != client.host:
+            from curslink.pairing.discovery import is_link_local
+
+            # Not a cable link's 169.254.x.x: it only works while the cable
+            # is in, and this is where to try when mDNS can't find the host.
+            if peer is not None and peer.address != client.host and not is_link_local(client.host):
                 store.set_address(peer.device_id, client.host)
         if state != "connected":
             events.emit("look", hide=True)  # the host can't take it down now
@@ -1486,6 +1562,8 @@ async def run_agent(cfg: AgentConfig) -> None:
     helpers = []
     if cfg.optimise and cfg.relay:
         helpers.append(asyncio.create_task(upgrade_path(cfg, store, client, session)))
+    if not cfg.host:
+        helpers.append(asyncio.create_task(follow_cable(cfg, store, client, session)))
     if events.channel.enabled:
         helpers.append(asyncio.create_task(report_network_agent(client, cfg.optimise, mdns)))
     try:
@@ -1725,10 +1803,14 @@ async def resolve_host(cfg: AgentConfig, store: PairingStore, mdns: dict | None 
         if found is not None and found.control_port:
             from curslink.pairing.discovery import reachable
 
+            from curslink.pairing.discovery import cable_addresses
+
             # The host advertises all its addresses, some unreachable from
-            # here (VM bridges, VPNs): use one that answers.
-            # Last time's address first: it worked then.
-            order = sorted(found.addresses, key=lambda a: a != peer.address)
+            # here (VM bridges, VPNs): use one that answers. The other end
+            # of a USB-C/Thunderbolt cable first (it's the fastest link),
+            # then last time's address: it worked then.
+            cable = set(cable_addresses(found.addresses))
+            order = sorted(found.addresses, key=lambda a: (a not in cable, a != peer.address))
             address = await reachable(order, found.control_port, ssl=ctx)
             if address is None:
                 address = peer.address if peer.address in found.addresses else found.address

@@ -110,34 +110,114 @@ def found_from_info(info) -> Found | None:
     )
 
 
-def local_networks() -> list[ipaddress.IPv4Network]:
-    """The IPv4 networks this machine is on (LAN, VPN, VM bridges)."""
+LINK_LOCAL = ipaddress.ip_network("169.254.0.0/16")
+
+# Interface names of a computer-to-computer cable link: a Mac's Thunderbolt
+# Bridge (bridge0), Windows' "Thunderbolt(TM) Networking" and "USB4(TM) P2P
+# Network Adapter", Linux's thunderbolt-net. Not "Thunderbolt Ethernet": that
+# is an Ethernet adapter on the LAN.
+_CABLE_NAMES = ("thunderbolt bridge", "thunderbolt(tm) networking", "thunderbolt networking", "usb4",
+                "p2p network", "bridge0", "thunderbolt0", "thunderbolt-net")
+
+
+def is_cable_name(name: str) -> bool:
+    """Whether an interface name is a direct computer-to-computer cable link."""
+    text = (name or "").lower()
+    return any(w in text for w in _CABLE_NAMES)
+
+
+def is_link_local(address: str) -> bool:
+    """An IPv4 169.254.x.x address: what a USB-C/Thunderbolt cable link
+    between two computers gives each end when nothing hands out addresses
+    (and what Windows gives adapters with nothing behind them)."""
+    try:
+        ip = ipaddress.ip_address(address.split("%")[0])
+    except ValueError:
+        return False
+    return ip.version == 4 and ip in LINK_LOCAL
+
+
+def _adapter_networks():
+    """(network, address, adapter name) for this machine's IPv4 addresses, not loopback."""
     try:
         import ifaddr  # a zeroconf dependency
     except ImportError:  # pragma: no cover
         return []
-    nets = []
+    out = []
     for adapter in ifaddr.get_adapters():
+        names = f"{adapter.name} {adapter.nice_name or ''}"
         for ip in adapter.ips:
             if isinstance(ip.ip, str):
                 net = ipaddress.ip_network(f"{ip.ip}/{ip.network_prefix}", strict=False)
-                if not (net.network_address.is_loopback or net.network_address.is_link_local):
-                    nets.append(net)
-    return nets
+                if not net.network_address.is_loopback:
+                    out.append((net, ip.ip, names))
+    return out
 
 
-def rank_addresses(addresses, networks=None) -> tuple[str, ...]:
+def local_networks() -> list[ipaddress.IPv4Network]:
+    """The IPv4 networks this machine is on (LAN, VPN, VM bridges, a cable link)."""
+    return [net for net, _addr, _names in _adapter_networks()]
+
+
+_VIRTUAL = ("virtual", "hyper-v", "vethernet", "vmware", "virtualbox", "vmnet", "docker", "veth")
+
+
+def is_cable(address: str, names: str) -> bool:
+    """Whether this address of ours is on a cable straight to another computer:
+    any address on a Thunderbolt Bridge / USB4 networking interface, or a
+    self-assigned 169.254.x.x on a real wired (Ethernet) adapter, which is
+    what an Ethernet cable between two computers gives each end. Not on
+    Wi-Fi Direct, Bluetooth or VPN adapters, which Windows also gives
+    169.254.x.x addresses with nothing behind them."""
+    if is_cable_name(names):
+        return True
+    if not is_link_local(address) or any(w in names.lower() for w in _VIRTUAL):
+        return False
+    from curslink.net.check import interface_kind
+
+    return interface_kind(names) == "wired"
+
+
+def cable_networks() -> list[ipaddress.IPv4Network]:
+    """The networks of this machine's direct cable links (USB-C, Thunderbolt,
+    an Ethernet cable straight to the other computer): see :func:`is_cable`."""
+    return [net for net, addr, names in _adapter_networks() if is_cable(addr, names)]
+
+
+def cable_addresses(addresses, cable_nets=None) -> list[str]:
+    """Those of ``addresses`` on one of our cable links: the other end of the cable."""
+    nets = cable_networks() if cable_nets is None else cable_nets
+    out = []
+    for a in addresses:
+        try:
+            ip = ipaddress.ip_address(a.split("%")[0])
+        except ValueError:
+            continue
+        if ip.version == 4 and any(ip in n for n in nets):
+            out.append(a)
+    return out
+
+
+def rank_addresses(addresses, networks=None, cable_nets=None) -> tuple[str, ...]:
     """Best address to try first. A device advertises every address it has,
     and a Mac also has VM bridges and VPN tunnels the other device can't
-    reach (192.168.64.1, 10.x), so: an address on one of our own networks
-    first, then other IPv4, then IPv6."""
+    reach (192.168.64.1, 10.x), so: the other end of a USB-C/Thunderbolt
+    cable first (the fastest link there is), then an address on one of our
+    own networks, then other IPv4, then link-local addresses we have no cable
+    for, then IPv6."""
     nets = local_networks() if networks is None else networks
+    cables = cable_networks() if cable_nets is None else cable_nets
+    cable = set(cable_addresses(addresses, cables))
 
     def key(a: str):
         ip = ipaddress.ip_address(a.split("%")[0])
         if ip.version == 6:
-            return 2
-        return 0 if any(ip in n for n in nets) else 1
+            return 4
+        if a in cable:
+            return 0
+        if ip in LINK_LOCAL:
+            return 3
+        return 1 if any(ip in n for n in nets) else 2
 
     return tuple(sorted(addresses, key=key))
 
@@ -163,20 +243,16 @@ async def reachable(addresses, port: int, timeout: float = 2.0, ssl=None) -> str
     return next((a for a, ok in zip(addresses, answered) if ok), None)
 
 
-def local_addresses() -> list[str]:
-    """This machine's LAN addresses (IPv4, not loopback or link-local)."""
-    try:
-        import ifaddr  # a zeroconf dependency
-    except ImportError:  # pragma: no cover
-        return []
+def local_addresses(link_local: bool = True) -> list[str]:
+    """This machine's IPv4 addresses, not loopback. Self-assigned 169.254.x.x
+    ones only on a cable straight to another computer (and
+    not at all without ``link_local``): elsewhere they're Wi-Fi Direct,
+    Bluetooth or a VPN adapter with nothing behind it."""
     out = []
-    for adapter in ifaddr.get_adapters():
-        for ip in adapter.ips:
-            if not isinstance(ip.ip, str):
-                continue
-            addr = ipaddress.ip_address(ip.ip)
-            if not (addr.is_loopback or addr.is_link_local):
-                out.append(ip.ip)
+    for _net, addr, names in _adapter_networks():
+        if is_link_local(addr) and not (link_local and is_cable(addr, names)):
+            continue
+        out.append(addr)
     return out
 
 
@@ -187,7 +263,9 @@ def zeroconf_options() -> dict:
     127.0.0.1 (its multicast socket fails with WinError 1231 "network
     location cannot be reached") and VPN/virtual adapters that can't carry
     multicast, and each failing socket costs a send. Binding just the real
-    addresses makes queries and announcements go out reliably."""
+    addresses makes queries and announcements go out reliably. A cable
+    link's 169.254.x.x address is one of them: the two computers find each
+    other over the cable too, even when the Wi-Fi drops multicast."""
     from zeroconf import IPVersion
 
     addresses = list(dict.fromkeys(local_addresses()))

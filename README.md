@@ -238,6 +238,16 @@ Windows only takes them from a real keyboard.
 **Is my typing safe on the network?** Yes. Everything is encrypted, and
 only devices you've paired can connect. See [Security](#security).
 
+**Can two computers use a cable between them?** Yes, when the cable makes a
+network: a Thunderbolt or USB4 cable with Thunderbolt Bridge on a Mac and
+the USB4 P2P or Thunderbolt Networking adapter on Windows, or an Ethernet
+cable straight between them. Curslink finds the other computer on the
+cable, moves the link onto it (when the pointer is back on the host, so
+nothing is cut off) and goes back to the LAN within a few seconds of it
+being unplugged. Settings > Network shows which one is in use. Mac to
+Windows over USB-C often doesn't link up at all: if neither computer shows
+the other in its network settings, a plain wired LAN does as well.
+
 **Wayland?** Not yet; Wayland blocks global input capture. Use an X11
 session for now.
 

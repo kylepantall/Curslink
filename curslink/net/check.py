@@ -44,8 +44,13 @@ def _mac_ports() -> dict[str, str]:
 
 
 def interface_kind(name: str, port: str = "") -> str:
-    """``wifi``, ``wired``, ``vpn`` or ``other``, from an interface's name."""
+    """``wifi``, ``wired``, ``vpn``, ``cable`` (a USB-C/Thunderbolt link
+    straight to another computer) or ``other``, from an interface's name."""
+    from curslink.pairing.discovery import is_cable_name
+
     text = f"{port} {name}".lower()
+    if is_cable_name(text):
+        return "cable"
     if any(w in text for w in ("wi-fi", "wifi", "wlan", "wireless", "airport", "802.11")) or re.match(r"wl", name):
         return "wifi"
     if any(w in text for w in ("vpn", "tun", "tap", "wireguard", "utun", "tailscale", "zerotier", "ipsec")):
@@ -66,11 +71,17 @@ def interfaces() -> list[dict]:
     for adapter in ifaddr.get_adapters():
         name = adapter.nice_name or adapter.name
         for ip in adapter.ips:
-            if not isinstance(ip.ip, str) or ip.ip.startswith(("127.", "169.254.")):
+            if not isinstance(ip.ip, str) or ip.ip.startswith("127."):
                 continue
             port = ports.get(adapter.name, "")
-            found.append({"name": port or name, "device": adapter.name, "ip": ip.ip,
-                          "kind": interface_kind(str(adapter.name), port or str(name))})
+            kind = interface_kind(str(adapter.name), f"{port} {name}")
+            if ip.ip.startswith("169.254."):
+                from curslink.pairing.discovery import is_cable
+
+                if not is_cable(ip.ip, f"{adapter.name} {port} {name}"):
+                    continue  # Windows' self-assigned address on Wi-Fi Direct, Bluetooth, a VPN
+                kind = "cable"
+            found.append({"name": port or name, "device": adapter.name, "ip": ip.ip, "kind": kind})
     return found
 
 
@@ -170,7 +181,8 @@ def summarise(check: dict) -> list[str]:
             lines.append("No other Curslink device answered.")
     ifaces = check.get("interfaces") or []
     if ifaces:
-        names = {"wifi": "Wi-Fi", "wired": "wired", "vpn": "VPN", "other": "other"}
+        names = {"wifi": "Wi-Fi", "wired": "wired", "vpn": "VPN", "cable": "cable straight to the other computer",
+                 "other": "other"}
         def one(i: dict) -> str:
             kind = names.get(i["kind"], i["kind"])
             show = kind and kind.lower() not in i["name"].lower() and kind != "other"

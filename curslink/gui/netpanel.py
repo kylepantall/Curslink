@@ -13,7 +13,7 @@ from curslink.gui.widgets import Card, Toggle, button, label, pill, set_pill, te
 
 GRADES = {"good": ("Good", "on"), "fair": ("Fair", "wait"), "poor": ("Poor", "bad"), "unknown": ("Measuring", "off")}
 PATHS = {"udp": "Direct, pointer by UDP", "tcp": "Direct, TCP only", "relay": "Through the relay"}
-KINDS = {"wifi": "Wi-Fi", "wired": "wired", "vpn": "VPN", "other": ""}
+KINDS = {"wifi": "Wi-Fi", "wired": "wired", "vpn": "VPN", "cable": "direct cable", "other": ""}
 
 
 def _ms(value) -> str:
