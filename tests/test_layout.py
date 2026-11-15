@@ -121,3 +121,18 @@ def test_pushing_into_the_blocked_corner_crosses():
     hit = lay.find_crossing("lap", 900, 400, 0, -1)
     assert hit and hit.screen.device_id == "pc" and hit.y < 400
 
+
+
+def test_the_stacking_order_is_kept_until_a_device_changes():
+    from dataclasses import replace
+
+    from curslink.layout import Device, Layout, Screen
+
+    back = Screen("main", "pc", 0, 0, 100, 100)
+    front = Screen("main", "mac", 50, 50, 100, 100, z=1)
+    layout = Layout.from_devices([Device("pc", "PC", (back,)), Device("mac", "Mac", (front,))], allow_overlap=True)
+    assert layout._stack() is layout._stack()
+    assert layout.in_front(front, back) and layout.screen_at(60, 60) == front
+    raised = replace(back, z=2)
+    layout.devices["pc"] = Device("pc", "PC", (raised,))
+    assert layout.in_front(raised, front) and layout.screen_at(60, 60) == raised
