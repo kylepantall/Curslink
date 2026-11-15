@@ -156,9 +156,11 @@ def test_dragging_a_window_over_the_edge_casts_it_and_puts_the_real_one_back():
     capture, = transport.of("mirror", "mac")[-1]["captures"]
     assert capture["id"] == sid and capture["window"]["wid"] == 7 and capture["os"] == [100, 50, 800, 600]
     # No pointer in the picture (the mirror draws it); the Mac hides its own
-    # window; no bigger than shown (a Windows screen here: its pixels).
+    # window; no bigger than shown (in the pixels of the screen showing it:
+    # this computer's, a Retina Mac's until it says, else its OS pixels).
     assert "cursor" not in capture and capture["pointer"] is True and capture["tiles"] is True
-    assert capture["hide"] is True and capture["use"] is False and capture["out"] == [800, 600]
+    px = 2 if apps.platform("pc") == "mac" else 1
+    assert capture["hide"] is True and capture["use"] is False and capture["out"] == [800 * px, 600 * px]
     # Not a file: the Mac got its button up, no drag_out.
     assert not transport.of("drag_out") and {"button": "left", "pressed": False} in transport.of("button", "mac")
     # This computer shows it, under the pointer where it was grabbed, the
