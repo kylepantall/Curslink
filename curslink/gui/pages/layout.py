@@ -13,7 +13,7 @@ import logging
 import sys
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QBrush, QColor, QFont, QFontMetricsF, QGuiApplication, QPainter, QPen
+from PySide6.QtGui import QBrush, QColor, QFont, QFontMetricsF, QGuiApplication, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import (
     QApplication,
     QBoxLayout,
@@ -63,9 +63,17 @@ def push_apart(rect: tuple[int, int, int, int], others: list[tuple[int, int, int
     return x, y
 
 
-def _colours(home: bool, selected: bool) -> tuple[QColor, QPen, QColor]:
-    """Fill, border and text for a screen, from the theme (spec 4.3)."""
+def _colours(home: bool, selected: bool, off: bool = False) -> tuple[QColor, QPen, QColor]:
+    """Fill, border and text for a screen, from the theme (spec 4.3). A
+    device turned off is drawn faint, with a dashed border."""
     t = theme.current().tokens
+    if off:
+        fill = theme.qcolor(t["ink3"])
+        fill.setAlphaF(0.08)
+        border = theme.qcolor(t["ink3"])
+        pen = QPen(theme.qcolor(t["accent"]), 3) if selected else QPen(border, 1.2)
+        pen.setStyle(Qt.PenStyle.DashLine)
+        return fill, pen, theme.qcolor(t["ink3"])
     if home:
         fill = theme.over(t["accent_soft"], t["card"])
         border = QColor(t["ink3"])
@@ -76,6 +84,29 @@ def _colours(home: bool, selected: bool) -> tuple[QColor, QPen, QColor]:
         border.setAlphaF(0.7)
     pen = QPen(theme.qcolor(t["accent"]), 3) if selected else QPen(border, 1.2)
     return fill, pen, theme.qcolor(t["ink"])
+
+
+def lean_corners(fit: dict, width: int, height: int) -> list[tuple[float, float]] | None:
+    """How a screen in front leans, from its fit (``quad``, see
+    curslink.layout.Fit): its four corners (top left, top right, bottom
+    right, bottom left) as shares of its own rectangle on the canvas, (0, 0)
+    to (1, 1) when it stands square on. None when the fit has no lean (or
+    it's too slight to see: under half a percent everywhere)."""
+    quad = fit.get("quad")
+    try:
+        x, y, k = float(fit["x"]), float(fit["y"]), float(fit["scale"])
+        if not quad or len(quad) != 8 or k <= 0 or width <= 0 or height <= 0:
+            return None
+        w, h = k * width, k * height
+        corners = [((float(quad[2 * i]) - x) / w, (float(quad[2 * i + 1]) - y) / h) for i in range(4)]
+    except (KeyError, TypeError, ValueError):
+        return None
+    square = ((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0))
+    if all(abs(u - su) < 0.005 and abs(v - sv) < 0.005 for (u, v), (su, sv) in zip(corners, square)):
+        return None
+    if any(abs(c) > 3 for corner in corners for c in corner):
+        return None  # nonsense: keep the plain rectangle
+    return corners
 
 
 IDENTIFY_S = 4  # how long "Detect my screens" shows which monitor is which
@@ -190,6 +221,10 @@ class ScreenItem(QGraphicsRectItem):
                       | QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges)
         self.setCursor(Qt.CursorShape.OpenHandCursor)
         self.number = 0  # as "Detect my screens" shows it on the monitor (number_screens)
+        # Its device is turned off: the pointer doesn't go there (Use this device).
+        self.off = False
+        # How it really leans, from its line-up (lean_corners), or None: square on.
+        self.lean: list[tuple[float, float]] | None = None
         self.text = QGraphicsSimpleTextItem(self)
         # Constant on-screen size, however the view is zoomed.
         self.text.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations)
@@ -209,20 +244,52 @@ class ScreenItem(QGraphicsRectItem):
 
     def refresh(self) -> None:
         w, h = self.screen["width"] * SCALE, self.screen["height"] * SCALE
+        self.prepareGeometryChange()
         self.setRect(0, 0, w, h)
-        fill, pen, ink = _colours(self.home, self.isSelected())
+        fill, pen, ink = _colours(self.home, self.isSelected(), self.off)
         self.setBrush(QBrush(fill))
         self.setPen(pen)
-        self.text.setText(f"{self.device_name}\n{self.screen['id']} · {self.screen['width']}×{self.screen['height']}")
+        off = " · turned off" if self.off else ""
+        self.text.setText(f"{self.device_name}{off}\n{self.screen['id']} · "
+                          f"{self.screen['width']}×{self.screen['height']}")
         self.text.setBrush(ink)
         self.text.setPos(w * 0.05, h * 0.08)
+
+    def lean_polygon(self) -> QPolygonF | None:
+        """Its outline as it really leans (item coordinates), or None."""
+        if not self.lean:
+            return None
+        r = self.rect()
+        return QPolygonF([QPointF(r.x() + u * r.width(), r.y() + v * r.height()) for u, v in self.lean])
+
+    def boundingRect(self) -> QRectF:  # noqa: N802
+        rect = super().boundingRect()
+        shape = self.lean_polygon()
+        return rect if shape is None else rect.united(shape.boundingRect().adjusted(-2, -2, 2, 2))
 
     def paint(self, painter, option, widget=None) -> None:
         # Our own border shows the selection; skip Qt's dotted one.
         from PySide6.QtWidgets import QStyle
 
         option.state &= ~QStyle.StateFlag.State_Selected
-        super().paint(painter, option, widget)
+        shape = self.lean_polygon()
+        if shape is None:
+            super().paint(painter, option, widget)
+        else:
+            # Measured leaning (turned in, tipped back): drawn the shape it
+            # really is against the screen behind. The rectangle the pointer
+            # uses stays as a faint dotted outline, which is what's dragged.
+            painter.save()
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(self.brush())
+            painter.drawPolygon(shape)
+            guide = QPen(self.pen().color(), 0, Qt.PenStyle.DotLine)
+            painter.setPen(guide)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(self.rect())
+            painter.setPen(self.pen())
+            painter.drawPolygon(shape)
+            painter.restore()
         if self.number:
             # The number "Detect my screens" puts on the real monitor, big
             # and faint in the middle, like Windows' display settings.
@@ -395,6 +462,7 @@ class LayoutPage(Page):
         super().__init__("Layout", "Arrange the screens like your real desk. The pointer crosses where two screens touch.")
         self.app = app
         self.items: list[ScreenItem] = []
+        self.saved_fits: dict[tuple[str, str], dict] = {}  # (behind, front) -> [[layout.fit]], as loaded
         self.dirty = False
         self.allow_overlap = False
         self.calibration = None  # EdgeCalibration, while calibrating an edge
@@ -486,6 +554,24 @@ class LayoutPage(Page):
         self.inspector.body.addLayout(fields)
         self.reported = button("Use the size it reports", None, self.use_reported)
         self.inspector.body.addWidget(self.reported)
+        # Turn another device off: it stays paired and on the canvas, but
+        # the pointer and keyboard don't go there (a phone that's linked but
+        # not in use). Takes effect at once, without Save layout.
+        self.use_row = QWidget()
+        urow = QHBoxLayout(self.use_row)
+        urow.setContentsMargins(0, 0, 0, 0)
+        urow.setSpacing(8)
+        self.use_toggle = Toggle("Use this device")
+        self.use_toggle.toggled.connect(self.use_toggled)
+        urow.addWidget(self.use_toggle)
+        self.use_label = QLabel("Use this device")
+        self.use_label.setBuddy(self.use_toggle)
+        urow.addWidget(self.use_label, 1)
+        self.inspector.body.addWidget(self.use_row)
+        self.use_note = label("", "small", wrap=True)
+        self.inspector.body.addWidget(self.use_note)
+        self.use_row.hide()
+        self.use_note.hide()
         self.inspector.body.addWidget(label("Drag screens on the canvas; they snap to each other's edges "
                                             "(hold Alt or Option to place freely).", "small",
                                             wrap=True))
@@ -561,6 +647,7 @@ class LayoutPage(Page):
             return
         cfg = self.app.config()
         me = cfg.get("host", "device_id")
+        self.saved_fits = {(t.get("behind"), t.get("front")): t for t in cfg.fits()}
         self.allow_overlap = bool(cfg.get("layout", "allow_overlap", False))
         self.overlap_toggle.blockSignals(True)
         self.overlap_toggle.setChecked(self.allow_overlap)
@@ -571,6 +658,8 @@ class LayoutPage(Page):
                           "width": int(s.get("width", 1920)), "height": int(s.get("height", 1080)),
                           "z": int(s.get("z", 0)), "os_x": int(s.get("os_x", 0)), "os_y": int(s.get("os_y", 0))}
                 item = ScreenItem(self, d.get("id"), d.get("name", d.get("id")), screen, d.get("id") == me)
+                item.off = d.get("id") != me and d.get("enabled", True) is False
+                item.refresh()
                 self.scene.addItem(item)
                 self.items.append(item)
         number_screens(self.items)
@@ -726,11 +815,31 @@ class LayoutPage(Page):
         self.overlaps_changed()
         self.refresh_edges()
 
+    def update_leans(self, pairs=None) -> None:
+        """Draw each screen in front the shape its line-up measured it at
+        (turned in, tipped back), from the line-up just run (unsaved) or the
+        saved fits, for the pairs that still overlap that way round."""
+        measured = self.lineup_fits()
+        leans: dict[str, list] = {}
+        for behind, front, _shared in (self.overlap_pairs() if pairs is None else pairs):
+            fit = measured.get((behind.key, front.key)) or self.saved_fits.get((behind.key, front.key))
+            if fit is not None:
+                lean = lean_corners(fit, int(front.screen["width"]), int(front.screen["height"]))
+                if lean is not None:
+                    leans[front.key] = lean
+        for item in self.items:
+            lean = leans.get(item.key)
+            if lean != item.lean:
+                item.prepareGeometryChange()
+                item.lean = lean
+                item.update()
+
     def overlaps_changed(self, dragging: ScreenItem | None = None) -> None:
         """Restripe and re-explain the overlaps (live while dragging)."""
+        pairs = self.overlap_pairs()
+        self.update_leans(pairs)
         for item in self.items:
             item.update()
-        pairs = self.overlap_pairs()
         if self.tag is not None:
             mine = [p for p in pairs if dragging in (p[0], p[1])] if dragging else []
             if mine:
@@ -1121,7 +1230,10 @@ class LayoutPage(Page):
         if item is None:
             self.sel_title.setText("Pick a screen")
             self.reported.hide()
+            self.use_row.hide()
+            self.use_note.hide()
             return
+        self.show_use(item)
         self.sel_title.setText(f"{item.device_name} / {item.screen['id']}")
         x, y, w, h = item.layout_rect()
         for key, value in (("x", x), ("y", y), ("width", w), ("height", h)):
@@ -1132,6 +1244,53 @@ class LayoutPage(Page):
         self.reported.setVisible(bool(self.reported_screens(item)))
         if self.overlap_row.isVisible():
             self.overlaps_changed()
+
+    def show_use(self, item: ScreenItem) -> None:
+        """The "Use this device" switch, for a screen of another device."""
+        self.use_row.setVisible(not item.home)
+        self.use_note.setVisible(not item.home)
+        if item.home:
+            return
+        self.use_toggle.blockSignals(True)
+        self.use_toggle.setChecked(not item.off)
+        self.use_toggle.blockSignals(False)
+        self.use_label.setText(f"Use {item.device_name}")
+        self.use_toggle.setAccessibleName(f"Use {item.device_name}")
+        self.use_note.setText(
+            f"Off: {item.device_name} stays paired and on the layout, but the pointer and keyboard won't go "
+            "there, by edge or by looking at it." if item.off else
+            f"Turn off to keep the pointer off {item.device_name} while you're not using it.")
+
+    def use_toggled(self, on: bool) -> None:
+        item = self.selected()
+        if item is None or item.home:
+            return
+        self.set_device_enabled(item.device_id, on)
+
+    def set_device_enabled(self, device_id: str, on: bool) -> None:
+        """Save it and tell the running service, which takes it without a
+        restart (``device <id> on|off``)."""
+        cfg = self.app.config()
+        if not cfg.has_device(device_id):
+            return
+        if cfg.device_enabled(device_id) != on:
+            cfg.set_device_enabled(device_id, on)
+            cfg.save()
+            if self.app.service.is_alive():
+                self.app.service.send(f"device {device_id} {'on' if on else 'off'}")
+        for item in self.items:
+            if item.device_id == device_id:
+                item.off = not on
+                item.refresh()
+                item.update()
+        selected = self.selected()
+        if selected is not None:
+            self.show_use(selected)
+        self.refresh_edges()
+        was_dirty = self.dirty
+        self.dirty = True  # don't let config_changed reload the canvas over unsaved moves
+        self.app.config_saved(restart=False)
+        self.dirty = was_dirty
 
     def reported_screens(self, item: ScreenItem) -> list[dict]:
         agent = self.app.status.agents.get(item.device_id)
@@ -1383,7 +1542,7 @@ class LayoutPage(Page):
         from curslink.gui.widgets import clear_layout, pill
 
         clear_layout(self.edges_box)
-        names = {i.device_id: i.device_name for i in self.items}
+        names = {i.device_id: i.device_name + (" (turned off)" if i.off else "") for i in self.items}
         linked = set()
         if self.app.has_config():
             linked = {frozenset((t.get("a"), t.get("b"))) for t in self.app.config().links()}

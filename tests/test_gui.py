@@ -1977,3 +1977,65 @@ def test_settings_sections_in_the_sidebar_and_gaze_settings_on_calibrate(desktop
     assert settings.sections["overlap"].isAncestorOf(settings.mirror_card)
     assert settings.sections["sharing"].isAncestorOf(settings.clipboard_card)
     assert "overlap" in settings.section_keys("host") and "overlap" not in settings.section_keys("agent")
+
+
+def test_layout_page_turns_a_device_off(desktop, qapp):
+    from curslink.config import host_config
+
+    page, home, laptop = _host_with_laptop(desktop)
+    sent = []
+    desktop.service.send = sent.append
+    desktop.service.is_alive = lambda: True
+    page.scene.clearSelection()
+    home.setSelected(True)
+    assert page.use_row.isHidden()  # this computer can't be turned off
+    page.scene.clearSelection()
+    laptop.setSelected(True)
+    assert not page.use_row.isHidden() and page.use_toggle.isChecked()
+    page.use_toggle.setChecked(False)
+    assert sent == ["device laptop off"] and laptop.off and not page.dirty
+    assert not host_config(desktop.config().raw()).layout.devices["laptop"].enabled
+    assert "turned off" in laptop.text.text()
+    page.load()
+    laptop = next(i for i in page.items if i.device_id == "laptop")
+    assert laptop.off
+    page.scene.clearSelection()
+    laptop.setSelected(True)
+    page.use_toggle.setChecked(True)
+    assert sent[-1] == "device laptop on" and not laptop.off
+    assert desktop.config().device_enabled("laptop")
+
+
+def test_layout_page_draws_a_leaning_screen(desktop, qapp):
+    from curslink.gui.pages.layout import lean_corners
+
+    assert lean_corners({"x": 10, "y": 20, "scale": 0.5}, 1000, 600) is None  # no quad: square on
+    square = [10, 20, 510, 20, 510, 320, 10, 320]
+    assert lean_corners({"x": 10, "y": 20, "scale": 0.5, "quad": square}, 1000, 600) is None
+    leaning = [10, 30, 510, 20, 500, 320, 15, 300]
+    corners = lean_corners({"x": 10, "y": 20, "scale": 0.5, "quad": leaning}, 1000, 600)
+    assert corners[0] == pytest.approx((0.0, 10 / 300)) and corners[2] == pytest.approx((490 / 500, 1.0))
+
+    page, home, laptop = _host_with_laptop(desktop)
+    hx, hy, hw, hh = home.layout_rect()
+    cfg = desktop.config()
+    cfg.set("layout", "allow_overlap", True)
+    cfg.move_screen("laptop", laptop.screen["id"], hx + hw - 300, hy + hh - 300)
+    cfg.set_screen_z("laptop", laptop.screen["id"], 1)
+    w, h = laptop.screen["width"], laptop.screen["height"]
+    fx, fy = hw - 300, hh - 300
+    quad = [fx + 40, fy, fx + w, fy + 30, fx + w - 20, fy + h, fx, fy + h - 10]
+    cfg.set_fit(f"{home.device_id}/{home.screen['id']}", f"laptop/{laptop.screen['id']}", fx, fy, 1.0, quad=quad)
+    cfg.save()
+    page.load()
+    laptop = next(i for i in page.items if i.device_id == "laptop")
+    home = next(i for i in page.items if i.device_id != "laptop")
+    assert laptop.lean is not None and home.lean is None
+    assert laptop.lean[0] == pytest.approx((40 / w, 0.0))
+    shape = laptop.lean_polygon()
+    assert shape.boundingRect().width() == pytest.approx(laptop.rect().width())
+    # moved clear of the screen behind: back to a plain rectangle
+    page.scene.clearSelection()
+    laptop.setSelected(True)
+    page.spins["x"].setValue(hx + hw + 50)
+    assert laptop.lean is None

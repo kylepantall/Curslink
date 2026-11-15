@@ -205,6 +205,8 @@ name = "Main PC"
 [[devices]]
 id = "laptop"
 name = "Work laptop"
+# enabled = false           # turned off ("Use Work laptop" on the Layout page): stays paired
+                             # and laid out, but the pointer and keyboard never go to it
 
   [[devices.screens]]
   id = "main"

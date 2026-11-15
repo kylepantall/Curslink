@@ -194,6 +194,8 @@ class Router:
         self.screen = first
         self.x, self.y = first.center
         self.gaze_paused = False
+        # Devices turned off on the Layout page ([[devices]] enabled = false).
+        self.turned_off: set[str] = {d.id for d in layout.devices.values() if not d.enabled and d.id != local_device_id}
         self._last_pos: dict[str, tuple[float, float]] = {}
         # Where the pointer last was on each monitor, for jump monitors.
         self._screen_pos: dict[tuple[str, str], tuple[float, float]] = {}
@@ -209,7 +211,26 @@ class Router:
         return self.active_device == self.local_id
 
     def available(self, device_id: str) -> bool:
-        return device_id == self.local_id or self.transport.is_connected(device_id)
+        if device_id == self.local_id:
+            return True
+        return device_id not in self.turned_off and self.transport.is_connected(device_id)
+
+    def set_device_enabled(self, device_id: str, on: bool) -> None:
+        """Turn a device off (the Layout page): it stays connected and laid
+        out, but no edge, gaze or app mirror takes input to it. Input on it
+        right now comes home."""
+        if device_id == self.local_id or on == (device_id not in self.turned_off):
+            return
+        if on:
+            self.turned_off.discard(device_id)
+        else:
+            self.turned_off.add(device_id)
+        log.info("%s turned %s", device_id, "on" if on else "off")
+        if not on and self.active_device == device_id:
+            self._remote_keys.clear()
+            self._remote_buttons.clear()
+            self.go_home("turned off")
+        self.on_moved()
 
     # Where the pointer was, kept across restarts (the app restarts the host
     # whenever a setting changes), so gaze brings it back there rather than
@@ -311,7 +332,8 @@ class Router:
                 self.switch_to(crossing.screen, crossing.x, crossing.y, "edge")
                 return
             if crossing:
-                offline = f"{crossing.screen.device_id} isn't connected"
+                offline = (f"{crossing.screen.device_id} is turned off" if crossing.screen.device_id in self.turned_off
+                           else f"{crossing.screen.device_id} isn't connected")
         if pushes:
             self._pressed(screen, pushes, offline or (lambda: self._nowhere(screen, pushes)))
         else:
@@ -614,6 +636,8 @@ class Router:
         new = screen.device_id
         if old == new and screen == self.screen and reason != "edge":
             return  # already there: no re-entry, no animation
+        if new in self.turned_off:
+            return  # turned off on the Layout page (whoever asked: edge, gaze, app mirror)
         if old == self.local_id and new != self.local_id:
             why = self.blocked()
             if why:

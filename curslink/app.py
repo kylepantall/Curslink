@@ -454,6 +454,11 @@ async def run_host(cfg: HostConfig) -> None:
             lineup_inbox.live(line[12:])
         elif line.startswith("fit "):
             fit_command(mirror, line[4:])
+        elif line.startswith("device "):
+            # The Layout page turned a device off or on: "device <id> on|off".
+            parts = line.split()
+            if len(parts) == 3 and parts[2] in ("on", "off"):
+                router.set_device_enabled(parts[1], parts[2] == "on")
         elif line == "head home":
             if head is not None:
                 head.follow.rehome()
