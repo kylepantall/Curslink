@@ -293,7 +293,11 @@ class Router:
         self._moved_at = self.clock()
         if self.portal is not None:
             hop = self.portal.hop(self.local_id, screen, x, y)
-            if hop is not None:
+            if hop is not None and hop[0].device_id == self.local_id:
+                # Held in the app, at its edge: the cursor goes back there.
+                screen, x, y = hop
+                self.local_sink.move_to(*screen.to_os(x, y))
+            elif hop is not None:
                 self.switch_to(*hop, "app")
                 return
         if self.settings.edge_switching:
@@ -424,7 +428,9 @@ class Router:
         here = self.layout.screen_at(nx, ny, self.active_device, prefer=self.screen)
         if self.portal is not None and (dx or dy):
             hop = self.portal.hop(self.active_device, here, nx, ny)
-            if hop is not None:
+            if hop is not None and hop[0].device_id == self.active_device:
+                here, nx, ny = hop  # held in the app, at its edge
+            elif hop is not None:
                 self.switch_to(*hop, "app")
                 return
         if here is None and self.settings.edge_switching:

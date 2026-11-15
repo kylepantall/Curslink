@@ -718,3 +718,22 @@ def test_helper_mirror_is_solid_and_its_tag_fills_the_screen_with_it_and_back(qa
     tag.mousePressEvent(Ev((box.x(), box.y())))
     view = json.loads([ln for ln in out if ln.startswith("app_view ")][-1].partition(" ")[2])
     assert view["os"] == [100, 100, 400, 300] and window.maxed is None
+
+
+def test_a_mirror_against_its_screens_edge_keeps_the_pointer_in_the_app_there():
+    lay, transport, router, host, apps, lines, clock, ops, released = drag_safari_to_the_pc()
+    clock.t = 1.0
+    router.on_pointer(900, 0)  # carried to the top of the PC's screen
+    router.on_button("left", False)
+    sid, = apps.sessions
+    assert apps.sessions[sid].view[1] == 0
+    router.on_pointer(900, 300)  # into Safari
+    assert router.active_device == "mac"
+    clock.t = 2.0
+    # Up past its top (the tabs, the title bar): it stays in Safari, at its top.
+    router.on_motion(0, -400)
+    assert router.active_device == "mac" and apps.through == sid
+    assert transport.of("move", "mac")[-1]["y"] == 50
+    # Its left side has room beside it: out that way, as ever.
+    router.on_motion(-500, 0)
+    assert router.active_device == "pc"

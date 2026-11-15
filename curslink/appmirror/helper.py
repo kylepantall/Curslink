@@ -40,7 +40,7 @@ log = logging.getLogger(__name__)
 # PrintWindow is work for the app being captured: never more than this a second.
 WIN_APP_FPS = 60
 MAC_APP_FPS = 60
-STATS_S = 15.0  # how often a capture says how it's keeping up
+STATS_S = 30.0  # how often a capture says how it's keeping up
 POPUP_CHECK_S = 0.25  # how often to look for the app's menus, while it's in use
 TAG_H = 26
 
@@ -245,8 +245,11 @@ class AppCapture(Capture):
             # each took here (capture, scale, encode) and the link it took.
             span = max(1e-3, t0 - st["since"])
             if st["frames"]:
-                log.info("app mirror: %s: %.0f fps of %d asked, %.0f ms each here, %.0f KB/s", self.id,
-                         st["frames"] / span, self.fps(), 1000 * st["busy"] / st["frames"], st["bytes"] / 1024 / span)
+                # On stderr itself: the helper's log only passes on warnings,
+                # and its stderr goes into the app's log.
+                print("app mirror: %s: %.0f fps of %d asked, %.0f ms each here, %.0f KB/s" % (
+                    self.id, st["frames"] / span, self.fps(), 1000 * st["busy"] / st["frames"],
+                    st["bytes"] / 1024 / span), file=sys.stderr, flush=True)
             self.stats = {"since": t0, "frames": 0, "busy": 0.0, "bytes": 0}
 
     def _out(self, line: str) -> None:
