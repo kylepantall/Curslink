@@ -9,7 +9,7 @@ import os
 import pytest
 
 from conftest import FakeCapture, FakeOverlay, FakeSink
-from curslink.appmirror import GRIP, AppMirrorDevice, AppMirrorHost, CastWatch, WindowDragWatch, is_app
+from curslink.appmirror import GRIP, LAND_PX, AppMirrorDevice, AppMirrorHost, CastWatch, WindowDragWatch, is_app
 from curslink.layout import Device, Layout, Screen
 from curslink.mirror import MirrorHost, MirrorPeer
 from curslink.protocol import ProtocolError, decode, encode
@@ -31,9 +31,10 @@ class Conn:
 
 
 class Transport:
-    def __init__(self, devices=("mac",), app=("mac",), platforms=None):
+    def __init__(self, devices=("mac",), app=("mac",), platforms=None, native=None):
         self.connected = set(devices)
         self.app = set(app)
+        self.native = set(app if native is None else native)
         self.sent = []
         platforms = platforms or {}
         self.connections = {d: Conn(platforms.get(d, "Darwin 24.1")) for d in devices}
@@ -46,6 +47,8 @@ class Transport:
             return False
         if feature == "app_mirror":
             return device_id in self.app
+        if feature == "app_native":
+            return device_id in self.native
         return feature in ("mirror", "mirror_cursor", "mirror_tiles")
 
     def send(self, device_id, t, **data):
@@ -120,7 +123,7 @@ def make(lay=None, transport=None):
     local.on_captures = device.on_captures
     released = []
     apps = AppMirrorHost(lay, router, transport, device, changed=host.refresh,
-                         release_local=lambda: released.append(True), clock=clock)
+                         release_local=lambda: released.append(True), clock=clock, local_peer=local)
     host.apps = apps
     router.portal = apps
     router.on_any_button = apps.on_button
@@ -212,11 +215,11 @@ def test_the_pointer_goes_through_the_mirror_to_the_app_and_comes_back_out():
     # Moving in it moves on the Mac (same size here: one for one).
     router.on_motion(10, 0)
     assert transport.of("move", "mac")[-1] == {"x": 510, "y": 350}
-    # Out past its left side: back on the PC, on the mirror's own edge
-    # (where it's resized from)...
+    # Out past its left side: back on the PC, just outside the mirror, in its
+    # ring (where it's resized from, and its corners' handles show)...
     router.on_motion(-500, 0)
     assert router.active_device == "pc"
-    assert 500 <= router.x < 500 + GRIP and router.y == pytest.approx(688)
+    assert router.x == 500 - LAND_PX and router.y == pytest.approx(688)
     # ...and on, past it (this computer's own mouse, here).
     router.on_pointer(480, 688)
     assert router.active_device == "pc" and router.x == 480 and apps.through is None
@@ -510,8 +513,11 @@ def test_app_frames_are_checked():
     assert decode(encode("app_do", id="app:x", do="raise")).get("do") == "raise"
     assert decode(encode("app_drag", window=SAFARI)).get("window")["wid"] == 7
     assert decode(encode("app_view", id="app:x", os=[1, 2, 3, 4]))
+    # Resizing an app from its mirror: an agent used to drop the link on it.
+    assert decode(encode("app_do", id="app:x", do="resize", size=[800, 600])).get("size") == [800, 600]
+    assert decode(encode("app_icon", id="app:x", png="iVBO")).get("png") == "iVBO"
     for bad in (dict(t="app_do", id="app:x", do="explode"), dict(t="app_view", id="app:x", os=[1, 2]),
-                dict(t="app_drag"), dict(t="app_window", id="")):
+                dict(t="app_drag"), dict(t="app_window", id=""), dict(t="app_icon", id="app:x")):
         with pytest.raises(ProtocolError):
             decode(json.dumps(bad).encode())
 
@@ -549,6 +555,19 @@ def qapp():
     return QApplication.instance() or QApplication(["curslink-test"])
 
 
+def png(w, h, color="white"):
+    from PySide6.QtCore import QBuffer, QByteArray, QIODevice
+    from PySide6.QtGui import QColor, QImage
+
+    img = QImage(w, h, QImage.Format.Format_ARGB32)
+    img.fill(QColor(color))
+    data = QByteArray()
+    buf = QBuffer(data)
+    buf.open(QIODevice.OpenModeFlag.WriteOnly)
+    img.save(buf, "PNG")
+    return base64.b64encode(bytes(data.data())).decode()
+
+
 def jpeg(w, h, color="tomato"):
     from PySide6.QtCore import QBuffer, QByteArray, QIODevice
     from PySide6.QtGui import QColor, QImage
@@ -565,6 +584,7 @@ def jpeg(w, h, color="tomato"):
 def test_helper_shows_an_app_in_a_window_of_its_own_and_resizes_it(qapp):
     from PySide6.QtCore import QPointF
 
+    from curslink.appmirror import RING
     from curslink.appmirror.helper import AppWindow
     from curslink.mirror.helper import MirrorHelper
 
@@ -591,12 +611,21 @@ def test_helper_shows_an_app_in_a_window_of_its_own_and_resizes_it(qapp):
         def globalPosition(self):
             return self._g
 
-    # Its bottom-right corner, dragged out: bigger, the same shape.
-    window.mousePressEvent(Ev((398, 298), (498, 398)))
-    window.mouseMoveEvent(Ev((498, 298), (598, 398)))
-    window.mouseReleaseEvent(Ev((498, 298), (598, 398)))
+    # Round it, outside the picture, its ring: the bottom-right corner,
+    # dragged out, makes it bigger (any shape: the app follows).
+    ring = window.ring
+    assert ring is not None and ring.isVisible()
+    assert ring.geometry() == window.geometry().adjusted(-RING, -RING, RING, RING)
+    assert ring.sides(QPointF(RING + 404, RING + 304)) == "rb"
+    assert ring.sides(QPointF(RING + 200, RING - 6)) == "t"
+    assert ring.sides(QPointF(RING + 1, RING + 1)) == "lt"  # a rounded-off corner of the mirror
+    ring.mousePressEvent(Ev((RING + 404, RING + 304), (504, 404)))
+    ring.mouseMoveEvent(Ev((RING + 504, RING + 304), (604, 404)))
+    assert window.geometry().width() == 500 and ring.geometry() == window.geometry().adjusted(-RING, -RING, RING, RING)
+    ring.grab()  # paints, the corner's handle and all
+    ring.mouseReleaseEvent(Ev((RING + 504, RING + 304), (604, 404)))
     view = json.loads([ln for ln in out if ln.startswith("app_view ")][-1].partition(" ")[2])
-    assert view["id"] == show["id"] and view["os"][2:] == [500, 300]  # any shape: the app follows
+    assert view["id"] == show["id"] and view["os"][2:] == [500, 300]
     # The tag's x closes it.
     tag = window.tag
     box = tag.close_box().center()
@@ -622,7 +651,9 @@ def test_helper_brings_the_mirror_in_front_of_other_apps_and_over_them_while_car
     from curslink.mirror.helper import MirrorHelper
 
     fronts = []
-    monkeypatch.setattr(apphelper, "bring_to_front", lambda w, above_all: fronts.append(above_all))
+    monkeypatch.setattr(apphelper, "bring_to_front",
+                        lambda w, above_all, over_menus=False: fronts.append(above_all)
+                        if isinstance(w, apphelper.AppWindow) else None)
     helper = MirrorHelper([].append)
     show = {"id": "app:mac:7:1", "app": True, "screen": "main", "os": [100, 100, 400, 300], "ratio": 4 / 3,
             "label": "Safari · MacBook", "edges": [], "hover": False, "corner": 10, "raise": 0, "carried": True}
@@ -735,17 +766,20 @@ def test_helper_mirror_is_solid_and_its_tag_fills_the_screen_with_it_and_back(qa
         def position(self):
             return self._l
 
-    # Its tag's box: the mirror fills its screen, and the app is asked to.
+    # Its tag's box: the host is asked to make it fill its screen (it sizes
+    # the app for that screen's shape)...
     box = tag.max_box().center()
     tag.mousePressEvent(Ev((box.x(), box.y())))
-    full = window.screen().availableGeometry()
-    assert window.geometry() == full and window.maxed is not None
     view = json.loads([ln for ln in out if ln.startswith("app_view ")][-1].partition(" ")[2])
-    assert view["os"][2:] == [full.width(), full.height()]
-    # Again: back where it was.
-    tag.mousePressEvent(Ev((box.x(), box.y())))
-    view = json.loads([ln for ln in out if ln.startswith("app_view ")][-1].partition(" ")[2])
-    assert view["os"] == [100, 100, 400, 300] and window.maxed is None
+    assert view == {"id": show["id"], "full": True}
+    # ...and says so: all of the screen, no rounded corners, no ring.
+    whole = window.screen().geometry()
+    helper.handle("mirror " + json.dumps({"captures": [], "shows": [{
+        **show, "carried": False, "full": True, "corner": 0,
+        "os": [whole.x(), whole.y(), whole.width(), whole.height()]}]}))
+    assert window.geometry() == whole and window.maxed is not None and not window.ring.isVisible()
+    helper.handle("mirror " + json.dumps({"captures": [], "shows": [{**show, "carried": False}]}))
+    assert window.geometry().width() == 400 and window.maxed is None and window.ring.isVisible()
 
 
 def test_a_mirror_against_its_screens_edge_keeps_the_pointer_in_the_app_there():
@@ -765,3 +799,273 @@ def test_a_mirror_against_its_screens_edge_keeps_the_pointer_in_the_app_there():
     # Its left side has room beside it: out that way, as ever.
     router.on_motion(-500, 0)
     assert router.active_device == "pc"
+
+
+# ------------------------------------------------- feeling like the app's own window
+def test_an_older_agent_never_gets_a_resize_its_mirror_scales_instead():
+    world = make(transport=Transport(native=()))
+    lay, transport, router, host, apps, lines, clock, ops, released = world
+    router.switch_to(lay.screen("mac", "main"), 2400, 300, "edge")
+    router.on_button("left", True)
+    apps.on_message("mac", "app_drag", {"window": SAFARI})
+    router.switch_to(lay.screen("pc", "main"), 1900, 300, "edge")
+    clock.t = 1.0
+    router.on_pointer(900, 400)
+    router.on_button("left", False)
+    sid, = apps.sessions
+    apps.local.helper_line('app_view {"id": "%s", "os": [0, 0, 1000, 750]}' % sid)
+    assert not [d for d in transport.of("app_do", "mac") if d["do"] == "resize"]
+    assert apps.sessions[sid].k == pytest.approx(1000 / 800)
+
+
+def test_a_mirror_made_bigger_than_the_apps_own_screen_keeps_the_app_on_it():
+    lay, transport, router, host, apps, lines, clock, ops, released = put_down()
+    sid, = apps.sessions
+    # The Mac's screen is 1440 x 900 (and its menu bar): the app can't be
+    # 1800 x 1000 there, so it's as big as fits (the same shape), the
+    # picture scaled up.
+    apps.local.helper_line('app_view {"id": "%s", "os": [0, 0, 1800, 1000]}' % sid)
+    resize = transport.of("app_do", "mac")[-1]
+    assert resize["do"] == "resize" and resize["size"] == [1440, 800]
+    s = apps.sessions[sid]
+    assert s.k == pytest.approx(1800 / 1440)
+    # The Mac says it is: the mirror stays the size it was made.
+    apps.on_message("mac", "app_window", {"id": sid, "os": [1940, 25] + resize["size"]})
+    assert apps.sessions[sid].view[2:] == pytest.approx((1800, 1000), abs=2)
+
+
+def test_the_apps_full_screen_button_fills_the_screen_its_mirror_is_on():
+    lay, transport, router, host, apps, lines, clock, ops, released = put_down()
+    sid, = apps.sessions
+    before = apps.sessions[sid].view
+    apps.on_message("mac", "app_window", {"id": sid, "full": True})
+    s = apps.sessions[sid]
+    assert s.view == (0, 0, 1920, 1080) and s.full is not None
+    show, = last_state(lines)["shows"]
+    assert show["full"] is True and show["corner"] == 0 and show["os"] == [0, 0, 1920, 1080]
+    # The app takes the PC's screen's shape, as big as fits on the Mac.
+    resize = transport.of("app_do", "mac")[-1]
+    assert resize["do"] == "resize"
+    w, h = resize["size"]
+    assert w / h == pytest.approx(1920 / 1080, rel=0.01) and h <= 900 - 25
+    # The Mac says it's that size: the mirror still fills the screen.
+    apps.on_message("mac", "app_window", {"id": sid, "os": [1940, 25, w, h]})
+    assert apps.sessions[sid].view == (0, 0, 1920, 1080)
+    # Pressed again (or its tag's box): back as it was, the app its old size.
+    apps.local.helper_line('app_view {"id": "%s", "full": true}' % sid)
+    assert apps.sessions[sid].view == before and apps.sessions[sid].full is None
+    assert transport.of("app_do", "mac")[-1]["size"] == [800, 600]
+
+
+def test_out_of_a_full_screen_app_through_an_edge_that_leads_on():
+    lay, transport, router, host, apps, lines, clock, ops, released = put_down()
+    sid, = apps.sessions
+    apps.on_message("mac", "app_window", {"id": sid, "full": True})
+    s = apps.sessions[sid]
+    apps.on_message("mac", "app_window", {"id": sid, "os": [1940, 25, 1555, 875]})
+    router.on_pointer(900, 500)  # into the app, filling the PC's screen
+    assert router.active_device == "mac" and apps.through == sid
+    clock.t = 2.0
+    # Up past its top: the PC's top edge leads nowhere, so it stays in the app.
+    router.on_motion(0, -2000)
+    assert router.active_device == "mac" and apps.through == sid
+    # Left past its left side: nothing there either.
+    router.on_motion(-3000, 0)
+    assert router.active_device == "mac" and apps.through == sid
+    # Right past its right side: the PC's right edge leads to the Mac.
+    router.on_motion(4000, 0)
+    assert apps.through is None and router.active_device == "mac" and router.screen == lay.screen("mac", "main")
+    assert s.full is not None
+
+
+def test_coming_out_of_an_app_lands_in_its_ring_and_a_press_there_resizes_it():
+    lay, transport, router, host, apps, lines, clock, ops, released = put_down()
+    sid, = apps.sessions
+    router.on_pointer(900, 688)
+    clock.t = 2.0
+    router.on_motion(-500, 0)  # out by its left side
+    assert router.active_device == "pc" and router.x == 500 - LAND_PX
+    # Pressed there (on the ring), and dragged in: resizing it, not into the app.
+    router.on_button("left", True)
+    assert apps.resizing == sid
+    router.on_pointer(560, 688)
+    assert router.active_device == "pc" and apps.through is None
+    router.on_button("left", False)
+    assert apps.resizing is None
+    router.on_pointer(570, 688)
+    assert router.active_device == "mac"
+
+
+def test_in_the_app_past_its_screens_edge_the_pointer_stays_in_the_app():
+    lay, transport, router, host, apps, lines, clock, ops, released = put_down()
+    sid, = apps.sessions
+    s = apps.sessions[sid]
+    # Safari's window reaches past the bottom of the Mac's screen.
+    apps.on_message("mac", "app_window", {"id": sid, "os": [100, 500, 800, 600]})
+    router.on_pointer(900, 688)
+    assert router.active_device == "mac"
+    clock.t = 2.0
+    router.on_motion(0, 250)  # below the Mac's screen, still in Safari
+    assert router.active_device == "mac" and apps.through == sid
+    assert transport.of("move", "mac")[-1]["y"] > 900
+    assert s.rect[1] + s.rect[3] > 900
+
+
+def test_a_window_used_through_its_mirror_is_brought_all_onto_its_screen():
+    sent, ops = [], Ops()
+    ops.fit_on_screen = lambda r: [max(0, r[0]), max(25, r[1]), min(r[2], 1440), min(r[3], 875)]
+    dev = AppMirrorDevice(lambda t, **d: sent.append((t, d)), now, lambda d, f: None, ops)
+    win = {"wid": 7, "pid": 41}
+    capture = {"id": "app:x", "window": win, "os": [-200, 600, 800, 600], "hide": True, "use": False}
+    dev.on_captures([capture])
+    assert ops.hidden[-1] == (7, [-200, 600, 800, 600], False)
+    dev.on_captures([dict(capture, use=True)])
+    # Used: all of it on its screen, so the pointer reaches all of it.
+    assert ops.moved[-1][1] == [0, 600, 800, 600] and ops.hidden[-1] == (7, [0, 600, 800, 600], True)
+    # Resized bigger than its screen: as big as fits.
+    ops.window_rect = lambda w: [0, 600, 800, 600]
+    dev.handle({"id": "app:x", "do": "resize", "size": [2000, 1200], "window": win})
+    assert ops.moved[-1][1] == [0, 600, 1440, 875]
+
+
+def test_the_full_screen_button_is_kept_from_the_app_and_fills_the_mirrors_screen():
+    sent, ops = [], Ops()
+    win = {"wid": 7, "pid": 41}
+    ops.window_rect = lambda w: [100, 50, 800, 600]
+    ops.cursor = lambda: (160, 62)
+    hits = {"what": "full"}
+    ops.title_hit = lambda w, x, y: hits["what"]
+    dev = AppMirrorDevice(lambda t, **d: sent.append((t, d)), now, lambda d, f: None, ops)
+    clock = Clock()
+    dev.clock = clock
+    dev.on_captures([{"id": "app:x", "window": win, "os": [100, 50, 800, 600], "hide": True, "use": True}])
+    assert dev.intercept("left", True) and dev.intercept("left", False)
+    assert sent[-1] == ("app_window", {"id": "app:x", "full": True})
+    # A press anywhere else in it goes to the app.
+    hits["what"] = None
+    assert not dev.intercept("left", True) and not dev.intercept("left", False)
+    # A double click on its title bar: the first press goes to the app, the second doesn't.
+    hits["what"] = "title"
+    n = len(sent)
+    assert not dev.intercept("left", True) and not dev.intercept("left", False)
+    clock.t = 0.2
+    assert dev.intercept("left", True) and dev.intercept("left", False)
+    assert len(sent) == n + 1 and sent[-1][1]["full"] is True
+    # Slower than a double click: two clicks, both the app's.
+    clock.t = 5.0
+    assert not dev.intercept("left", True)
+    clock.t = 6.0
+    assert not dev.intercept("left", True)
+    # A right press, or nothing cast: never kept.
+    assert not dev.intercept("right", True)
+    dev.on_captures([])
+    assert not dev.intercept("left", True)
+
+
+def test_an_app_gone_full_screen_where_it_runs_is_put_back_and_its_mirror_fills_instead():
+    calls, reports, fulls = [], [], []
+    went = {"a": False}
+    watch = CastWatch(lambda i, r: reports.append((i, r)), now, lambda d, f: calls.append(f),
+                      rect=lambda w: [1, 2, 3, 4], full=lambda w: went[w["k"]], on_full=fulls.append)
+    watch.set({"a": {"k": "a", "os": [1, 2, 3, 4]}})
+    went["a"] = True
+    calls.pop(0)()
+    assert fulls == ["a"] and reports == []
+
+
+def test_a_mirror_nobody_is_near_shows_a_still():
+    lay, transport, router, host, apps, lines, clock, ops, released = put_down()
+    capture, = transport.of("mirror", "mac")[-1]["captures"]
+    assert capture["fps"] == 30  # just put down, the pointer on it
+    router.on_pointer(100, 100)  # far away
+    capture, = transport.of("mirror", "mac")[-1]["captures"]
+    assert capture["fps"] == 1
+    router.on_pointer(480, 600)  # near it: live again
+    capture, = transport.of("mirror", "mac")[-1]["captures"]
+    assert capture["fps"] == 30
+
+
+def test_the_apps_icon_goes_to_the_device_showing_its_mirror():
+    lay, transport, router, host, apps, lines, clock, ops, released = put_down()
+    sid, = apps.sessions
+    apps.on_message("mac", "app_window", {"id": sid, "icon": "iVBORw0KGgo="})
+    # The PC shows it: its own helper gets it.
+    icon = json.loads([ln for ln in lines if ln.startswith("app_icon ")][-1].partition(" ")[2])
+    assert icon == {"id": sid, "png": "iVBORw0KGgo="}
+    # A device's helper says what icon its app has: on to the host.
+    sent = []
+    dev = AppMirrorDevice(lambda t, **d: sent.append((t, d)), now, lambda d, f: None, Ops())
+    assert dev.helper_line('app_icon {"id": "app:x", "png": "iVBO"}')
+    assert sent == [("app_window", {"id": "app:x", "icon": "iVBO"})]
+
+
+def test_an_icon_and_the_pointers_look_reach_a_mirror_made_after_them(qapp):
+    from curslink.mirror.helper import MirrorHelper
+
+    helper = MirrorHelper([].append)
+    show = {"id": "app:mac:7:1", "app": True, "screen": "main", "os": [100, 100, 400, 300], "ratio": 4 / 3,
+            "label": "Safari · MacBook", "edges": [], "hover": False, "corner": 10, "raise": 0}
+    helper.handle("app_icon " + json.dumps({"id": show["id"], "png": png(32, 32)}))
+    helper.handle("mirror_shape " + json.dumps({"id": show["id"], "png": png(16, 24), "w": 16, "h": 24,
+                                                "hx": 2, "hy": 3, "cw": 400}))
+    helper.handle("mirror " + json.dumps({"captures": [], "shows": [show]}))
+    window = helper.windows[show["id"]]
+    assert window.icon_png and not window.windowIcon().isNull()
+    assert window.shape is not None
+
+
+def test_the_apps_cursor_is_a_little_window_of_its_own_where_the_host_says(qapp):
+    from curslink.mirror.helper import MirrorHelper
+
+    helper = MirrorHelper([].append)
+    show = {"id": "app:mac:7:1", "app": True, "screen": "main", "os": [100, 100, 400, 300], "ratio": 4 / 3,
+            "label": "Safari · MacBook", "edges": [], "hover": False, "corner": 10, "raise": 0}
+    helper.handle("mirror " + json.dumps({"captures": [], "shows": [show]}))
+    helper.handle("mirror_image " + json.dumps({"id": show["id"], "jpg": jpeg(40, 30), "w": 40, "h": 30}))
+    window = helper.windows[show["id"]]
+    helper.handle("mirror_shape " + json.dumps({"id": show["id"], "png": png(16, 24), "w": 16, "h": 24,
+                                                "hx": 2, "hy": 3, "cw": 400}))
+    helper.handle("mirror_pointer " + json.dumps({"id": show["id"], "x": 0.5, "y": 0.5}))
+    sprite = window.sprite
+    g = window.geometry()
+    assert sprite.isVisible()
+    assert (sprite.x() + 2, sprite.y() + 3) == (g.x() + 200, g.y() + 150)  # its hot spot on the spot
+    sprite.grab()
+    helper.handle("mirror_pointer " + json.dumps({"id": show["id"], "hide": True}))
+    assert not sprite.isVisible()
+
+
+def test_fit_on_screen_keeps_a_window_all_on_its_screen():
+    from curslink.appmirror.windows import fit_on_screen
+
+    screens = [{"x": 0, "y": 0, "width": 1440, "height": 900}, {"x": 1440, "y": 0, "width": 2560, "height": 1440}]
+    assert fit_on_screen([100, 100, 800, 600], screens) == [100, 100, 800, 600]
+    x, y, w, h = fit_on_screen([1000, 500, 800, 600], screens)  # mostly on the big one
+    assert x >= 1440 and y + h <= 1440 and (w, h) == (800, 600)
+    x, y, w, h = fit_on_screen([-300, 400, 3000, 2000], screens[:1])
+    assert x >= 0 and x + w <= 1440 and y + h <= 900 and w == 1440
+
+
+def test_a_capture_sends_its_apps_icon_once_small_enough_for_a_frame(qapp, monkeypatch):
+    from curslink.appmirror import MAX_ICON
+    from curslink.appmirror import helper as apphelper
+    from curslink.mirror.helper import MirrorHelper
+
+    out = []
+    monkeypatch.setattr(apphelper, "process_path", lambda pid: "/Applications/Safari.app")
+    sizes = []
+
+    def icon(path, px):
+        sizes.append(px)
+        return "x" * (MAX_ICON + 1 if px > 64 else 100)
+
+    monkeypatch.setattr(apphelper, "icon_png", icon)
+    helper = MirrorHelper(out.append)
+    capture = {"id": "app:mac:7:1", "screen": "main", "os": [10, 10, 300, 200], "fps": 30,
+               "window": {"wid": 7, "pid": 41}, "key": 1}
+    helper.handle("mirror " + json.dumps({"captures": [capture], "shows": []}))
+    cap = helper.captures[capture["id"]]
+    cap.send_icon()
+    icons = [json.loads(ln.partition(" ")[2]) for ln in out if ln.startswith("app_icon ")]
+    assert icons == [{"id": capture["id"], "png": "x" * 100}] and sizes == [128, 96, 64]
+    helper.handle('mirror {"captures": [], "shows": []}')

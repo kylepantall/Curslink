@@ -72,16 +72,20 @@ Host -> agent
                                        where the pointer is in a mirror it shows
                                        (0..1 across and down), or none
     mirror_ack   {id}                  a frame it captured was shown: send another
-    app_do       {id, do, os?}         App mirror (see curslink.appmirror), on the
+    app_do       {id, do, os?, size?}  App mirror (see curslink.appmirror), on the
                                        device an app window is cast from: do "raise"
                                        (bring it to the front: the pointer went into
                                        its mirror), "restore" (put it back at os, where
                                        it was before it was dragged off), "stop" (no
-                                       longer cast). Its picture goes in the mirror
+                                       longer cast), "resize" (to size, its mirror
+                                       was resized; only with "app_native"). Its picture goes in the mirror
                                        state (a capture with "window") and its mirror
                                        on the other device too (a show with "app");
                                        only to an agent whose hello.features has
                                        "app_mirror"
+    app_icon     {id, png}             the icon of the app a mirror here shows (base64
+                                       PNG), for its taskbar button or the Dock; only
+                                       to an agent whose hello.features has "app_native"
     edge         {role, rect, side, a, b, at, near, name?, kind?} | {hide} | {flash}
                                        the edge indicator: an edge of this device
                                        leads to another (role "from") or the
@@ -148,11 +152,16 @@ Agent -> host
     app_drag     {window} | {none}     App mirror: a window here is being dragged by
                                        its title bar (left held): {wid, pid, app,
                                        title, os, start, grab}; none when it's let go
-    app_window   {id, os} | {id, gone} a cast window moved or changed size (OS
-                                       pixels), or closed
-    app_view     {id, os} | {id, closed}
+    app_window   {id, os} | {id, gone} | {id, full} | {id, icon}
+                                       a cast window moved or changed size (OS
+                                       pixels), or closed; full: the app's own full
+                                       screen button (or a double click on its title
+                                       bar) asked to fill the screen, or back; icon:
+                                       the app's icon (base64 PNG)
+    app_view     {id, os} | {id, closed} | {id, full}
                                        a mirrored app window here was resized or
-                                       moved (OS pixels), or closed with its x
+                                       moved (OS pixels), or closed with its x;
+                                       full: its tag's box (fill the screen or back)
     screens      {screens, screen_mm?}  its monitors changed (one plugged in, taken
                                        away or moved): all of them, as in hello;
                                        only to a host whose welcome.features has
@@ -240,6 +249,7 @@ MESSAGE_TYPES = frozenset(
         "app_drag",
         "app_window",
         "app_view",
+        "app_icon",
         "edge",
         "clip",
         "clip_data",
@@ -274,6 +284,12 @@ HOST_FEATURES = ("facing", "pose", "popups", "mirror", "netstats", "screens", "l
 # App mirror (see curslink.appmirror): a host that takes app_drag, app_window
 # and app_view, and an agent that takes app_do and casts and shows app windows.
 APP_MIRROR_FEATURE = "app_mirror"
+# What app_do can ask. "resize" only to an agent with APP_NATIVE_FEATURE: an
+# older one rejects it (and drops the link, as it did from 0.4.95).
+APP_DO = frozenset({"raise", "restore", "stop", "resize"})
+# Added to hello.features by an agent whose mirrored apps feel native (0.4.124):
+# it takes app_do "resize" and app_icon frames, and catches the full screen button.
+APP_NATIVE_FEATURE = "app_native"
 # What this agent understands beyond the base protocol, sent in hello.features.
 # An agent without "look" would reject a look frame as unknown and drop the
 # connection, so the host only sends one to agents that list it.
@@ -444,11 +460,13 @@ def _validate(msg: Message) -> None:
             raise ProtocolError(f"{t}.id must be a non-empty string")
         if t == "mirror_frame" and not isinstance(msg.data.get("jpg"), str):
             raise ProtocolError("mirror_frame.jpg must be a string")
-    elif t in ("app_do", "app_window", "app_view"):
+    elif t in ("app_do", "app_window", "app_view", "app_icon"):
         if not isinstance(msg.data.get("id"), str) or not msg.data["id"]:
             raise ProtocolError(f"{t}.id must be a non-empty string")
-        if t == "app_do" and msg.data.get("do") not in ("raise", "restore", "stop"):
-            raise ProtocolError("app_do.do must be raise, restore or stop")
+        if t == "app_do" and msg.data.get("do") not in APP_DO:
+            raise ProtocolError("app_do.do must be one of " + ", ".join(sorted(APP_DO)))
+        if t == "app_icon" and not isinstance(msg.data.get("png"), str):
+            raise ProtocolError("app_icon.png must be a string")
         rect = msg.data.get("os")
         if rect is not None and not (isinstance(rect, list) and len(rect) == 4 and all(_is_number(v) for v in rect)):
             raise ProtocolError(f"{t}.os must be [x, y, width, height]")

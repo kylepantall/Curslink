@@ -817,14 +817,14 @@ def start_app_mirror(cfg: HostConfig, router: Router, server: HostServer, overla
         device = AppMirrorDevice(lambda t, **data: apps.on_message(router.local_id, t, data), submit, loop.call_later,
                                  skip=lambda: {p for p in (overlay.pid,) if p})
         local.on_captures = device.on_captures
-        chain_helper_lines(overlay, loop, device, ("app_view ",))
+        chain_helper_lines(overlay, loop, device, ("app_view ", "app_icon "))
 
     def release_local() -> None:
         if capture is not None and hasattr(capture, "inject_drag_end"):
             loop.run_in_executor(None, capture.inject_drag_end, "release")
 
     apps = AppMirrorHost(cfg.layout, router, server, device, changed=host.refresh, release_local=release_local,
-                         can_show_local=local is not None)
+                         can_show_local=local is not None, local_peer=local)
     host.apps = apps
     router.portal = apps
     router.on_any_button = apps.on_button
@@ -1628,7 +1628,7 @@ async def run_agent(cfg: AgentConfig) -> None:
                                    skip=lambda: {p for p in (overlay.pid,) if p})
             session.app_mirror = apps
             mirror.on_captures = apps.on_captures
-            chain_helper_lines(overlay, loop, apps, ("app_view ",))
+            chain_helper_lines(overlay, loop, apps, ("app_view ", "app_icon "))
     clipboard = None
     if clipboard_on and overlay is not None:
         clipboard = start_clipboard(overlay, asyncio.get_running_loop(), cfg.clipboard_max_mb,
