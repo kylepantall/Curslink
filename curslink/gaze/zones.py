@@ -35,13 +35,19 @@ class Calibration:
     """Head angles recorded while the user looked at each screen."""
 
     samples: dict[Target, list[tuple[float, float]]] = field(default_factory=dict)
+    # The same looks as other devices' cameras saw them, each from its own
+    # angle: device id -> what ``samples`` is for this computer's camera.
+    views: dict[str, dict[Target, list[tuple[float, float]]]] = field(default_factory=dict)
 
-    def add(self, target: Target, yaw: float, pitch: float) -> None:
-        self.samples.setdefault(target, []).append((yaw, pitch))
+    def add(self, target: Target, yaw: float, pitch: float, camera: str | None = None) -> None:
+        """One look at ``target``, as this computer's camera saw it, or as
+        ``camera`` (another device's own) did."""
+        samples = self.samples if camera is None else self.views.setdefault(camera, {})
+        samples.setdefault(target, []).append((yaw, pitch))
 
-    def centroids(self) -> dict[Target, tuple[float, float]]:
+    def centroids(self, camera: str | None = None) -> dict[Target, tuple[float, float]]:
         out = {}
-        for target, pts in self.samples.items():
+        for target, pts in (self.samples if camera is None else self.views.get(camera, {})).items():
             if pts:
                 out[target] = (
                     statistics.median(p[0] for p in pts),
@@ -54,6 +60,9 @@ class Calibration:
             "version": 1,
             "targets": {t.key: [list(p) for p in pts] for t, pts in self.samples.items()},
         }
+        if self.views:
+            data["cameras"] = {camera: {t.key: [list(p) for p in pts] for t, pts in seen.items()}
+                               for camera, seen in self.views.items()}
         Path(path).write_text(json.dumps(data, indent=2))
 
     @classmethod
@@ -66,6 +75,12 @@ class Calibration:
             target = Target.parse(key)
             for yaw, pitch in pts:
                 cal.add(target, float(yaw), float(pitch))
+        cameras = data.get("cameras")
+        for camera, seen in (cameras.items() if isinstance(cameras, dict) else ()):
+            for key, pts in seen.items():
+                target = Target.parse(key)
+                for yaw, pitch in pts:
+                    cal.add(target, float(yaw), float(pitch), camera=str(camera))
         return cal
 
 
@@ -137,3 +152,73 @@ class GazeClassifier:
             self._candidate = None
             return best
         return None
+
+
+class JointClassifier(GazeClassifier):
+    """Several cameras deciding together which screen you look at.
+
+    Each camera was calibrated from where it stands (``Calibration.views``):
+    the same look is a different head angle to the laptop in front of you
+    and to the one off to the side, so each has its own centre for every
+    screen and is measured against its own. How far you are from a screen
+    is then how far every camera that sees you now says you are, taken
+    together (root mean square): a screen wins only when the cameras agree
+    on it, and one camera losing your face (a bright window behind you, the
+    head turned too far) leaves the others to carry on.
+
+    ``local`` is this computer's own camera, fed through :meth:`update` as
+    before; the others come in through :meth:`sample`.
+    """
+
+    def __init__(self, calibration: Calibration, settings: GazeSettings | None = None, local: str = "",
+                 fresh_s: float = 0.6):
+        self.settings = settings or GazeSettings()
+        self.local = local
+        self.fresh_s = fresh_s
+        views = {local: calibration.centroids(), **{c: calibration.centroids(c) for c in calibration.views}}
+        self._views = {camera: cents for camera, cents in views.items() if cents}
+        if not self._views:
+            raise ValueError("calibration has no targets; run `curslink calibrate` first")
+        self._centroids = {t: c for cents in self._views.values() for t, c in cents.items()}  # (for its targets)
+        self._latest: dict[str, tuple[float, float, float]] = {}
+        self._now = 0.0
+        self.current = None
+        self._candidate = None
+        self._candidate_since = 0.0
+
+    def has(self, camera: str) -> bool:
+        """Was ``camera`` calibrated, so that its view counts?"""
+        return camera in self._views
+
+    def live(self, camera: str, now: float) -> bool:
+        seen = self._latest.get(camera)
+        return camera in self._views and seen is not None and now - seen[0] <= self.fresh_s
+
+    def cameras(self, now: float) -> list[str]:
+        """The calibrated cameras that see you now."""
+        return [c for c in self._views if self.live(c, now)]
+
+    def see(self, camera: str, t: float, yaw: float, pitch: float) -> None:
+        if camera in self._views:
+            self._latest[camera] = (t, yaw, pitch)
+        self._now = max(self._now, t)
+
+    def distance(self, target: Target, yaw: float | None = None, pitch: float | None = None) -> float:
+        """How far from ``target`` the cameras that see you now put you
+        (the angles given are not used: each camera has its own)."""
+        squares = []
+        for camera, cents in self._views.items():
+            if target not in cents or not self.live(camera, self._now):
+                continue
+            _t, y, p = self._latest[camera]
+            cy, cp = cents[target]
+            squares.append((y - cy) ** 2 + ((p - cp) * self.settings.pitch_weight) ** 2)
+        return math.sqrt(sum(squares) / len(squares)) if squares else math.inf
+
+    def update(self, t: float, yaw: float, pitch: float) -> Target | None:
+        return self.sample(self.local, t, yaw, pitch)
+
+    def sample(self, camera: str, t: float, yaw: float, pitch: float) -> Target | None:
+        """One sample from ``camera``; returns the new target when the gaze switches."""
+        self.see(camera, t, yaw, pitch)
+        return super().update(t, yaw, pitch)

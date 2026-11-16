@@ -509,3 +509,117 @@ def test_a_camera_that_never_saw_you_doesnt_send_input_home(layout):
     server.on_facing("laptop", True)
     server.on_facing("laptop", False)             # a real turn away still goes home
     assert router.is_local
+
+
+# ------------------------------------------- every camera from its own angle
+# Kyle's desk (diagnostics, 2026-11-16): the PC's camera has a bright window
+# behind him and loses his face once he turns to the Mac at the side; the
+# Mac's camera sees him the whole time, from its own angle.
+PC = Target("desktop", "main")
+MAC = Target("mac", "main")
+WIDE = Target("mac", "screen2")
+
+
+def joint_calibration():
+    from curslink.gaze.zones import Calibration
+
+    cal = Calibration()
+    for _ in range(5):
+        cal.add(PC, -4, -1)
+        cal.add(WIDE, -28, -9)          # the PC's camera never saw the look at the Mac's own screen
+        cal.add(PC, 38, -3, camera="mac")
+        cal.add(WIDE, 22, 6, camera="mac")
+        cal.add(MAC, 2, -5, camera="mac")
+    return cal
+
+
+def joint_arbiter():
+    from curslink.gaze.zones import JointClassifier
+
+    router = FakeRouter()
+    router.current = PC
+    clf = JointClassifier(joint_calibration(), GazeSettings(dwell_s=0.2), local="desktop")
+    clf.force(PC)
+    arbiter = GazeArbiter(clf, "desktop", router.switch, lambda: router.current, lambda d: ["main"])
+    arbiter.set_camera("mac", True)
+    return router, clf, arbiter
+
+
+def test_calibration_keeps_each_cameras_view(tmp_path):
+    from curslink.gaze.zones import Calibration
+
+    path = tmp_path / "calibration.json"
+    joint_calibration().save(path)
+    cal = Calibration.load(path)
+    assert cal.centroids()[PC] == (-4, -1) and MAC not in cal.centroids()
+    assert cal.centroids("mac") == {PC: (38, -3), WIDE: (22, 6), MAC: (2, -5)}
+
+
+def test_a_devices_camera_alone_sees_the_look_the_hosts_camera_lost():
+    router, clf, arbiter = joint_arbiter()
+    for i in range(10):  # looking at the PC: both cameras see it, each at its own angle
+        arbiter.on_sample(i / 20, -4, -1)
+        arbiter.on_pose(i / 20, "mac", 38, -3)
+    assert router.switches == []
+    for i in range(20):  # turned to the Mac: the PC's camera has lost the face
+        arbiter.on_pose(2 + i / 20, "mac", 2, -5)
+    assert router.switches == [MAC]
+
+
+def test_cameras_that_disagree_dont_switch():
+    router, clf, arbiter = joint_arbiter()
+    for i in range(20):  # the Mac's camera says the wide screen, the PC's still says the PC
+        arbiter.on_sample(i / 20, -4, -1)
+        arbiter.on_pose(i / 20, "mac", 22, 6)
+    assert router.switches == []
+    for i in range(20):  # both say the wide screen
+        arbiter.on_sample(2 + i / 20, -28, -9)
+        arbiter.on_pose(2 + i / 20, "mac", 22, 6)
+    assert router.switches == [WIDE]
+
+
+def test_a_calibrated_camera_isnt_also_asked_whether_you_face_it():
+    router, clf, arbiter = joint_arbiter()
+    arbiter.on_sample(0.0, -4, -1)
+    arbiter.on_pose(0.0, "mac", 38, -3)
+    # at its angle the Mac's camera never sees you "facing" it while you look at its wide screen;
+    # and a "facing" from it mustn't move the pointer on its own either
+    arbiter.on_facing(0.1, "mac", True)
+    assert router.switches == []
+    assert arbiter.confirms("mac", 0.1)
+    # an uncalibrated camera's angles are left alone
+    arbiter.set_camera("right", True)
+    arbiter.on_pose(0.2, "right", 0, 0)
+    assert router.switches == []
+
+
+def test_pose_frames_are_checked():
+    assert decode(encode("pose", yaw=12.5, pitch=-3).rstrip(b"\n")).data == {"yaw": 12.5, "pitch": -3}
+    for bad in ({"yaw": "x", "pitch": 0}, {"yaw": 1}, {"yaw": True, "pitch": 0}, {"yaw": 1e9, "pitch": 0}):
+        with pytest.raises(ProtocolError):
+            decode(encode("pose", **bad).rstrip(b"\n"))
+
+
+def test_an_agent_sends_its_head_angles_only_to_a_host_that_reads_them():
+    class Transport:
+        def is_closing(self):
+            return False
+
+    class Writer:
+        transport = Transport()
+
+        def __init__(self):
+            self.frames = []
+
+        def write(self, data):
+            self.frames.append(decode(data.rstrip(b"\n")))
+
+    client = AgentClient.__new__(AgentClient)
+    client._writer, client._pose_sent, client.host_features = Writer(), 0.0, frozenset()
+    client.report_pose(10.0, 1.234, -5.678)
+    assert client._writer.frames == []  # an older host
+    client.host_features = frozenset({"pose"})
+    for i in range(30):  # a second of a 30 fps camera
+        client.report_pose(10.0 + i / 30, 1.234, -5.678)
+    assert 8 <= len(client._writer.frames) <= 13
+    assert client._writer.frames[0].t == "pose" and client._writer.frames[0].data == {"yaw": 1.23, "pitch": -5.68}

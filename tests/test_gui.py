@@ -2481,3 +2481,41 @@ def test_an_agent_has_no_guide(desktop, qapp):
     assert not w.guide_bar.isVisibleTo(w)
     w.show_page("status")
     assert not w.pages["status"].setup_card.isVisibleTo(w)
+
+
+def test_calibrating_records_a_look_only_another_devices_camera_saw(desktop, qapp, monkeypatch):
+    """Kyle's desk, 2026-11-16: with a bright window behind him the PC's camera lost his face
+    whenever he turned to the Mac, three tries running, while the Mac's own camera watched him
+    look straight at it. The step stopped there. Now the Mac's view of each look is recorded."""
+    import time as clock
+
+    from curslink.gaze.zones import Calibration
+
+    desktop.window.pages["setup"].create()
+    cfg = desktop.config()
+    cfg.add_device("mac", "Work Mac")
+    cfg.save()
+    desktop.config_saved(restart=False)
+    page = desktop.window.pages["calibrate"]
+    page.load_targets()
+    monkeypatch.setattr(desktop.service, "send", lambda line: None)
+
+    class Cal:
+        calibration = Calibration()
+        latest = None
+
+        def stop(self):
+            pass
+
+    page.calibrator = Cal()
+    page.state = "recording"
+    page.step = next(i for i, (t, _n) in enumerate(page.targets) if t.device_id == "mac")
+    target, name = page.targets[page.step]
+    page.record_from = clock.monotonic() - 1.0
+    for _ in range(12):  # the host passes on what the Mac's camera sees
+        desktop.service.event.emit({"event": "pose", "device_id": "mac", "yaw": 2.0, "pitch": -5.0})
+    assert page.helping() == ["Work Mac"]
+    page.recorded(name, None, target)  # this computer's camera saw nothing
+    assert page.results[name] == (2.0, -5.0) and getattr(page, "retry", None) is None
+    assert Cal.calibration.centroids("mac") == {target: (2.0, -5.0)} and not Cal.calibration.centroids()
+    page.cancel()
