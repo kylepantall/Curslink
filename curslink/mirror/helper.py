@@ -1380,6 +1380,7 @@ class MirrorHelper:
         self.captures: dict[str, Capture] = {}
         self.windows: dict[str, MirrorWindow] = {}
         self.shapes: dict[str, dict] = {}  # the pointer's look behind each mirror
+        self.icons: dict[str, str] = {}  # each app mirror's app's icon (base64 PNG)
         self.closed: set[str] = set()  # app mirrors closed here, until the host drops them too
 
     def _window(self, sid) -> MirrorWindow | None:
@@ -1394,7 +1395,7 @@ class MirrorHelper:
 
     def handle(self, line: str) -> bool:
         word, _, rest = line.strip().partition(" ")
-        if word not in ("mirror", "mirror_image", "mirror_pointer", "mirror_shape"):
+        if word not in ("mirror", "mirror_image", "mirror_pointer", "mirror_shape", "app_icon"):
             return False
         try:
             data = json.loads(rest)
@@ -1408,6 +1409,13 @@ class MirrorHelper:
             window = self._window(data.get("id"))
             if window is not None:
                 window.image(data)
+        elif word == "app_icon":
+            sid = data.get("id")
+            if isinstance(sid, str) and isinstance(data.get("png"), str):
+                self.icons[sid] = data["png"]
+                window = self._window(sid)
+                if window is not None and hasattr(window, "set_icon"):
+                    window.set_icon(data["png"])
         elif word == "mirror_shape":
             sid = data.get("id")
             if isinstance(sid, str):
@@ -1449,6 +1457,7 @@ class MirrorHelper:
             if sid not in shows:
                 self.windows.pop(sid).close_soon()
         self.shapes = {sid: d for sid, d in self.shapes.items() if sid in shows}
+        self.icons = {sid: d for sid, d in self.icons.items() if sid in shows}
         for sid, spec in shows.items():
             if sid in self.closed:
                 continue  # closed here; the host is about to drop it
@@ -1466,8 +1475,12 @@ class MirrorHelper:
                 window = AppWindow(spec, self.out)
                 if not window.ok:
                     log.warning("app mirror: no screen here at %s", spec.get("os"))
-                    window.deleteLater()
+                    window.close_soon()
                     continue
+                if sid in self.shapes:
+                    window.set_shape(self.shapes[sid])
+                if sid in self.icons:
+                    window.set_icon(self.icons[sid])
                 self.windows[sid] = window
                 continue
             if window is None:

@@ -439,6 +439,11 @@ class Router:
             elif hop is not None:
                 self.switch_to(*hop, "app")
                 return
+            if here is None and hasattr(self.portal, "inside"):
+                # In a mirrored app's window, past its screen's edge: still in
+                # the app (the mirror can be bigger than its screen), never
+                # out to the device beyond or stopped at the edge.
+                here = self.portal.inside(self.active_device, nx, ny) or None
         if here is None and self.settings.edge_switching:
             crossing = self.layout.find_crossing(
                 self.active_device, self.x, self.y, dx, dy, self.settings.gap_tolerance_px

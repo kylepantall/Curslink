@@ -66,7 +66,7 @@ def _win_rect(hwnd: int) -> list[int] | None:  # pragma: no cover - Windows only
     return [r.left, r.top, r.right - r.left, r.bottom - r.top]
 
 
-def _win_process_name(pid: int) -> str:  # pragma: no cover - Windows only
+def _win_process_path(pid: int) -> str:  # pragma: no cover - Windows only
     import ctypes
     import ctypes.wintypes as wt
 
@@ -78,11 +78,41 @@ def _win_process_name(pid: int) -> str:  # pragma: no cover - Windows only
         buf = ctypes.create_unicode_buffer(1024)
         n = wt.DWORD(1024)
         if k.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(n)):
-            name = os.path.basename(buf.value)
-            return name[:-4] if name.lower().endswith(".exe") else name
+            return buf.value
     finally:
         k.CloseHandle(h)
     return ""
+
+
+def _win_process_name(pid: int) -> str:  # pragma: no cover - Windows only
+    name = os.path.basename(_win_process_path(pid))
+    return name[:-4] if name.lower().endswith(".exe") else name
+
+
+def _win_title_hit(win: dict, x: float, y: float) -> str | None:  # pragma: no cover - Windows only
+    """What the window has at (x, y): its maximise button, its title bar."""
+    import ctypes
+    import ctypes.wintypes as wt
+
+    u = _u32()
+    u.SendMessageTimeoutW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM, wt.UINT, wt.UINT,
+                                      ctypes.POINTER(ctypes.c_size_t)]
+    u.SendMessageTimeoutW.restype = ctypes.c_size_t
+    out = ctypes.c_size_t(0)
+    lparam = ((int(y) & 0xFFFF) << 16) | (int(x) & 0xFFFF)
+    # WM_NCHITTEST, SMTO_ABORTIFHUNG, 60 ms
+    if not u.SendMessageTimeoutW(wt.HWND(int(win["wid"])), 0x0084, 0, lparam, 0x0002, 60, ctypes.byref(out)):
+        return None
+    return {9: "full", 2: "title"}.get(int(out.value))  # HTMAXBUTTON, HTCAPTION
+
+
+def _win_undo_full(win: dict) -> bool:  # pragma: no cover - Windows only
+    u = _u32()
+    hwnd = int(win["wid"])
+    if not u.IsZoomed(hwnd):
+        return False
+    u.ShowWindow(hwnd, 9)  # SW_RESTORE
+    return True
 
 
 def _win_at(x: int, y: int, skip: set[int]) -> dict | None:  # pragma: no cover - Windows only
@@ -342,6 +372,38 @@ def _mac_popups(win: dict) -> list[tuple[int, list[float]]]:  # pragma: no cover
     return found
 
 
+def _mac_title_hit(win: dict, x: float, y: float) -> str | None:  # pragma: no cover - macOS only
+    """What the window has at (x, y): its green (full screen or zoom)
+    button, or its title bar (the window itself, or its toolbar, near its top)."""
+    AX = _ax()
+    err, el = AX.AXUIElementCopyElementAtPosition(AX.AXUIElementCreateSystemWide(), float(x), float(y), None)
+    if err != 0 or el is None:
+        return None
+    _, role = AX.AXUIElementCopyAttributeValue(el, "AXRole", None)
+    _, sub = AX.AXUIElementCopyAttributeValue(el, "AXSubrole", None)
+    if str(sub or "") in ("AXFullScreenButton", "AXZoomButton"):
+        return "full"
+    r = win.get("os") or [0, 0, 0, 0]
+    info = _mac_info(int(win["wid"]))
+    if info is not None:
+        r = _mac_bounds(info)
+    if str(role or "") in ("AXWindow", "AXToolbar") and y - r[1] <= 52:
+        return "title"
+    return None
+
+
+def _mac_undo_full(win: dict) -> bool:  # pragma: no cover - macOS only
+    AX = _ax()
+    w = _mac_ax_window(win)
+    if w is None:
+        return False
+    err, full = AX.AXUIElementCopyAttributeValue(w, "AXFullScreen", None)
+    if err != 0 or not full:
+        return False
+    AX.AXUIElementSetAttributeValue(w, "AXFullScreen", False)
+    return True
+
+
 def _mac_park_at() -> tuple[float, float] | None:  # pragma: no cover - macOS only
     """The bottom-right corner of the desk (macOS won't put a window
     wholly off every screen: there, all but a pixel of it is)."""
@@ -495,6 +557,60 @@ def popups(win: dict) -> list[tuple[int, list[float]]]:
     except Exception:
         log.debug("app mirror: couldn't list an app's menus", exc_info=True)
     return []
+
+
+def title_hit(win: dict, x: float, y: float) -> str | None:
+    """What a press at (x, y) (OS pixels) would press on the window:
+    "full" (its full screen or maximise button), "title" (its title bar),
+    or None (anything else, or it can't be told)."""
+    try:
+        if sys.platform == "win32":
+            return _win_title_hit(win, x, y)
+        if sys.platform == "darwin":
+            return _mac_title_hit(win, x, y)
+    except Exception:
+        log.debug("app mirror: couldn't tell what's under the pointer", exc_info=True)
+    return None
+
+
+def undo_full(win: dict) -> bool:
+    """The window is full screen (macOS) or maximised (Windows): put it
+    back, and say so (True)."""
+    try:
+        if sys.platform == "win32":
+            return _win_undo_full(win)
+        if sys.platform == "darwin":
+            return _mac_undo_full(win)
+    except Exception:
+        log.debug("app mirror: couldn't check for full screen", exc_info=True)
+    return False
+
+
+def fit_on_screen(rect, screens: list[dict] | None = None) -> list[float]:
+    """``rect`` (OS pixels) moved, and made smaller if it has to be, to be
+    all on the screen it's most on (below a Mac's menu bar): the pointer
+    can reach every part of a window that is."""
+    if screens is None:
+        from curslink.displays import os_screens
+
+        screens = os_screens()
+    x, y, w, h = (float(v) for v in rect)
+    if not screens:
+        return [x, y, w, h]
+
+    def overlap(d):
+        ox = min(x + w, d["x"] + d["width"]) - max(x, d["x"])
+        oy = min(y + h, d["y"] + d["height"]) - max(y, d["y"])
+        return max(0.0, ox) * max(0.0, oy)
+
+    cx, cy = x + w / 2, y + h / 2
+    d = max(screens, key=lambda d: (overlap(d), -abs(d["x"] + d["width"] / 2 - cx) - abs(d["y"] + d["height"] / 2 - cy)))
+    top = 25.0 if sys.platform == "darwin" else 0.0
+    sx, sy, sw, sh = float(d["x"]), float(d["y"]) + top, float(d["width"]), float(d["height"]) - top
+    w, h = min(w, sw), min(h, sh)
+    x = min(max(x, sx), sx + sw - w)
+    y = min(max(y, sy), sy + sh - h)
+    return [x, y, w, h]
 
 
 def raise_window(win: dict) -> None:

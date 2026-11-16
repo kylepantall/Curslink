@@ -70,6 +70,9 @@ TILES_IN_FLIGHT = 16
 APP_TILES_FACTOR = 4
 # The pointer in a mirror is sent at most this often.
 POINTER_EVERY_S = 1 / 90
+# In an app's mirror the pointer is the only one there is (the app's own
+# cursor, drawn where the host's mouse puts it): as often as the mouse moves.
+APP_POINTER_EVERY_S = 1 / 250
 # An agent's idle cursor is moved off a mirror this long after it shows
 # (input has just left, and a file drag leaving may still need it there).
 PARK_AFTER_S = 0.8
@@ -516,6 +519,11 @@ class MirrorPeer:
         elif t == "mirror_pointer":
             if data.get("id") in self.showing:
                 self.helper(_command("mirror_pointer", data))
+        elif t == "app_icon":
+            # A mirrored app's icon, for its taskbar button or the Dock: the
+            # helper keeps it for the mirror, which may not be made yet.
+            if isinstance(data.get("id"), str) and isinstance(data.get("png"), str):
+                self.helper(_command("app_icon", {"id": data["id"], "png": data["png"]}))
         elif t == "mirror_ack":
             self.source.ack(data.get("id"))
 
@@ -631,7 +639,7 @@ class MirrorHost:
         self.sent: dict[str, dict] = {}  # device -> the state it was last sent
         self._screen: tuple | None = None  # (screen mirrored, screen in use) last planned for
         self._pointer: dict[str, tuple[float, float] | None] = {}
-        self._pointer_at = 0.0
+        self._pointer_at: dict[str, float] = {}
         self._logged: set[str] = set()
         # Fine-tuning an overlap: mirror the screen behind it, wherever the pointer is.
         self.held: Screen | None = None
@@ -745,6 +753,7 @@ class MirrorHost:
         streams = streams_for(self.layout, screen, self.can, joined=self.held is None, gap=self.gap)
         self.streams = {s.id: s for s in streams}
         self._pointer = {sid: p for sid, p in self._pointer.items() if sid in self.streams or sid.startswith("app:")}
+        self._pointer_at = {sid: t for sid, t in self._pointer_at.items() if sid in self._pointer}
         for s in streams:
             # A mirror that's new on the device in front (or the device came
             # back) starts from nothing: it needs every tile, not just changes.
@@ -899,10 +908,11 @@ class MirrorHost:
             last = self._pointer.get(sid)
             if p == last:
                 continue
-            if p is not None and last is not None and now - self._pointer_at < POINTER_EVERY_S:
+            every_s = APP_POINTER_EVERY_S if app is not None else POINTER_EVERY_S
+            if p is not None and last is not None and now - self._pointer_at.get(sid, -1.0) < every_s:
                 continue  # the next move sends it
             self._pointer[sid] = p
-            self._pointer_at = now
+            self._pointer_at[sid] = now
             if p is None:
                 self._to(device, "mirror_pointer", id=sid, hide=True)
             else:
