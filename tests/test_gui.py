@@ -455,11 +455,11 @@ def test_a_screen_the_camera_couldnt_see_is_tried_again_not_skipped(desktop, qap
     name = page.targets[0][1]
     page.recorded(name, None)
     assert page.state == "ready" and page.step == 0 and name not in page.results
-    assert "couldn't see your face" in page.prompt_detail.text()
+    assert "could see your face" in page.prompt_detail.text()
     page.state = "recording"
     page.recorded(name, (1.0, 2.0))
     assert page.step == 1 and page.results[name] == (1.0, 2.0)
-    assert "couldn't see" not in page.prompt_detail.text()
+    assert "could see your face" not in page.prompt_detail.text()
 def test_menu_bar_item_with_no_height_counts_as_placed(desktop, monkeypatch):
     # macOS 26 reports the placed menu bar item as 38 x 0; closing the
     # window must still hide Curslink to the menu bar.
