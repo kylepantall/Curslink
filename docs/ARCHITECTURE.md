@@ -431,6 +431,23 @@ front of it shows the part it covers, live (`curslink.mirror`).
   it) and reports drags, side stretches and wheel zooms as `mirror_tune`
   frames; `MirrorHost.tune` turns them into `fit` changes. Save writes the
   `[[layout.fit]]` without a restart.
+- The set-up guide (`curslink.gui.guide`): set-up as steps in the order
+  they're needed (this computer, devices, your desk, your seat, looking,
+  try it) instead of spread over the pages. `steps(app)` works out where
+  each stands from the config and the files beside it (`seat.json`, the gaze
+  calibration), so nothing is kept twice; only "continued past" and
+  "skipped" are remembered (desktop.json `guide_done`, `guide_skipped`, and
+  `guide`, the step being done). `GuideBar` is the strip across the top of
+  the window while it runs: the step, what to do, the button that does it
+  (`Guide.act`: the phone scan, the seat step, the looking pass, each on its
+  own page) and Continue. A host's first run goes straight into it;
+  `SetupCard` on the Status page lists the steps afterwards, each with a
+  button to do it again. The seat step only shows when screens overlap.
+  An agent has no guide: it waits to be added.
+- One look (`curslink.gui.theme`): the same colours, sizes and style sheet
+  on every platform (`TOKENS`, `SIZES` under `LOOK`), solid surfaces with
+  nothing of the platform's behind the window. `Theme.platform` is only
+  for what a platform needs (room for the Mac's window buttons).
 - Line up from your seat (`curslink.seatalign`, `curslink.gui.seatalign`):
   what the Layout page's "Line up from your seat…" opens, in place of
   the free-form fine-tune. `Align` picks up to three spots on the front

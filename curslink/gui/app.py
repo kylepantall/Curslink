@@ -49,6 +49,9 @@ class Curslink(QObject):
         super().__init__()
         self.prefs = prefs
         self.status = Status(self)
+        from curslink.gui.guide import Guide
+
+        self.guide = Guide(self)  # setting up, a step at a time
         from curslink.gui.console import DebugFeed
 
         self.debug_feed = DebugFeed(self)

@@ -93,18 +93,15 @@ class NavButton(QPushButton):
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(bg)
             p.drawRoundedRect(r, radius, radius)
-        if selected and th.platform == "win":
-            p.setBrush(theme.qcolor(t["accent"]))
-            p.drawRoundedRect(QRectF(0, r.height() / 2 - 8, 3, 16), 1.5, 1.5)
         ink = t["ink"] if self.isEnabled() else t["ink3"]
-        icon_colour = t["accent"] if th.platform == "mac" and self.isEnabled() else ink
-        pad = 12 if th.platform != "mac" else 10
+        icon_colour = t["accent"] if selected and self.isEnabled() else ink
+        pad = 12
         if not self.sub:
             icon = nav_icon(self.key, icon_colour, 16).pixmap(16, 16)
             p.drawPixmap(int(pad), int((r.height() - 16) / 2), icon)
         f = self.font()
-        f.setPixelSize(th.size["font_px"] - (1 if self.sub else 0) + (0.5 if th.platform == "mac" else 0))
-        f.setWeight(f.Weight.DemiBold if self.isChecked() and th.platform != "win" else f.Weight.Normal)
+        f.setPixelSize(th.size["font_px"] - (1 if self.sub else 0))
+        f.setWeight(f.Weight.DemiBold if self.isChecked() else f.Weight.Normal)
         p.setFont(f)
         p.setPen(theme.qcolor(ink))
         p.drawText(r.adjusted(pad + 16 + 12, 0, -8, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
@@ -153,9 +150,9 @@ class MainWindow(QMainWindow):
         self.resize(1080, 720)
         self.setMinimumSize(QSize(760, 520))
         self.glass = False
-        self._glass_wanted = app.prefs.glass and native.can_glass()
-        if self._glass_wanted:
-            native.prepare(self)
+        self._glass_wanted = False  # one Curslink look: its own solid surfaces, no Mica or vibrancy behind
+        if sys.platform == "darwin" and native.can_glass():
+            native.prepare(self, glass=False)  # the sidebar runs up under the window's buttons
 
         from curslink.gui.pages.calibrate import CalibratePage
         from curslink.gui.pages.devices import DevicesPage
@@ -193,7 +190,7 @@ class MainWindow(QMainWindow):
         names.addWidget(self.role_label)
         brand.addLayout(names, 1)
         sv.addWidget(self.brand)
-        self.brand.setVisible(th.platform != "win")
+        self.brand.setVisible(True)
 
         self.nav = QButtonGroup(self)
         self.nav.setExclusive(True)
@@ -258,8 +255,13 @@ class MainWindow(QMainWindow):
         pane.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         pv = QVBoxLayout(pane)
         pv.setContentsMargins(th.size["side_w"] + SIDE_INSET if self.floating_side else 0, 0, 0, 0)
+        pv.setSpacing(0)
+        from curslink.gui.guide import GuideBar
+
+        self.guide_bar = GuideBar(app, pane)  # the set-up guide's step, while it's running
+        pv.addWidget(self.guide_bar)
         self.stack = QStackedWidget()
-        pv.addWidget(self.stack)
+        pv.addWidget(self.stack, 1)
         h.addWidget(pane, 1)
 
         calibrate = CalibratePage(app)
@@ -282,6 +284,9 @@ class MainWindow(QMainWindow):
         app.service_changed.connect(lambda _s: self.refresh_side())
         app.status.changed.connect(self.refresh_side)
         app.config_changed.connect(self.refresh_side)
+        app.config_changed.connect(self.refresh_guide)
+        app.service.state_changed.connect(lambda _state: self.refresh_guide())
+        app.status.switched.connect(self._guide_switched)
         theme.manager().changed.connect(self.theme_changed)
         self.refresh_side()
         self.show_page("status")
@@ -343,6 +348,25 @@ class MainWindow(QMainWindow):
         self.refresh_side()
         if hasattr(page, "shown"):
             page.shown()
+        self.refresh_guide()
+
+    def _guide_switched(self, switch) -> None:
+        if self.app.guide.key == "try":
+            self.app.guide.switched(switch.target)
+            self.refresh_guide()
+
+    def refresh_guide(self) -> None:
+        """The set-up guide's bar (and the Status page's list of steps) as things now stand."""
+        bar = getattr(self, "guide_bar", None)
+        if bar is None or not getattr(self, "pages", None):
+            return
+        if self.current_page() == "setup":
+            bar.hide()
+        else:
+            bar.refresh()
+        card = getattr(self.pages.get("status"), "setup_card", None)
+        if card is not None:
+            card.refresh()
 
     def current_page(self) -> str:
         w = self.stack.currentWidget()
@@ -351,9 +375,8 @@ class MainWindow(QMainWindow):
     def refresh_side(self) -> None:
         configured = self.app.has_config()
         role = self.app.role
-        plat = theme.current().platform
         first_run = not configured or (bool(getattr(self, "pages", None)) and self.current_page() == "setup")
-        self.brand.setVisible(plat != "win" and not first_run)
+        self.brand.setVisible(not first_run)
         self.nav_box.setVisible(not first_run)
         self.welcome.setVisible(first_run)
         self.spacer.setVisible(not first_run)

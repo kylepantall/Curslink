@@ -60,6 +60,11 @@ class StatusPage(Page):
         top.addWidget(self.home_button)
         self.where.body.addLayout(top)
         self.add(self.where)
+        # Setting up, a step at a time: where each step stands (curslink.gui.guide).
+        from curslink.gui.guide import SetupCard
+
+        self.setup_card = SetupCard(app)
+        self.add(self.setup_card)
 
         # Switching toggles (host only).
         self.switching = QWidget()
@@ -84,6 +89,7 @@ class StatusPage(Page):
 
         self.devices = Card("Devices", rows=True)
         self.add(self.devices)
+
         self.switches = Card("Recent switches", rows=True)
         self.add(self.switches)
 

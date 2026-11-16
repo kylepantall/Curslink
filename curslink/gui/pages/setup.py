@@ -103,9 +103,11 @@ class SetupPage(Page):
         from curslink import macperms
 
         # macOS permissions come first (Status asks for them), then pairing.
-        if macperms.missing(self.app.role):
-            self.app.window.show_page("status")
-        else:
-            self.app.window.show_page("status" if self.app.role == "host" else "devices")
+        if self.app.role == "host":
+            # ...as the next step of the guide: add the other devices, place
+            # them, line them up (curslink.gui.guide).
+            self.app.prefs.guide, self.app.prefs.guide_done, self.app.prefs.guide_skipped = "devices", "", ""
+            self.app.prefs.save()
+        self.app.window.show_page("status" if macperms.missing(self.app.role) else "devices")
         if self.app.prefs.start_linking or was_linking:
             self.app.start_linking()

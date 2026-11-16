@@ -89,17 +89,41 @@ def test_layout_page_saves_moves(desktop, qapp):
     assert next(d for d in desktop.config().devices() if d["id"] == "laptop")["screens"][0]["y"] == 250
 
 
-def test_theme_modes_and_looks(desktop, qapp, monkeypatch):
+def test_one_curslink_look_on_every_platform(desktop, qapp, monkeypatch):
     from curslink.gui import theme
 
-    for look in ("win", "mac", "linux"):
-        monkeypatch.setenv("CURSLINK_LOOK", look)
+    seen = {}
+    for plat in ("win", "mac", "linux"):
+        monkeypatch.setenv("CURSLINK_LOOK", plat)
         for mode in ("light", "dark"):
             theme.manager().set_mode(mode)
             th = theme.current()
-            assert th.platform == look and th.dark == (mode == "dark")
-            assert "QPushButton#primary" in theme.stylesheet(th)
+            assert th.platform == plat and th.dark == (mode == "dark") and th.look == theme.LOOK
+            sheet = theme.stylesheet(th)
+            assert "QPushButton#primary" in sheet
+            # the same colours, sizes and style sheet whatever the platform...
+            size = dict(th.size)
+            assert size.pop("mac_top") == (theme.MAC_TOP if plat == "mac" else 0)  # ...but room for the Mac's buttons
+            assert seen.setdefault(mode, (th.tokens, size, sheet)) == (th.tokens, size, sheet)
+            # and solid surfaces of its own: nothing of the platform's behind the window
+            assert th.window_bg == th.tokens["win"] and th.side_bg == th.tokens["side"]
+    assert seen["light"][0]["accent"] != seen["dark"][0]["accent"]
+    # the accent is the icon's link blue, and text on it reads
+    for mode in ("light", "dark"):
+        t = seen[mode][0]
+
+        def lum(c):
+            q = theme.qcolor(c)
+            f = [v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4 for v in (q.redF(), q.greenF(), q.blueF())]
+            return 0.2126 * f[0] + 0.7152 * f[1] + 0.0722 * f[2]
+
+        a, b = sorted((lum(t["accent"]), lum(t["accent_ink"])))
+        assert (b + 0.05) / (a + 0.05) >= 4.5
+        a, b = sorted((lum(t["ink"]), lum(t["card"])))
+        assert (b + 0.05) / (a + 0.05) >= 7
     theme.manager().set_mode("system")
+    # no transparency setting: there's nothing behind the window to show
+    assert not hasattr(desktop.window.pages["settings"], "glass")
 
 
 def test_camera_picker_keeps_the_name(qapp):
@@ -2337,3 +2361,123 @@ def test_a_camera_saved_from_the_old_list_gets_the_name_that_goes_with_its_numbe
     cfg.save()
     desktop.rename_cameras(["USB2.0 FHD UVC WebCam", "USB2.0 IR UVC WebCam"])
     assert desktop.config().get("gaze", "camera_name") == "USB2.0 IR UVC WebCam"
+
+
+# -- setting up, a step at a time (curslink.gui.guide) ---------------------------------------
+def test_first_run_on_a_mac_asks_for_its_permissions_before_the_guide_moves_on(desktop, qapp, monkeypatch):
+    from curslink import macperms
+
+    monkeypatch.setattr(macperms, "missing", lambda role: ["accessibility"])
+    w = desktop.window
+    w.pages["setup"].create()
+    qapp.processEvents()
+    # Status asks for the permissions; the guide is on all the same, waiting at its devices step
+    assert w.stack.currentWidget() is w.pages["status"] and desktop.prefs.guide == "devices"
+    assert w.guide_bar.isVisibleTo(w) and "Add your other devices" in w.guide_bar.heading.text()
+
+
+def test_first_run_goes_on_to_the_guide_and_each_step_says_where_it_stands(desktop, qapp, monkeypatch):
+    from curslink import macperms
+    from curslink.gui import guide
+
+    monkeypatch.setattr(macperms, "missing", lambda role: [])  # a Mac asks for its permissions first, below
+    w = desktop.window
+    assert not w.guide_bar.isVisibleTo(w)  # nothing to guide before this computer is set up
+    w.pages["setup"].create()
+    qapp.processEvents()
+    # a host goes straight on to adding its devices, with the guide's bar across the top
+    assert desktop.prefs.guide == "devices" and w.stack.currentWidget() is w.pages["devices"]
+    assert w.guide_bar.isVisibleTo(w) and "Add your other devices" in w.guide_bar.heading.text()
+    assert "STEP 2 OF 2" in w.guide_bar.eyebrow.text()  # alone, there's nothing to place or try yet
+    states = {s.key: s.state for s in guide.steps(desktop)}
+    assert states == {"computer": "done", "devices": "todo", "desk": "none", "seat": "none", "looking": "none",
+                      "try": "none"}
+    cfg = desktop.config()
+    cfg.add_device("laptop", "Work laptop", [{"id": "main", "x": 1920, "y": 0, "width": 1512, "height": 982}])
+    cfg.save()
+    desktop.config_saved(restart=False)
+    qapp.processEvents()
+    states = {s.key: s.state for s in guide.steps(desktop)}
+    assert states["devices"] == "done" and states["desk"] == "todo" and states["seat"] == "none"
+    assert "STEP 2 OF 5" in w.guide_bar.eyebrow.text() and "Work laptop" in w.guide_bar.ticks.text()
+    # Continue: on to the desk, on the Layout page, with the scan as the thing to press
+    desktop.guide.forward()
+    qapp.processEvents()
+    assert desktop.prefs.guide == "desk" and w.stack.currentWidget() is w.pages["layout"]
+    assert w.guide_bar.action.text() == "Scan with my phone" and w.guide_bar.action.objectName() == "primary"
+    started = []
+    monkeypatch.setattr(w.pages["layout"], "start_lineup", lambda: started.append(1))
+    w.guide_bar.action.click()
+    assert started == [1]
+    # placed by hand and continued: the seat step isn't needed (nothing overlaps), so looking is next
+    desktop.guide.forward()
+    assert desktop.prefs.guide == "looking" and w.stack.currentWidget() is w.pages["calibrate"]
+    assert {s.key: s.state for s in guide.steps(desktop)}["desk"] == "done"
+    desktop.guide.back()
+    assert desktop.prefs.guide == "desk"
+    desktop.guide.forward()
+    desktop.guide.forward(skip=True)
+    assert desktop.prefs.guide == "try" and {s.key: s.state for s in guide.steps(desktop)}["looking"] == "skipped"
+    # Try it: each device ticks itself off as the pointer arrives
+    assert "○ Work laptop" in w.guide_bar.ticks.text() and w.guide_bar.next.text() == "Finish"
+    me = desktop.config().get("host", "device_id")
+    desktop.status.apply({"event": "switch", "from": me, "to": "laptop", "screen": "main", "reason": "edge"})
+    qapp.processEvents()
+    assert "✓ Work laptop" in w.guide_bar.ticks.text()
+    desktop.guide.forward()
+    qapp.processEvents()
+    assert desktop.prefs.guide == "" and not w.guide_bar.isVisibleTo(w)
+    assert guide.complete(guide.steps(desktop))
+
+
+def test_an_overlap_brings_in_the_seat_step_and_the_status_card_lists_them(desktop, qapp, monkeypatch):
+    from curslink.gui import guide
+
+    w = desktop.window
+    w.pages["setup"].create()
+    cfg = desktop.config()
+    cfg.add_device("laptop", "Work laptop")
+    cfg.replace_screens("laptop", [{"id": "main", "x": 100, "y": 100, "width": 1512, "height": 982}])
+    cfg.set("layout", "allow_overlap", True)
+    cfg.save()
+    desktop.config_saved(restart=False)
+    qapp.processEvents()
+    me = desktop.config().get("host", "device_id")
+    pairs = guide.overlaps(desktop.config())
+    assert len(pairs) == 1 and pairs[0][1] == "laptop/main" and pairs[0][0].startswith(me + "/")
+    steps = {s.key: s for s in guide.steps(desktop)}
+    assert steps["seat"].state == "todo" and "1 overlap to line up" in steps["seat"].detail
+    tuned = []
+    monkeypatch.setattr(w.pages["layout"], "tune_fit", lambda b, f: tuned.append((b, f)))
+    desktop.guide.go("seat")
+    w.guide_bar.action.click()
+    assert tuned == [pairs[0]] and w.stack.currentWidget() is w.pages["layout"]
+    # joined: the fit is saved, and continuing counts it as done
+    cfg = desktop.config()
+    cfg.set_fit(*pairs[0], 200.0, 600.0, 1.0, quad=[200, 600, 1712, 600, 1712, 1582, 200, 1582])
+    cfg.save()
+    desktop.config_saved(restart=False)
+    desktop.guide.forward()
+    assert {s.key: s.state for s in guide.steps(desktop)}["seat"] == "done"
+    # the Status page lists the steps, with what's left to do
+    desktop.guide.close()
+    w.show_page("status")
+    qapp.processEvents()
+    card = w.pages["status"].setup_card
+    assert card.isVisibleTo(w)
+    row, title, detail, state, again = card.step_rows["seat"]
+    assert title.text() == "Your seat" and state.text() == "Done" and again.text() == "Line up again"
+    assert card.resume_row.isVisibleTo(w) and "left" in card.resume_text.text()
+    card.resume_button.click()
+    assert desktop.prefs.guide == "desk"  # the first step still to do (the desk was never placed)
+
+
+def test_an_agent_has_no_guide(desktop, qapp):
+    w = desktop.window
+    w.pages["setup"].agent_choice.setChecked(True)
+    w.pages["setup"].create()
+    qapp.processEvents()
+    assert desktop.role == "agent" and desktop.prefs.guide == ""
+    assert not w.guide_bar.isVisibleTo(w)
+    w.show_page("status")
+    assert not w.pages["status"].setup_card.isVisibleTo(w)
