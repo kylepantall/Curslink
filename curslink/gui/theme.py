@@ -209,6 +209,8 @@ QLabel#warn {{ background: {t['warn_bg']}; color: {t['ink']}; border-radius: {s[
 QLabel#error {{ background: {t['bad_bg']}; color: {t['ink']}; border-radius: {s['r_card']}px; padding: 10px 12px; }}
 QLabel#info {{ background: {t['accent_soft']}; color: {t['ink']}; border-radius: {s['r_card']}px; padding: 10px 12px; }}
 
+QFrame#guideBar {{ background: {t['accent_soft']}; border: 0; border-bottom: 1px solid {t['stroke']}; }}
+QLabel#guideTitle {{ font-size: 18px; font-weight: 600; }}
 QFrame#card {{ background: {th.card_bg}; border: 1px solid {t['stroke']}; border-radius: {s['r_card']}px; }}
 QFrame#accentCard {{ background: {t['accent_soft']}; border: 0; border-radius: {s['r_card']}px; }}
 QFrame#row {{ background: transparent; border: 0; border-top: 1px solid {t['stroke']}; }}

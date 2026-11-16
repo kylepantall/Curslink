@@ -255,8 +255,13 @@ class MainWindow(QMainWindow):
         pane.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         pv = QVBoxLayout(pane)
         pv.setContentsMargins(th.size["side_w"] + SIDE_INSET if self.floating_side else 0, 0, 0, 0)
+        pv.setSpacing(0)
+        from curslink.gui.guide import GuideBar
+
+        self.guide_bar = GuideBar(app, pane)  # the set-up guide's step, while it's running
+        pv.addWidget(self.guide_bar)
         self.stack = QStackedWidget()
-        pv.addWidget(self.stack)
+        pv.addWidget(self.stack, 1)
         h.addWidget(pane, 1)
 
         calibrate = CalibratePage(app)
@@ -279,6 +284,9 @@ class MainWindow(QMainWindow):
         app.service_changed.connect(lambda _s: self.refresh_side())
         app.status.changed.connect(self.refresh_side)
         app.config_changed.connect(self.refresh_side)
+        app.config_changed.connect(self.refresh_guide)
+        app.service.state_changed.connect(lambda _state: self.refresh_guide())
+        app.status.switched.connect(self._guide_switched)
         theme.manager().changed.connect(self.theme_changed)
         self.refresh_side()
         self.show_page("status")
@@ -340,6 +348,25 @@ class MainWindow(QMainWindow):
         self.refresh_side()
         if hasattr(page, "shown"):
             page.shown()
+        self.refresh_guide()
+
+    def _guide_switched(self, switch) -> None:
+        if self.app.guide.key == "try":
+            self.app.guide.switched(switch.target)
+            self.refresh_guide()
+
+    def refresh_guide(self) -> None:
+        """The set-up guide's bar (and the Status page's list of steps) as things now stand."""
+        bar = getattr(self, "guide_bar", None)
+        if bar is None or not getattr(self, "pages", None):
+            return
+        if self.current_page() == "setup":
+            bar.hide()
+        else:
+            bar.refresh()
+        card = getattr(self.pages.get("status"), "setup_card", None)
+        if card is not None:
+            card.refresh()
 
     def current_page(self) -> str:
         w = self.stack.currentWidget()

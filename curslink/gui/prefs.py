@@ -32,7 +32,10 @@ class Prefs:
     start_linking: bool = True       # start the host/agent when the app opens
     told_about_tray: bool = False    # said "still running in the tray" once
     theme: str = "system"            # system / light / dark
-    glass: bool = True               # Mica (Windows 11) or vibrancy (macOS) behind the window
+    glass: bool = True               # (no longer used: Curslink draws its own solid surfaces)
+    guide: str = ""                  # the set-up guide's step being done ("" = not running): curslink.gui.guide
+    guide_done: str = ""             # steps continued past, comma-separated
+    guide_skipped: str = ""          # steps skipped
 
     @property
     def config_path(self) -> Path:
