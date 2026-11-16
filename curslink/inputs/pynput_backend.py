@@ -1046,6 +1046,73 @@ def _mac_post_move(x: int, y: int, held: set[str], last: tuple[int, int] | None)
         return False
 
 
+_MAC_BUTTONS = {"left": (1, 2, 0), "right": (3, 4, 1), "middle": (25, 26, 2)}  # down, up, CGMouseButton
+_MAC_CLICK_STATE = 1                       # kCGMouseEventClickState
+
+
+class ClickCounter:
+    """Counts clicks the way the OS would for a real mouse: a press of the
+    same button soon enough after the last one, close enough to it, is the
+    next click of a double (or triple) click; its release carries the same
+    count. A Mac app sees a double click only from the click count on the
+    event (kCGMouseEventClickState), not from the timing, and a bare posted
+    press always says 1: 0.4.121 and before, double clicks driven from
+    another computer never registered on a Mac."""
+
+    SLOP_PX = 5
+
+    def __init__(self, interval: float = 0.5):
+        self.interval = interval
+        self._last: tuple[str, float, float, float, int] | None = None  # button, t, x, y, count
+        self._held: dict[str, int] = {}
+
+    def press(self, button: str, x: float, y: float, now: float | None = None) -> int:
+        now = time.monotonic() if now is None else now
+        count = 1
+        if self._last is not None:
+            b, t, lx, ly, n = self._last
+            if (b == button and now - t <= self.interval
+                    and abs(x - lx) <= self.SLOP_PX and abs(y - ly) <= self.SLOP_PX):
+                count = n + 1
+        self._last = (button, now, x, y, count)
+        self._held[button] = count
+        return count
+
+    def release(self, button: str) -> int:
+        return self._held.pop(button, 1)
+
+
+def _mac_double_click_interval() -> float:
+    try:
+        from AppKit import NSEvent
+
+        return float(NSEvent.doubleClickInterval()) or 0.5
+    except Exception:  # pragma: no cover - macOS only
+        return 0.5
+
+
+def _mac_post_button(button: str, pressed: bool, clicks: ClickCounter) -> bool:
+    """Press or let go of a mouse button where the cursor is, as a real
+    mouse would, with the click count set so double and triple clicks
+    work. False if it couldn't be posted."""
+    try:
+        import Quartz
+
+        down, up, number = _MAC_BUTTONS[button]
+        loc = Quartz.CGEventGetLocation(Quartz.CGEventCreate(None))
+        at = (float(loc.x), float(loc.y))
+        count = clicks.press(button, *at) if pressed else clicks.release(button)
+        ev = Quartz.CGEventCreateMouseEvent(None, down if pressed else up, at, number)
+        Quartz.CGEventSetIntegerValueField(ev, _MAC_CLICK_STATE, count)
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
+        if count > 1:
+            log.debug("click %d of %s", count, button)
+        return True
+    except Exception:  # pragma: no cover - macOS only
+        log.debug("couldn't post the mouse button", exc_info=True)
+        return False
+
+
 def _mac_sets_cursor_in_background(cg, cf) -> None:
     cg._CGSDefaultConnection.restype = ctypes.c_int
     cid = cg._CGSDefaultConnection()
@@ -1263,6 +1330,12 @@ class PynputSink:
             return
         down = self.__dict__.setdefault("_down", set())
         (down.add if pressed else down.discard)(button)
+        if sys.platform == "darwin" and button in _MAC_BUTTONS:
+            clicks = self.__dict__.get("_clicks")
+            if clicks is None:
+                clicks = self._clicks = ClickCounter(_mac_double_click_interval())
+            if _mac_post_button(button, pressed, clicks):
+                return
         (self._mouse.press if pressed else self._mouse.release)(target)
 
     def scroll(self, dx: float, dy: float) -> None:

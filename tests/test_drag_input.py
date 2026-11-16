@@ -177,3 +177,34 @@ def test_an_agent_drags_files_from_the_host_for_real_on_a_mac_too(monkeypatch, t
     assert (native.press is not None) is real
     assert (native.follow is not None) is real
     assert native.end_watch is (platform == "darwin")
+
+
+def test_click_counter_counts_double_and_triple_clicks():
+    c = pb.ClickCounter(interval=0.5)
+    assert c.press("left", 10, 10, now=0.0) == 1
+    assert c.release("left") == 1
+    assert c.press("left", 12, 11, now=0.3) == 2
+    assert c.release("left") == 2
+    assert c.press("left", 12, 11, now=0.6) == 3
+    assert c.press("left", 12, 11, now=2.0) == 1   # too slow
+    assert c.press("left", 40, 11, now=2.1) == 1   # moved away
+    assert c.press("right", 40, 11, now=2.2) == 1  # another button
+
+
+def test_a_mac_agent_double_click_carries_the_click_count(monkeypatch):
+    # 0.4.121: presses went through pynput with no click count, so a
+    # double click from a Windows host was two single clicks on the Mac.
+    posted = fake_quartz(monkeypatch)
+    q = sys.modules["Quartz"]
+    q.CGEventCreate = lambda src: None
+    q.CGEventGetLocation = lambda ev: types.SimpleNamespace(x=50.0, y=60.0)
+    q.kCGEventLeftMouseDown = 1
+    monkeypatch.setitem(sys.modules, "pynput", types.SimpleNamespace(
+        mouse=types.SimpleNamespace(Button=types.SimpleNamespace(left="L", right="R", middle="M"))))
+    sink, _ = mac_sink(monkeypatch)
+    sink._down = set()
+    for pressed in (True, False, True, False):
+        sink.button("left", pressed)
+    assert [e["kind"] for e in posted] == [1, 2, 1, 2]
+    assert [e[pb._MAC_CLICK_STATE] for e in posted] == [1, 1, 2, 2]
+    assert all(e["at"] == (50.0, 60.0) and e["button"] == 0 for e in posted)
