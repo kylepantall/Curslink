@@ -564,6 +564,7 @@ def mac_repress() -> bool:
         at = Quartz.CGEventGetLocation(Quartz.CGEventCreate(None))
         for kind in (Quartz.kCGEventLeftMouseUp, Quartz.kCGEventLeftMouseDown):
             ev = Quartz.CGEventCreateMouseEvent(None, kind, at, Quartz.kCGMouseButtonLeft)
+            Quartz.CGEventSetIntegerValueField(ev, 1, 1)  # kCGMouseEventClickState: a single press
             Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
         return True
     except Exception as exc:  # pragma: no cover - macOS only

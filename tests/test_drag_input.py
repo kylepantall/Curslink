@@ -208,3 +208,30 @@ def test_a_mac_agent_double_click_carries_the_click_count(monkeypatch):
     assert [e["kind"] for e in posted] == [1, 2, 1, 2]
     assert [e[pb._MAC_CLICK_STATE] for e in posted] == [1, 1, 2, 2]
     assert all(e["at"] == (50.0, 60.0) and e["button"] == 0 for e in posted)
+
+
+def test_a_mac_agent_drag_carries_its_press_click_count(monkeypatch):
+    # A real mouse's drag events say which click began them; a created one
+    # may say 0. A double-click drag (select by words) says 2.
+    posted = fake_quartz(monkeypatch, held={0})
+    q = sys.modules["Quartz"]
+    q.CGEventCreate = lambda src: None
+    q.CGEventGetLocation = lambda ev: types.SimpleNamespace(x=50.0, y=60.0)
+    monkeypatch.setitem(sys.modules, "pynput", types.SimpleNamespace(
+        mouse=types.SimpleNamespace(Button=types.SimpleNamespace(left="L", right="R", middle="M"))))
+    sink, _ = mac_sink(monkeypatch)
+    sink._down = set()
+    sink.button("left", True)
+    sink.move_to(55, 60)
+    assert posted[-1]["kind"] == 6 and posted[-1][pb._MAC_CLICK_STATE] == 1
+    sink.button("left", False)
+    sink.button("left", True)
+    sink.move_to(58, 60)
+    assert posted[-1][pb._MAC_CLICK_STATE] == 2
+
+
+def test_a_mac_hover_has_no_click_count(monkeypatch):
+    posted = fake_quartz(monkeypatch)
+    sink, _ = mac_sink(monkeypatch)
+    sink.move_to(5, 6)
+    assert pb._MAC_CLICK_STATE not in posted[0]
