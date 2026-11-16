@@ -112,12 +112,6 @@ class SettingsPage(QStackedWidget):
         self.theme_choice = Segmented([("system", "System"), ("light", "Light"), ("dark", "Dark")])
         self.theme_choice.picked.connect(self.set_theme)
         look.add_row(text_block("Theme", "System follows your computer's light or dark setting."), self.theme_choice)
-        self.glass = Toggle("Transparency effects")
-        self.glass.clicked.connect(lambda on: self.set_pref("glass", on))
-        effect = {"win": "Mica", "mac": "the glass sidebar"}.get(theme.current().platform, "")
-        if effect and native.can_glass():
-            look.add_row(text_block("Transparency effects", f"Use {effect} behind the window. Applies next time "
-                                    "Curslink opens."), self.glass)
         self.add(look)
 
         # -- background ---------------------------------------------------------
@@ -588,7 +582,6 @@ class SettingsPage(QStackedWidget):
             for b in self.effect_group.buttons():
                 b.setChecked(b.property("effect") == effect)
             self.theme_choice.set_value(self.app.prefs.theme)
-            self.glass.setChecked(self.app.prefs.glass)
             self.dwell.setValue(int(gaze.get("dwell_ms", 250)))
             self.dwell_label.setText(f"{self.dwell.value()} ms")
             self.hotkeys.setText(f"Bring input home: {host.get('return_hotkey', 'ctrl+alt+home')}\n"

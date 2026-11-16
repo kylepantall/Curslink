@@ -1,12 +1,12 @@
 """Draw the desktop app's pages to PNGs, in light and dark.
 
-Used by CI (.github/workflows/screenshots.yml) to show the app as each
-platform draws it, without each machine to hand::
+Used by CI (.github/workflows/screenshots.yml) to show the app as it's
+drawn on each platform (one Curslink look; the fonts and the Mac's window
+buttons are what differ), without each machine to hand::
 
     python packaging/screenshots.py OUT_DIR
 
-Every Settings section is drawn as well as the main pages. Set
-CURSLINK_LOOK=win|mac|linux to draw another platform's look.
+Every Settings section is drawn as well as the main pages.
 """
 
 from __future__ import annotations

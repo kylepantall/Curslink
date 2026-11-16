@@ -90,8 +90,7 @@ class Toggle(QAbstractButton):
 
     @staticmethod
     def dims() -> tuple[int, int, int]:
-        plat = theme.current().platform
-        return {"win": (40, 20, 12), "mac": (38, 22, 20), "linux": (48, 26, 20)}[plat]
+        return (44, 24, 18)
 
     def sizeHint(self) -> QSize:
         w, h, _ = self.dims()
@@ -124,22 +123,13 @@ class Toggle(QAbstractButton):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         r = QRectF(2, (self.height() - h) / 2, w, h)
         accent = th.color("accent")
-        if th.platform == "win":
-            off_track = QColor(0, 0, 0, 0)
-            off_knob = th.color("ink2")
-            on_knob = th.color("accent_ink")
-        else:
-            off_track = th.solid("ctl") if th.platform == "linux" else QColor(120, 120, 128, 70 if th.dark else 60)
-            off_knob = on_knob = QColor("#FFFFFF")
+        off_track = th.solid("ctl_stroke")
+        off_knob = on_knob = QColor("#FFFFFF")
         enabled = self.isEnabled()
         track = blend(off_track, accent, self._pos)
         if not enabled:
             track.setAlphaF(track.alphaF() * 0.45)
-        if th.platform == "win" and self._pos < 1:
-            pen = blend(th.color("ink2"), accent, self._pos)
-            p.setPen(pen)
-        else:
-            p.setPen(Qt.PenStyle.NoPen)
+        p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(track)
         p.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), h / 2, h / 2)
         if self.hasFocus():
@@ -150,9 +140,8 @@ class Toggle(QAbstractButton):
         pad = (h - k) / 2
         x = r.left() + pad + self._pos * (w - k - 2 * pad)
         p.setPen(Qt.PenStyle.NoPen)
-        if th.platform != "win":
-            p.setBrush(QColor(0, 0, 0, 50))
-            p.drawEllipse(QRectF(x, r.top() + pad + 0.8, k, k))
+        p.setBrush(QColor(0, 0, 0, 50))
+        p.drawEllipse(QRectF(x, r.top() + pad + 0.8, k, k))
         p.setBrush(knob)
         p.drawEllipse(QRectF(x, r.top() + pad, k, k))
         p.end()
@@ -360,9 +349,7 @@ class Page(QScrollArea):
         inner.setObjectName("page")
         self.setWidget(inner)
         self.layout_ = QVBoxLayout(inner)
-        plat = theme.current().platform
-        top = {"win": 24, "mac": 30, "linux": 18}[plat]
-        self.layout_.setContentsMargins(32, top, 32, 32)
+        self.layout_.setContentsMargins(32, 24, 32, 32)
         self.layout_.setSpacing(16)
         self.header = QHBoxLayout()
         self.header.setSpacing(12)

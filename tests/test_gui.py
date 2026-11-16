@@ -89,17 +89,41 @@ def test_layout_page_saves_moves(desktop, qapp):
     assert next(d for d in desktop.config().devices() if d["id"] == "laptop")["screens"][0]["y"] == 250
 
 
-def test_theme_modes_and_looks(desktop, qapp, monkeypatch):
+def test_one_curslink_look_on_every_platform(desktop, qapp, monkeypatch):
     from curslink.gui import theme
 
-    for look in ("win", "mac", "linux"):
-        monkeypatch.setenv("CURSLINK_LOOK", look)
+    seen = {}
+    for plat in ("win", "mac", "linux"):
+        monkeypatch.setenv("CURSLINK_LOOK", plat)
         for mode in ("light", "dark"):
             theme.manager().set_mode(mode)
             th = theme.current()
-            assert th.platform == look and th.dark == (mode == "dark")
-            assert "QPushButton#primary" in theme.stylesheet(th)
+            assert th.platform == plat and th.dark == (mode == "dark") and th.look == theme.LOOK
+            sheet = theme.stylesheet(th)
+            assert "QPushButton#primary" in sheet
+            # the same colours, sizes and style sheet whatever the platform...
+            size = dict(th.size)
+            assert size.pop("mac_top") == (theme.MAC_TOP if plat == "mac" else 0)  # ...but room for the Mac's buttons
+            assert seen.setdefault(mode, (th.tokens, size, sheet)) == (th.tokens, size, sheet)
+            # and solid surfaces of its own: nothing of the platform's behind the window
+            assert th.window_bg == th.tokens["win"] and th.side_bg == th.tokens["side"]
+    assert seen["light"][0]["accent"] != seen["dark"][0]["accent"]
+    # the accent is the icon's link blue, and text on it reads
+    for mode in ("light", "dark"):
+        t = seen[mode][0]
+
+        def lum(c):
+            q = theme.qcolor(c)
+            f = [v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4 for v in (q.redF(), q.greenF(), q.blueF())]
+            return 0.2126 * f[0] + 0.7152 * f[1] + 0.0722 * f[2]
+
+        a, b = sorted((lum(t["accent"]), lum(t["accent_ink"])))
+        assert (b + 0.05) / (a + 0.05) >= 4.5
+        a, b = sorted((lum(t["ink"]), lum(t["card"])))
+        assert (b + 0.05) / (a + 0.05) >= 7
     theme.manager().set_mode("system")
+    # no transparency setting: there's nothing behind the window to show
+    assert not hasattr(desktop.window.pages["settings"], "glass")
 
 
 def test_camera_picker_keeps_the_name(qapp):

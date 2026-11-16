@@ -37,11 +37,15 @@ def can_glass() -> bool:
     return False
 
 
-def prepare(window) -> None:
-    """Call before the window is first shown, when glass will be used."""
+def prepare(window, glass: bool = True) -> None:
+    """Call before the window is first shown: on macOS the window's own
+    surface runs up under its buttons (no separate title bar). ``glass``:
+    a backdrop will be put behind it too (:func:`apply_glass`), so it must
+    be see-through; Curslink's own look is solid and passes False."""
     from PySide6.QtCore import Qt
 
-    window.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+    if glass:
+        window.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
     if sys.platform == "darwin":
         # Let Qt own the unified title bar: it rewrites the window's style
         # mask and titlebarAppearsTransparent from these flags whenever it

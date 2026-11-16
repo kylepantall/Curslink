@@ -1,6 +1,10 @@
-"""Colours, sizes and the Qt style sheet, per platform and light or dark.
+"""Colours, sizes and the Qt style sheet: one Curslink look, light or dark.
 
-The values come from docs/design/desktop-ui-spec.md; change both together.
+Curslink looks the same on Windows, macOS and Linux: its own colours (the
+link blue of its icon on a deep navy, or on a cool white), its own shapes
+and its own controls. Nothing here follows the platform's style; the only
+thing a platform changes is what it has to (:attr:`Theme.platform`: room
+for the Mac's window buttons, which font is to hand).
 ``current()`` is the theme in use; ``manager().changed`` fires when it
 changes (the user picks Light or Dark, or the OS switches while on System).
 """
@@ -34,61 +38,31 @@ def platform_key() -> str:
 
 # ----------------------------------------------------------------- tokens
 
+LOOK = "own"
+
 _COMMON_STATUS = {
-    "win": {
-        "light": dict(good="#0F7B0F", good_bg="#DFF6DD", warn="#9D5D00", warn_bg="#FFF4CE", bad="#C42B1C", bad_bg="#FDE7E9"),
-        "dark": dict(good="#6CCB5F", good_bg="#253A22", warn="#FCE100", warn_bg="#433519", bad="#FF99A4", bad_bg="#442726"),
-    },
-    "mac": {
-        "light": dict(good="#248A3D", good_bg="rgba(52,199,89,.16)", warn="#A05A00", warn_bg="rgba(255,159,10,.18)",
-                      bad="#D70015", bad_bg="rgba(255,59,48,.14)"),
-        "dark": dict(good="#30D158", good_bg="rgba(48,209,88,.16)", warn="#FFB340", warn_bg="rgba(255,159,10,.18)",
-                     bad="#FF6961", bad_bg="rgba(255,69,58,.18)"),
-    },
-    "linux": {
-        "light": dict(good="#1B7F3B", good_bg="rgba(46,194,126,.16)", warn="#8F5A00", warn_bg="rgba(229,165,10,.20)",
-                      bad="#C01C28", bad_bg="rgba(224,27,36,.12)"),
-        "dark": dict(good="#8FF0A4", good_bg="rgba(38,162,105,.25)", warn="#F8E45C", warn_bg="rgba(205,147,9,.25)",
-                     bad="#FF7B63", bad_bg="rgba(192,28,40,.30)"),
+    LOOK: {
+        "light": dict(good="#1B7F3B", good_bg="rgba(46,194,126,.16)", warn="#8A5600", warn_bg="rgba(229,165,10,.20)",
+                      bad="#C01C28", bad_bg="rgba(224,27,36,.11)"),
+        "dark": dict(good="#6FE3A0", good_bg="rgba(46,194,126,.20)", warn="#F5CF5B", warn_bg="rgba(229,165,10,.22)",
+                     bad="#FF8A80", bad_bg="rgba(255,90,80,.22)"),
     },
 }
 
+# Neutrals lean to the icon's navy; the accent is its link blue (a deeper
+# one on white, so white text on it reads).
 TOKENS: dict[str, dict[str, dict[str, str]]] = {
-    "win": {
-        "light": dict(win="#F3F3F3", glass="rgba(243,243,243,0)", side="transparent", content="#F9F9F9",
-                      content_glass="rgba(255,255,255,.5)", card="#FFFFFF", card2="#F9F9F9", stroke="#E5E5E5",
-                      ink="#1B1B1B", ink2="#5F5F5F", ink3="#8A8A8A", accent="#005FB8", accent_ink="#FFFFFF",
-                      accent_soft="#E3EEF9", ctl="#FFFFFF", ctl_stroke="#D1D1D1", ctl_bottom="#8A8A8A",
-                      navsel="rgba(0,0,0,.055)", plot="#F5F7FA"),
-        "dark": dict(win="#202020", glass="rgba(32,32,32,0)", side="transparent", content="#272727",
-                     content_glass="rgba(255,255,255,.03)", card="#2B2B2B", card2="#323232", stroke="#1D1D1D",
-                     ink="#FFFFFF", ink2="#C5C5C5", ink3="#9A9A9A", accent="#60CDFF", accent_ink="#000000",
-                     accent_soft="#1F3A4A", ctl="#2D2D2D", ctl_stroke="#3A3A3A", ctl_bottom="#9A9A9A",
-                     navsel="rgba(255,255,255,.06)", plot="#1C1C1C"),
-    },
-    "mac": {
-        "light": dict(win="#F6F6F8", glass="transparent", side="#ECECEF", side_glass="rgba(255,255,255,.12)",
-                      content="#F6F6F8", content_glass="rgba(246,246,248,.92)", card_glass="rgba(255,255,255,.78)", card="#FFFFFF", card2="#F0F0F2",
-                      stroke="rgba(0,0,0,.10)", ink="#1D1D1F", ink2="#6E6E73", ink3="#8E8E93", accent="#007AFF",
-                      accent_ink="#FFFFFF", accent_soft="rgba(0,122,255,.12)", ctl="#FFFFFF",
-                      ctl_stroke="rgba(0,0,0,.16)", ctl_bottom="rgba(0,0,0,.16)", navsel="rgba(0,0,0,.08)",
-                      plot="#EFEFF2"),
-        "dark": dict(win="#1E1E20", glass="transparent", side="#28282B", side_glass="rgba(255,255,255,.03)",
-                     content="#1E1E20", content_glass="rgba(30,30,32,.90)", card_glass="rgba(255,255,255,.06)", card="#2A2A2D", card2="#252528",
-                     stroke="rgba(255,255,255,.10)", ink="#F5F5F7", ink2="#A1A1A6", ink3="#8E8E93", accent="#0A84FF",
-                     accent_ink="#FFFFFF", accent_soft="rgba(10,132,255,.22)", ctl="#3A3A3D",
-                     ctl_stroke="rgba(255,255,255,.14)", ctl_bottom="rgba(255,255,255,.14)",
-                     navsel="rgba(255,255,255,.10)", plot="#151517"),
-    },
-    "linux": {
-        "light": dict(win="#FAFAFB", side="#EBEBED", content="#FAFAFB", card="#FFFFFF", card2="#F6F6F7",
-                      stroke="rgba(0,0,6,.10)", ink="#1E1E22", ink2="#5C5C62", ink3="#7C7C83", accent="#3584E4",
-                      accent_ink="#FFFFFF", accent_soft="rgba(53,132,228,.14)", ctl="#EDEDEF", ctl_stroke="#EDEDEF",
-                      ctl_bottom="#EDEDEF", navsel="rgba(0,0,6,.10)", plot="#F2F2F4"),
-        "dark": dict(win="#222226", side="#2E2E32", content="#222226", card="#36363A", card2="#2E2E32",
-                     stroke="rgba(0,0,0,.36)", ink="#FFFFFF", ink2="#B3B3B5", ink3="#8F8F93", accent="#78AEED",
-                     accent_ink="#0B1A2B", accent_soft="rgba(120,174,237,.18)", ctl="#3D3D41", ctl_stroke="#3D3D41",
-                     ctl_bottom="#3D3D41", navsel="rgba(255,255,255,.10)", plot="#1C1C1F"),
+    LOOK: {
+        "light": dict(win="#F4F6FA", side="#E8EDF5", content="#F4F6FA", card="#FFFFFF", card2="#EEF2F8",
+                      stroke="rgba(18,35,60,.12)", ink="#12233C", ink2="#4F5F7A", ink3="#7A879C", accent="#0F6FD1",
+                      accent_ink="#FFFFFF", accent_soft="rgba(63,169,255,.17)", ctl="#FFFFFF",
+                      ctl_stroke="rgba(18,35,60,.20)", ctl_bottom="rgba(18,35,60,.20)", navsel="rgba(18,35,60,.08)",
+                      plot="#E9EFF7"),
+        "dark": dict(win="#0F1B2D", side="#0B1524", content="#0F1B2D", card="#162843", card2="#12233C",
+                     stroke="rgba(182,223,255,.13)", ink="#EAF2FB", ink2="#9FB3CC", ink3="#70839D", accent="#3FA9FF",
+                     accent_ink="#06182B", accent_soft="rgba(63,169,255,.20)", ctl="#1D3352",
+                     ctl_stroke="rgba(182,223,255,.18)", ctl_bottom="rgba(182,223,255,.18)",
+                     navsel="rgba(182,223,255,.10)", plot="#0A1422"),
     },
 }
 
@@ -97,13 +71,10 @@ LINK_BLUE = "#3FA9FF"
 OTHER_DEVICE = "#8E6BD8"
 
 SIZES = {
-    "win": dict(r_card=8, r_ctl=4, r_nav=4, btn_h=32, field_h=32, nav_h=36, h1=28, side_w=232, font_px=14,
-                small_px=12.5, h2_px=14, mac_top=0),
-    "mac": dict(r_card=12, r_ctl=7, r_nav=8, btn_h=28, field_h=26, nav_h=30, h1=26, side_w=240, font_px=13,
-                small_px=12, h2_px=13, mac_top=44),
-    "linux": dict(r_card=12, r_ctl=8, r_nav=8, btn_h=34, field_h=34, nav_h=38, h1=24, side_w=232, font_px=14,
-                  small_px=12.5, h2_px=14, mac_top=0),
+    LOOK: dict(r_card=12, r_ctl=8, r_nav=8, btn_h=34, field_h=34, nav_h=38, h1=26, side_w=236, font_px=14,
+               small_px=12.5, h2_px=14, mac_top=0),
 }
+MAC_TOP = 44  # macOS: the window's buttons sit over the sidebar's top
 
 # Only fonts each platform has, so Qt doesn't spend time looking up missing ones.
 MONO = {"win32": '"Cascadia Mono", Consolas, monospace', "darwin": 'Menlo, monospace'}.get(
@@ -140,14 +111,19 @@ class Theme:
         return "dark" if self.dark else "light"
 
     @property
+    def look(self) -> str:
+        """The one look there is (what drawing code asks, where it once asked the platform)."""
+        return LOOK
+
+    @property
     def tokens(self) -> dict[str, str]:
-        t = dict(TOKENS[self.platform][self.mode])
-        t.update(_COMMON_STATUS[self.platform][self.mode])
+        t = dict(TOKENS[LOOK][self.mode])
+        t.update(_COMMON_STATUS[LOOK][self.mode])
         return t
 
     @property
     def size(self) -> dict:
-        return SIZES[self.platform]
+        return {**SIZES[LOOK], "mac_top": MAC_TOP if self.platform == "mac" else 0}
 
     def css(self, name: str) -> str:
         return self.tokens[name]
@@ -159,29 +135,22 @@ class Theme:
         """A token as an opaque colour over ``under`` (for painting)."""
         return over(self.tokens[name], self.tokens[under] if under in self.tokens else under)
 
-    # -- the window's layers, which depend on whether there's glass behind
+    # -- the window's layers (solid: Curslink draws its own, no Mica or vibrancy behind)
     @property
     def window_bg(self) -> str:
-        return self.tokens.get("glass", self.tokens["win"]) if self.glass else self.tokens["win"]
+        return self.tokens["win"]
 
     @property
     def side_bg(self) -> str:
-        t = self.tokens
-        if self.platform == "win":
-            return "transparent" if self.glass else t["win"]
-        if self.platform == "mac":
-            return t["side_glass"] if self.glass else t["side"]
-        return t["side"]
+        return self.tokens["side"]
 
     @property
     def card_bg(self) -> str:
-        t = self.tokens
-        return t.get("card_glass", t["card"]) if self.glass else t["card"]
+        return self.tokens["card"]
 
     @property
     def content_bg(self) -> str:
-        t = self.tokens
-        return t.get("content_glass", t["content"]) if self.glass else t["content"]
+        return self.tokens["content"]
 
 
 _current = Theme()
@@ -195,34 +164,20 @@ def current() -> Theme:
 
 def stylesheet(th: Theme) -> str:
     t, s = th.tokens, th.size
-    plat = th.platform
-    bold = 700 if plat == "linux" else 600
-    btn_border = "0" if plat == "linux" else f"1px solid {t['ctl_stroke']}"
-    field_border = "0" if plat == "linux" else f"1px solid {t['ctl_stroke']}"
-    field_bottom = f"border-bottom: 1px solid {t['ctl_bottom']};" if plat == "win" else ""
-    field_focus = (f"border-bottom: 2px solid {t['accent']};" if plat == "win"
-                   else f"border: {'2px' if plat == 'linux' else '1px'} solid {t['accent']};")
-    content_edge = (f"border-top-left-radius: 8px; border-top: 1px solid {t['stroke']}; border-left: 1px solid {t['stroke']};"
-                    if plat == "win" else "")
-    side_edge = f"border-right: 1px solid {t['stroke']};" if plat == "linux" else ""
-    if plat == "mac":
-        # The sidebar is the window's vibrancy, flush to the edges, with a
-        # hairline where the body starts.
-        side_round = f"border-right: 1px solid {t['stroke']};" if th.glass else ""
-    else:
-        side_round = ""
-    # Segmented controls: a recessed track with a raised thumb (macOS look,
-    # used everywhere; Windows gets a hairline track, as Fluent does).
-    if plat == "mac":
-        seg_track = "rgba(120,120,128,.24)" if th.dark else "rgba(120,120,128,.14)"
-        seg_track_border = "0"
-        seg_thumb = "rgba(255,255,255,.22)" if th.dark else "#FFFFFF"
-        seg_thumb_ink = ""
-    else:
-        seg_track = t["card2"]
-        seg_track_border = f"1px solid {t['stroke']}" if plat == "win" else "0"
-        seg_thumb = t["ctl"]
-        seg_thumb_ink = f"color: {t['accent']};" if plat == "win" else ""
+    plat = th.look
+    bold = 600
+    btn_border = f"1px solid {t['ctl_stroke']}"
+    field_border = f"1px solid {t['ctl_stroke']}"
+    field_bottom = ""
+    field_focus = f"border: 2px solid {t['accent']};"
+    content_edge = ""
+    side_edge = f"border-right: 1px solid {t['stroke']};"
+    side_round = ""
+    # Segmented controls: a recessed track with a raised thumb.
+    seg_track = t["card2"]
+    seg_track_border = f"1px solid {t['stroke']}"
+    seg_thumb = t["ctl"]
+    seg_thumb_ink = ""
     return f"""
 * {{ font-size: {s['font_px']}px; }}
 QMainWindow, QWidget#root {{ background: {th.window_bg}; color: {t['ink']}; }}
@@ -414,12 +369,11 @@ class ThemeManager(QObject):
             app.setPalette(palette(_current))
             if hasattr(app, "setStyleSheet"):
                 app.setStyleSheet(stylesheet(_current))
-            if _current.platform == "win" and sys.platform == "win32":
+            if sys.platform == "win32":
                 f = app.font()
                 f.setFamilies(["Segoe UI Variable Text", "Segoe UI"])
                 app.setFont(f)
-        log.info("theme: %s %s%s (setting: %s)", _current.platform, _current.mode, " with glass" if self.glass else "",
-                 self.mode)
+        log.info("theme: %s (setting: %s)", _current.mode, self.mode)
         self.changed.emit()
 
 

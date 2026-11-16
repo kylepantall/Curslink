@@ -93,18 +93,15 @@ class NavButton(QPushButton):
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(bg)
             p.drawRoundedRect(r, radius, radius)
-        if selected and th.platform == "win":
-            p.setBrush(theme.qcolor(t["accent"]))
-            p.drawRoundedRect(QRectF(0, r.height() / 2 - 8, 3, 16), 1.5, 1.5)
         ink = t["ink"] if self.isEnabled() else t["ink3"]
-        icon_colour = t["accent"] if th.platform == "mac" and self.isEnabled() else ink
-        pad = 12 if th.platform != "mac" else 10
+        icon_colour = t["accent"] if selected and self.isEnabled() else ink
+        pad = 12
         if not self.sub:
             icon = nav_icon(self.key, icon_colour, 16).pixmap(16, 16)
             p.drawPixmap(int(pad), int((r.height() - 16) / 2), icon)
         f = self.font()
-        f.setPixelSize(th.size["font_px"] - (1 if self.sub else 0) + (0.5 if th.platform == "mac" else 0))
-        f.setWeight(f.Weight.DemiBold if self.isChecked() and th.platform != "win" else f.Weight.Normal)
+        f.setPixelSize(th.size["font_px"] - (1 if self.sub else 0))
+        f.setWeight(f.Weight.DemiBold if self.isChecked() else f.Weight.Normal)
         p.setFont(f)
         p.setPen(theme.qcolor(ink))
         p.drawText(r.adjusted(pad + 16 + 12, 0, -8, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
@@ -153,9 +150,9 @@ class MainWindow(QMainWindow):
         self.resize(1080, 720)
         self.setMinimumSize(QSize(760, 520))
         self.glass = False
-        self._glass_wanted = app.prefs.glass and native.can_glass()
-        if self._glass_wanted:
-            native.prepare(self)
+        self._glass_wanted = False  # one Curslink look: its own solid surfaces, no Mica or vibrancy behind
+        if sys.platform == "darwin" and native.can_glass():
+            native.prepare(self, glass=False)  # the sidebar runs up under the window's buttons
 
         from curslink.gui.pages.calibrate import CalibratePage
         from curslink.gui.pages.devices import DevicesPage
@@ -193,7 +190,7 @@ class MainWindow(QMainWindow):
         names.addWidget(self.role_label)
         brand.addLayout(names, 1)
         sv.addWidget(self.brand)
-        self.brand.setVisible(th.platform != "win")
+        self.brand.setVisible(True)
 
         self.nav = QButtonGroup(self)
         self.nav.setExclusive(True)
@@ -351,9 +348,8 @@ class MainWindow(QMainWindow):
     def refresh_side(self) -> None:
         configured = self.app.has_config()
         role = self.app.role
-        plat = theme.current().platform
         first_run = not configured or (bool(getattr(self, "pages", None)) and self.current_page() == "setup")
-        self.brand.setVisible(plat != "win" and not first_run)
+        self.brand.setVisible(not first_run)
         self.nav_box.setVisible(not first_run)
         self.welcome.setVisible(first_run)
         self.spacer.setVisible(not first_run)
