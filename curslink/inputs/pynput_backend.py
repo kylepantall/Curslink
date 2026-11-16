@@ -1012,7 +1012,8 @@ def _mac_warp(x: float, y: float) -> None:
         log.debug("couldn't warp the cursor", exc_info=True)
 
 
-def _mac_post_move(x: int, y: int, held: set[str], last: tuple[int, int] | None) -> bool:
+def _mac_post_move(x: int, y: int, held: set[str], last: tuple[int, int] | None,
+                   clicks: "ClickCounter | None" = None) -> bool:
     """Move the cursor to (x, y) with a real mouse event, as a mouse would:
     mouse-dragged while a button is held (so a window being dragged moves,
     and a drag of files begins and moves), mouse-moved otherwise (so what's
@@ -1036,6 +1037,14 @@ def _mac_post_move(x: int, y: int, held: set[str], last: tuple[int, int] | None)
         else:
             kind, button = Quartz.kCGEventMouseMoved, Quartz.kCGMouseButtonLeft
         ev = Quartz.CGEventCreateMouseEvent(None, kind, (float(x), float(y)), button)
+        if kind != Quartz.kCGEventMouseMoved:
+            # A real mouse's drag events carry the click count of the press
+            # that began them (1, or 2 for a double-click drag selecting by
+            # words); a created one may say 0, and an app can take that for
+            # a drag with no press behind it.
+            name = "left" if "left" in held else "right" if "right" in held else "middle"
+            count = clicks.held(name) if clicks is not None else 1
+            Quartz.CGEventSetIntegerValueField(ev, _MAC_CLICK_STATE, count)
         if last is not None:  # some apps (and games) read how far it moved
             Quartz.CGEventSetIntegerValueField(ev, _MAC_DELTA_X, int(x - last[0]))
             Quartz.CGEventSetIntegerValueField(ev, _MAC_DELTA_Y, int(y - last[1]))
@@ -1080,6 +1089,11 @@ class ClickCounter:
 
     def release(self, button: str) -> int:
         return self._held.pop(button, 1)
+
+    def held(self, button: str) -> int:
+        """The click count of ``button``'s press, while it's held (1 if this
+        counter didn't see it go down)."""
+        return self._held.get(button, 1)
 
 
 def _mac_double_click_interval() -> float:
@@ -1296,7 +1310,8 @@ class PynputSink:
         if sys.platform == "win32" and _win_move(x, y):
             return
         if sys.platform == "darwin" and self.post_moves:
-            if _mac_post_move(x, y, self.__dict__.get("_down", set()), self._posted_at):
+            if _mac_post_move(x, y, self.__dict__.get("_down", set()), self._posted_at,
+                              self.__dict__.get("_clicks")):
                 self._posted_at = (x, y)
                 return
         if sys.platform == "darwin":
@@ -1444,6 +1459,7 @@ def press_left_here() -> None:
         at = mac_cursor()
         for kind in (Quartz.kCGEventLeftMouseUp, Quartz.kCGEventLeftMouseDown):
             ev = Quartz.CGEventCreateMouseEvent(None, kind, at, Quartz.kCGMouseButtonLeft)
+            Quartz.CGEventSetIntegerValueField(ev, _MAC_CLICK_STATE, 1)
             Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
             time.sleep(0.02)
     except Exception:  # pragma: no cover - macOS only
@@ -1467,6 +1483,7 @@ def _drag_move(x: int, y: int) -> None:
             for px in (x + 1, x):
                 ev = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventLeftMouseDragged, (px, y),
                                                     Quartz.kCGMouseButtonLeft)
+                Quartz.CGEventSetIntegerValueField(ev, _MAC_CLICK_STATE, 1)
                 Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
                 time.sleep(0.03)
         except Exception:  # pragma: no cover - macOS only
@@ -1498,6 +1515,7 @@ def _drag_release(x: int, y: int) -> None:
 
             ev = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventLeftMouseUp, (x, y),
                                                 Quartz.kCGMouseButtonLeft)
+            Quartz.CGEventSetIntegerValueField(ev, _MAC_CLICK_STATE, 1)
             Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
         except Exception:  # pragma: no cover - macOS only
             log.warning("couldn't let go of the drag on this Mac", exc_info=True)
