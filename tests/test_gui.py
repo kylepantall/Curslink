@@ -2364,9 +2364,23 @@ def test_a_camera_saved_from_the_old_list_gets_the_name_that_goes_with_its_numbe
 
 
 # -- setting up, a step at a time (curslink.gui.guide) ---------------------------------------
+def test_first_run_on_a_mac_asks_for_its_permissions_before_the_guide_moves_on(desktop, qapp, monkeypatch):
+    from curslink import macperms
+
+    monkeypatch.setattr(macperms, "missing", lambda role: ["accessibility"])
+    w = desktop.window
+    w.pages["setup"].create()
+    qapp.processEvents()
+    # Status asks for the permissions; the guide is on all the same, waiting at its devices step
+    assert w.stack.currentWidget() is w.pages["status"] and desktop.prefs.guide == "devices"
+    assert w.guide_bar.isVisibleTo(w) and "Add your other devices" in w.guide_bar.heading.text()
+
+
 def test_first_run_goes_on_to_the_guide_and_each_step_says_where_it_stands(desktop, qapp, monkeypatch):
+    from curslink import macperms
     from curslink.gui import guide
 
+    monkeypatch.setattr(macperms, "missing", lambda role: [])  # a Mac asks for its permissions first, below
     w = desktop.window
     assert not w.guide_bar.isVisibleTo(w)  # nothing to guide before this computer is set up
     w.pages["setup"].create()
