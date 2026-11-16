@@ -431,6 +431,25 @@ front of it shows the part it covers, live (`curslink.mirror`).
   it) and reports drags, side stretches and wheel zooms as `mirror_tune`
   frames; `MirrorHost.tune` turns them into `fit` changes. Save writes the
   `[[layout.fit]]` without a restart.
+- Line up from your seat (`curslink.seatalign`, `curslink.gui.seatalign`):
+  what the Layout page's "Line up from your seat…" opens, in place of
+  the free-form fine-tune. `Align` picks up to three spots on the front
+  screen's rim that are seen against the screen behind (two corners where
+  it can, and halfway between them), and the window walks through them:
+  the arrow keys move the whole picture at the first, turn and size it
+  about the first at the second, and draw it out along the edge at the
+  third. Each nudge is a `fit` command with the picture's four corners
+  (`quad`), `"keep": true` (the guides behind stay put) and `rings`
+  (`[x, y, radius, on]` per spot, the screen behind's pixels), which the
+  host passes on in the capture and show specs in OS pixels; both helpers
+  draw them (`paint_guides(rings=...)`), with "Look here" by the one being
+  joined. With a desk a live line-up solved (`seat.json`), two joined spots
+  are two lines back to the eyes: `seatalign.eye_from` finds where they
+  meet, `seat.joined_shape` gives the picture's shape from there for the
+  third spot, and `seat.apply_joined` saves the fit as joined, aims the
+  desk and every other overlap from the eyes, and gives this one the
+  `eye`/`depth` head tracking follows. An older agent or the phone app
+  ignores `rings` and shows the plain guides.
 - Alignment guides while adjusting: the capture and show specs carry
   `guides`, the covered area when adjusting began (in the screen behind's
   OS pixels; it stays put so only the mirror's copy moves), and the show

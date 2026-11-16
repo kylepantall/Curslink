@@ -1174,7 +1174,7 @@ class LayoutPage(Page):
             return
         if isinstance(fit, dict):
             # Placed by one click: straight on to lining it up on the mirror, from there.
-            self._say_edge("Now line up the coloured lines on the mirror: drag it, pinch or scroll to size it.")
+            self._say_edge("Now sit back and close the rings: the arrow keys nudge the mirror.")
             self.tune_fit(behind, front, start=fit)
             if self.calibration is not None:
                 self.calibration.finished.connect(lambda _code: self.next_lineup())
@@ -1187,29 +1187,28 @@ class LayoutPage(Page):
         if cfg.get("layout", "mirror", False):
             # Clicks get close; the guides on the mirror itself get it right.
             self.pending_tune = (behind, front)
-            self._say_edge("Overlap lined up. Next, line up the coloured lines on the mirror…")
+            self._say_edge("Overlap placed. Next, line it up from your seat…")
             if not self.app.service.is_alive():
                 self.pending_tune = None
-                self._say_edge("Overlap lined up. Start linking, then use \u201cFine-tune\u2026\u201d to check it on the mirror.")
+                self._say_edge("Overlap placed. Start linking, then use \u201cLine up from your seat\u2026\u201d to join it by eye.")
             return
         self._say_edge("Overlap lined up. Mirror mode now shows exactly what the screen in front covers.")
 
     def tune_fit(self, behind: str, front: str, start: dict | None = None) -> None:
-        """Nudge the mirror by eye while it's showing (see curslink.gui.fittune)."""
-        from curslink.gui.fittune import FitTuneDialog
+        """Join the overlap by eye from the seat while its mirror is showing (curslink.gui.seatalign)."""
         from curslink.gui.service import RUNNING
 
         if self.calibration is not None:
             return
         if self.dirty:
-            self._say_edge("Save the layout first, then fine-tune the overlap.")
+            self._say_edge("Save the layout first, then line up the overlap.")
             return
         cfg = self.app.config()
         if not cfg.get("layout", "mirror", False):
-            self._say_edge("Turn on mirror mode first (Settings › Overlapping screens), then fine-tune it here.")
+            self._say_edge("Turn on mirror mode first (Settings › Overlapping screens), then line it up here.")
             return
         if self.app.service.state != RUNNING:
-            self._say_edge("Start linking first: you fine-tune the mirror while it's showing.")
+            self._say_edge("Start linking first: you line up the mirror while it's showing.")
             return
         items = {i.key: i for i in self.items}
         b, f = items.get(behind), items.get(front)
@@ -1226,15 +1225,54 @@ class LayoutPage(Page):
             # A line-up nowhere near where the layout puts it (an old one gone
             # wrong): start from the layout's spot, at its real size.
             start = {"reset": True}
-        dialog = FitTuneDialog({"key": behind, "name": b.device_name}, {"key": front, "name": f.device_name},
-                               saved, self.app.service.send, self, start=start)
-        dialog.saved.connect(lambda fit, b=behind, f=front: self.fit_tuned(b, f, fit))
+        if start is not None:
+            # Just placed by a click (or put back where the layout has it): the
+            # mirror goes there, and the seat step starts from where that is.
+            self.app.service.send("fit " + json.dumps({"behind": behind, "front": front, **start},
+                                                      separators=(",", ":")))
+            saved = None
+        from curslink import seat
+        from curslink.gui.seatalign import SeatAlignDialog
+
+        whole = None
+        if saved is not None:
+            whole = next((dict(t) for t in seat._config_fits_full(cfg) if (t["behind"], t["front"]) == (behind, front)),
+                         None)
+        dialog = SeatAlignDialog({"key": behind, "name": b.device_name, "size": b.layout_rect()[2:]},
+                                 {"key": front, "name": f.device_name, "size": f.layout_rect()[2:]},
+                                 whole, self.app.service.send, self, desk=seat.load())
+        dialog.saved.connect(lambda fit, joins, b=behind, f=front: self.seat_aligned(b, f, fit, joins))
         self.calibration = dialog
         dialog.finished.connect(lambda _code: setattr(self, "calibration", None))
         dialog.show()
         from curslink.gui.native import bring_to_front
 
         bring_to_front(dialog)
+
+    def seat_aligned(self, behind: str, front: str, fit: dict, joins) -> None:
+        """An overlap was joined by eye from the seat: keep it, and what it says of where the eyes are."""
+        from curslink import seat
+
+        cfg = self.app.config()
+        try:
+            out = seat.apply_joined(cfg, behind, front, fit, joins, desk=seat.load())
+        except Exception:  # noqa: BLE001 - the fit itself must be kept whatever the desk makes of it
+            log.exception("line up from your seat: couldn't work out the eye point")
+            cfg = self.app.config()
+            cfg.set_fit(behind, front, float(fit["x"]), float(fit["y"]), float(fit["scale"]), quad=fit.get("quad"))
+            cfg.save()
+            out = {"eye": None, "others": 0}
+        # This overlap the service already has (the fit command); others it aimed again need a restart.
+        self.app.config_saved(restart=bool(out.get("others")))
+        if out.get("eye") is not None:
+            self.app.service.send("head home")  # head tracking: this is where you sit
+        self.refresh_edges()
+        self.refresh_seat()
+        text = "Lined up from your seat and saved."
+        if out.get("eye") is not None:
+            text += " Curslink now knows where your eyes are"
+            text += f", and re-aimed {out['others']} other overlap{'s' if out['others'] != 1 else ''}." if out.get("others") else "."
+        self._say_edge(text)
 
     def fit_tuned(self, behind: str, front: str, fit) -> None:
         cfg = self.app.config()
@@ -1676,7 +1714,7 @@ class LayoutPage(Page):
                 row.addStretch(1)
                 row.addWidget(button("Line up again…" if done else "Line up overlap…", None,
                                      lambda _=False, b=behind.key, f=front.key: self.calibrate_fit(b, f)))
-                row.addWidget(button("Fine-tune…", None,
+                row.addWidget(button("Line up from your seat…", "primary" if not done else None,
                                      lambda _=False, b=behind.key, f=front.key: self.tune_fit(b, f)))
                 if done:
                     row.addWidget(button("Reset", None, lambda _=False, b=behind.key, f=front.key: self.reset_fit(b, f)))
