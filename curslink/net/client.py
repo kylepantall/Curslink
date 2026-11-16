@@ -31,6 +31,8 @@ LAN_ONLY_TIMEOUT_S = 6.0
 # Resend our camera's facing state this often, so the host can tell a
 # fresh report from a stale one.
 FACING_REFRESH_S = 1.0
+# Head angles from our camera go to the host this often at most (see report_pose).
+POSE_HZ = 12.0
 # Input from the host that means it's here, so the radio should stay awake
 # (see curslink.net.udp.PROBE_WARM_S).
 WARM_ON = frozenset({"enter", "leave", "move", "button", "scroll", "key", "drag"})
@@ -338,6 +340,7 @@ class AgentClient:
         self.facing_source: Callable[[], bool] | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._host_takes_facing = False
+        self._pose_sent = 0.0
         self._screens_sent: list[dict] = []  # what the host was last told (hello or screens)
         self.host_features: frozenset[str] = frozenset()
 
@@ -347,6 +350,17 @@ class AgentClient:
         if writer is None or not self._host_takes_facing or writer.transport.is_closing():
             return
         writer.write(encode("facing", facing=bool(facing)))
+
+    def report_pose(self, t: float, yaw: float, pitch: float) -> None:
+        """Where our camera sees the head turned, for a host that reads it
+        against this camera's own calibration: at most POSE_HZ a second."""
+        writer = self._writer
+        if writer is None or "pose" not in self.host_features or writer.transport.is_closing():
+            return
+        if t - self._pose_sent < 1.0 / POSE_HZ:
+            return
+        self._pose_sent = t
+        writer.write(encode("pose", yaw=round(yaw, 2), pitch=round(pitch, 2)))
 
     def send(self, t: str, **data) -> None:
         """A frame to the host now, if connected (dropped otherwise)."""

@@ -252,6 +252,23 @@ without a camera keep the host-only behaviour, and `confirm_with_agents =
 false` in `[gaze]` turns the check off. Agents only send `facing` to a
 host that lists it in `welcome.features`, so mixed versions keep working.
 
+**Every camera from its own angle.** "Facing it" only works for a camera
+you look straight into. A laptop at the side of the desk sees the look at
+its second monitor, or at the host's screen, as a head turned well away,
+and the host's own camera loses the face altogether with a bright window
+behind you. So an agent's camera also sends its head angles (`pose`
+frames, about 12 a second, to a host whose features list `"pose"`). While
+the Calibrate page runs, the host passes them to the app, which records
+each look as every camera saw it: `calibration.json` gains a `cameras`
+map (device id to the same targets-and-samples as the host's own). A look
+counts as recorded when any camera saw it. At run time
+`gaze.zones.JointClassifier` measures each camera against its own centres
+and takes the cameras that see you now together (root mean square of
+their distances), so a screen wins when they agree on it and the others
+carry on when one loses your face. A camera calibrated this way is part
+of that decision: it is no longer asked to confirm, and its `facing`
+reports move nothing by themselves.
+
 ### Any device's camera, on its own
 
 The host's camera isn't required. When it's off, uncalibrated, or has

@@ -129,6 +129,10 @@ Agent -> host
     pong         {n, ts}               ts: the ping's, echoed (times the round trip)
     facing       {facing}              the agent's own camera sees the user
                                        facing it (true) or not (false)
+    pose         {yaw, pitch}          where the agent's own camera sees the
+                                       head turned, in degrees, a few times
+                                       a second while it sees a face; to a
+                                       host whose features list "pose"
     file_result  {id, ok, ...}         dropped files saved (or why not)
     drag_out     {id, card} | {none}   what the drag leaving this device carries
     file_*                             its files, once the host fetches them
@@ -221,6 +225,7 @@ MESSAGE_TYPES = frozenset(
         "ping",
         "pong",
         "facing",
+        "pose",
         "look",
         "hint",
         "identify",
@@ -265,7 +270,7 @@ MESSAGE_TYPES = frozenset(
 BUTTONS = frozenset({"left", "right", "middle", "x1", "x2"})
 EFFECTS = frozenset({"pop", "blink", "none"})
 # What this host understands beyond the base protocol, sent in welcome.features.
-HOST_FEATURES = ("facing", "popups", "mirror", "netstats", "screens", "lineup")
+HOST_FEATURES = ("facing", "pose", "popups", "mirror", "netstats", "screens", "lineup")
 # App mirror (see curslink.appmirror): a host that takes app_drag, app_window
 # and app_view, and an agent that takes app_do and casts and shows app windows.
 APP_MIRROR_FEATURE = "app_mirror"
@@ -409,6 +414,11 @@ def _validate(msg: Message) -> None:
     elif t == "facing":
         if not isinstance(msg.data.get("facing"), bool):
             raise ProtocolError("facing.facing must be a boolean")
+    elif t == "pose":
+        for k in ("yaw", "pitch"):
+            v = msg.data.get(k)
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or not -360 <= v <= 360:
+                raise ProtocolError(f"pose.{k} must be an angle in degrees")
     elif t == "look":
         if msg.data.get("hide") is not True and not isinstance(msg.data.get("screen"), str):
             raise ProtocolError("look needs a screen, or hide")
