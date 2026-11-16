@@ -15,7 +15,7 @@ from typing import Callable
 from curslink import events
 from curslink.config import AgentConfig, HostConfig, PairingConfig
 from curslink.gaze.confirm import FacingDetector, GazeArbiter
-from curslink.gaze.zones import Calibration, GazeClassifier, Target
+from curslink.gaze.zones import Calibration, GazeClassifier, JointClassifier, Target
 from curslink.inputs.keys import KeyMaps, os_kind
 from curslink.net.client import AgentClient, AgentSession, NotReady
 from curslink.net.client import Target as ConnectTarget
@@ -1266,7 +1266,13 @@ def make_arbiter(cfg: HostConfig, router: Router) -> GazeArbiter:
     checked against agents' own cameras, or those cameras on their own."""
     classifier = None
     if cfg.gaze.enabled and cfg.gaze.calibration.exists():
-        classifier = GazeClassifier(Calibration.load(cfg.gaze.calibration), cfg.gaze.settings)
+        calibration = Calibration.load(cfg.gaze.calibration)
+        if calibration.views:
+            # Other devices' cameras were calibrated too: they all decide together.
+            classifier = JointClassifier(calibration, cfg.gaze.settings, local=cfg.device_id)
+            log.info("gaze: the cameras of %s decide together with this one", ", ".join(sorted(calibration.views)))
+        else:
+            classifier = GazeClassifier(calibration, cfg.gaze.settings)
     elif cfg.gaze.enabled:
         log.warning("%s does not exist; calibrate for the best gaze switching", cfg.gaze.calibration)
     arbiter = GazeArbiter(
@@ -1324,7 +1330,15 @@ def wire_agent_cameras(server: HostServer, arbiter: GazeArbiter) -> None:
         arbiter.on_facing(time.monotonic(), device_id, facing)
         events.emit("facing", device_id=device_id, facing=facing)
 
+    def on_pose(device_id: str, yaw: float, pitch: float) -> None:
+        if arbiter.suspended:
+            # The app is calibrating: it records this camera's view of each look beside the host's own.
+            events.emit("pose", device_id=device_id, yaw=yaw, pitch=pitch)
+            return
+        arbiter.on_pose(time.monotonic(), device_id, yaw, pitch)
+
     server.on_connect, server.on_disconnect, server.on_facing = on_connect, on_disconnect, on_facing
+    server.on_pose = on_pose
     for conn in server.connections.values():  # connected before gaze started
         arbiter.set_camera(conn.device_id, conn.camera)
     if server.connections:
@@ -1837,10 +1851,14 @@ class FacingCamera:
         self.tracker = tracker
         self.loop = loop
         self.refresh_s = refresh_s
+        # Told every sample's angles too, when someone reads them (an agent's host: client.report_pose).
+        self.pose: Callable[[float, float, float], None] | None = None
         self._ticker: asyncio.Task | None = None
 
     def on_sample(self, t: float, yaw: float, pitch: float) -> None:  # on the loop
         self._report(self.detector.update(t, yaw, pitch))
+        if self.pose is not None:
+            self.pose(t, yaw, pitch)
 
     def _report(self, changed: bool | None) -> None:
         if changed is None:
@@ -1888,6 +1906,7 @@ def start_facing(cfg: AgentConfig, client: AgentClient, loop: asyncio.AbstractEv
     tracker = HeadPoseTracker(on_sample, camera=resolve(cfg.gaze.camera, cfg.gaze.camera_name),
                               preview=cfg.gaze.preview)
     camera = FacingCamera(detector, client.report_facing, tracker, loop)
+    camera.pose = client.report_pose
     client.facing_source = lambda: detector.facing
     camera.start()
     log.info("using camera %d to tell the host when you're facing this device", cfg.gaze.camera)
