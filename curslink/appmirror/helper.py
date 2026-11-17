@@ -454,6 +454,12 @@ class AppCapture(Capture):
         if rect is not None:
             self._area(rect)
         if sys.platform == "win32":
+            if windows.minimised(win):
+                # Put away (it's put back in a moment): its picture would be
+                # black, and the screen where it was shows what's behind it.
+                # The mirror keeps its last picture meanwhile.
+                self.skip = True
+                return None
             got = win_print_window(wid)
             if got is not None and not mostly_black(got[0]):
                 self._area(got[1])

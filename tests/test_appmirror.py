@@ -1069,3 +1069,95 @@ def test_a_capture_sends_its_apps_icon_once_small_enough_for_a_frame(qapp, monke
     icons = [json.loads(ln.partition(" ")[2]) for ln in out if ln.startswith("app_icon ")]
     assert icons == [{"id": capture["id"], "png": "x" * 100}] and sizes == [128, 96, 64]
     helper.handle('mirror {"captures": [], "shows": []}')
+
+
+def use_this_computers_own_app():
+    """Notepad (on the PC, the host) cast to the Mac and put down there, the
+    pointer then moved into its mirror: input is on the PC, in Notepad."""
+    lay, transport, router, host, apps, lines, clock, ops, released = make()
+    router.clock = clock
+    router.capture.park_at = (960, 540)  # where the PC's cursor is held while input is away
+    router.on_button("left", True)
+    apps.on_drag("pc", {"window": dict(SAFARI, app="Notepad", wid=99)})
+    router.on_pointer(1919, 300)  # over the edge to the Mac: cast
+    router.on_button("left", False)
+    sid, = apps.sessions
+    s = apps.sessions[sid]
+    vx, vy, vw, vh = s.view
+    clock.t = 1.0
+    router.on_motion(vx + vw / 2 - router.x, vy + vh / 2 - router.y)
+    assert router.active_device == "pc" and apps.through == sid
+    return lay, transport, router, apps, clock, s
+
+
+def test_a_pc_cursor_report_from_before_it_was_put_in_the_app_is_dropped():
+    # Kyle, 0.4.124: going into the mirror of one of the PC's own apps, the
+    # first report was from the cursor still held in the middle of the screen:
+    # out of the app at once, in again, out, every 10-30 ms.
+    lay, transport, router, apps, clock, s = use_this_computers_own_app()
+    landed = (router.x, router.y)
+    clock.t = 1.05
+    router.on_pointer(963, 541)  # the held cursor, moved a little: before the move to the app
+    assert router.active_device == "pc" and apps.through == s.id
+    assert (router.x, router.y) == landed
+    router.on_pointer(landed[0] + 3, landed[1] + 2)  # the real cursor, where it was put
+    assert (router.x, router.y) == (landed[0] + 3, landed[1] + 2) and apps.through == s.id
+    clock.t = 1.1
+    router.on_pointer(963, 541)  # now that is the pointer moving
+    assert apps.through != s.id or (router.x, router.y) == (963, 541)
+
+
+def test_pushing_on_the_pc_screens_edge_in_its_own_app_comes_out_of_the_app():
+    # The window against the PC's left edge: pushing on it there is moving out
+    # of the app that way (into its mirror's ring on the Mac), not wherever the
+    # PC screen's edge leads, nor stuck.
+    lay, transport, router, apps, clock, s = use_this_computers_own_app()
+    s.rect = (0.0, s.rect[1], s.rect[2], s.rect[3])
+    s.view = (2200, 288, 800, 600)  # the mirror clear of the Mac's edges
+    clock.t = 2.0
+    router.on_pointer(0, s.rect[1] + 100)
+    assert router.active_device == "mac" and apps.through is None
+    vx = s.view[0]
+    assert router.x == vx - LAND_PX
+
+
+def test_a_cast_window_minimised_where_it_runs_is_put_back_and_not_taken_for_closed():
+    calls, reports, put_back = [], [], []
+    rects = {"a": [1, 2, 3, 4]}
+    clock = Clock()
+
+    def unmin(w, r):
+        if r is None or r[0] <= -30000:
+            put_back.append(w["k"])
+            return True
+        return False
+
+    watch = CastWatch(lambda i, r: reports.append((i, r)), now, lambda d, f: calls.append(f),
+                      rect=lambda w: rects.get(w["k"]), unmin=unmin, clock=clock)
+    watch.set({"a": {"k": "a", "os": [1, 2, 3, 4]}})
+    calls.pop(0)()
+    rects["a"] = [-32000, -32000, 160, 28]  # Windows: minimised
+    calls.pop(0)()
+    assert put_back == ["a"] and reports == []
+    unmin_off = watch.unmin
+    watch.unmin = lambda w, r: False
+    rects.clear()  # still on its way back (macOS: not on screen yet)
+    clock.t = 1.0
+    calls.pop(0)()
+    assert reports == []
+    rects["a"] = [1, 2, 3, 4]
+    calls.pop(0)()
+    assert reports == []  # back where it was
+    watch.unmin = unmin_off
+
+
+def test_the_device_puts_back_a_minimised_cast_window():
+    ops = Ops()
+    ops.undo_minimise = lambda w: True
+    dev = AppMirrorDevice(lambda t, **d: None, now, lambda d, f: None, ops)
+    assert dev._undo_min({"wid": 1}, [-32000, -32000, 160, 28])
+    ops.window_rect = lambda w: [10, 10, 100, 100]
+    assert not dev._undo_min({"wid": 1}, [10, 10, 100, 100])
+    # A parked Mac window is reported at home: where it really is says.
+    ops.window_rect = lambda w: None
+    assert dev._undo_min({"wid": 1}, [10, 10, 100, 100])
