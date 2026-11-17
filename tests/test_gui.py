@@ -2519,3 +2519,51 @@ def test_calibrating_records_a_look_only_another_devices_camera_saw(desktop, qap
     assert page.results[name] == (2.0, -5.0) and getattr(page, "retry", None) is None
     assert Cal.calibration.centroids("mac") == {target: (2.0, -5.0)} and not Cal.calibration.centroids()
     page.cancel()
+
+
+def test_mac_window_moves_by_its_top_strip(desktop, qapp, monkeypatch):
+    """macOS: the window's widgets run up under its buttons, so presses on
+    the top strip that no widget takes have to move the window (0.4.125
+    couldn't be dragged by its title bar at all)."""
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+
+    from curslink.gui import native, theme
+
+    moves, zooms = [], []
+    monkeypatch.setattr(native, "start_move", lambda w: moves.append(w) or True)
+    monkeypatch.setattr(native, "title_double_click", lambda w: zooms.append(w))
+    w = desktop.window
+    w.unified_title = True
+    w.pages["setup"].create()
+    w.show_page("status")
+    w.show()
+    qapp.processEvents()
+
+    def press(point, double=False):
+        target = w.childAt(point) or w
+        local = target.mapFrom(w, point)
+        if double:
+            QTest.mouseDClick(target, Qt.MouseButton.LeftButton, pos=local)
+        else:
+            QTest.mousePress(target, Qt.MouseButton.LeftButton, pos=local)
+            QTest.mouseRelease(target, Qt.MouseButton.LeftButton, pos=local)
+        qapp.processEvents()
+
+    top = QPoint(w.side.width() + 200, 10)  # the empty top of the page
+    press(top)
+    assert moves == [w]
+    press(QPoint(w.side.width() + 200, theme.MAC_TOP + 200))  # page body: no move
+    assert moves == [w]
+    nav = w.nav_buttons["status"]
+    w.side.layout().setContentsMargins(10, 0, 10, 12)  # a button in the strip keeps its press
+    qapp.processEvents()
+    at = nav.mapTo(w, QPoint(5, 5))
+    if at.y() < theme.MAC_TOP:
+        press(at)
+        assert moves == [w]
+    press(top, double=True)
+    assert zooms == [w]
+    w.unified_title = False  # Windows and Linux keep their own title bars
+    press(top)
+    assert len(moves) <= 2
