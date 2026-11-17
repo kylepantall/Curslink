@@ -716,7 +716,7 @@ class GripRing(QWidget):
                 d = math.hypot(at.x() - c.x(), at.y() - c.y())
                 if d <= best:
                     near, best = name, d
-        else:
+        elif self.drag is not None:
             near = self.drag[0] if len(self.drag[0]) == 2 else None
         if near != self.near:
             self.near = near
