@@ -172,7 +172,7 @@ def test_dragging_a_window_over_the_edge_casts_it_and_puts_the_real_one_back():
     assert show["app"] is True and show["label"] == "Safari · MacBook"
     x, y, w, h = show["os"]
     assert (w, h) == (800, 600) and show["ratio"] == pytest.approx(800 / 600, abs=1e-4)
-    assert (x, y) == (1920 - 800, 300 - 12) and show["carried"] is True and show["corner"] == 10
+    assert (x, y) == (1920 - 800, 300 - 12) and show["carried"] is True and show["corner"] == 12
 
 
 def test_the_mirror_follows_the_pointer_until_the_button_comes_up():
@@ -1182,3 +1182,123 @@ def test_ring_look_while_the_pointer_is_in_the_app_shows_no_handle(qapp):
     ring.near = "rb"
     ring.look()
     assert ring.near is None
+
+
+def test_full_screen_leaves_the_menu_bar_dock_and_taskbar_and_lets_the_pointer_to_them():
+    # Kyle, 0.4.125: a full screen mirror covered the Mac's menu bar and Dock.
+    lay, transport, router, host, apps, lines, clock, ops, released = put_down()
+    sid, = apps.sessions
+    # The helper showing it says what part of its screen apps fill (no taskbar).
+    apps.local.helper_line('app_view {"id": "%s", "work": [0, 0, 1920, 1040]}' % sid)
+    apps.on_message("mac", "app_window", {"id": sid, "full": True})
+    s = apps.sessions[sid]
+    assert s.view == (0, 0, 1920, 1040)
+    show, = last_state(lines)["shows"]
+    assert show["os"] == [0, 0, 1920, 1040]
+    # In the app, down past its bottom: onto the taskbar, not held in the app.
+    router.on_pointer(900, 500)
+    assert router.active_device == "mac" and apps.through == sid
+    clock.t = 3.0
+    router.on_motion(0, 2000)
+    assert router.active_device == "pc" and apps.through is None and router.y >= 1040
+
+
+def test_a_screen_said_after_it_filled_it_fits_the_mirror_to_its_work_area():
+    lay, transport, router, host, apps, lines, clock, ops, released = put_down()
+    sid, = apps.sessions
+    apps.on_message("mac", "app_window", {"id": sid, "full": True})
+    assert apps.sessions[sid].view == (0, 0, 1920, 1080)
+    apps.local.helper_line('app_view {"id": "%s", "work": [0, 0, 1920, 1040]}' % sid)
+    assert apps.sessions[sid].view == (0, 0, 1920, 1040)
+
+
+def test_the_apps_minimise_button_minimises_its_mirror_and_its_taskbar_button_brings_it_back():
+    # Kyle, 0.4.125: no way to put a mirror away but keep it on its screen.
+    lay, transport, router, host, apps, lines, clock, ops, released = put_down()
+    sid, = apps.sessions
+    s = apps.sessions[sid]
+    router.on_pointer(900, 688)  # into Safari, on its minimise button
+    assert router.active_device == "mac"
+    apps.on_message("mac", "app_window", {"id": sid, "min": True})
+    assert s.min and apps.through is None
+    # The pointer stays where it was on the PC's screen; the mirror is put away.
+    assert router.active_device == "pc" and (router.x, router.y) == pytest.approx((900, 688), abs=2)
+    show, = last_state(lines)["shows"]
+    assert show["min"] is True
+    clock.t = 2.0
+    router.on_pointer(902, 690)  # where the mirror was: nothing to go into
+    assert router.active_device == "pc"
+    # Its taskbar button pressed (or the Dock icon): back, and usable again.
+    apps.local.helper_line('app_view {"id": "%s", "min": false}' % sid)
+    assert not s.min and last_state(lines)["shows"][0]["min"] is False
+    router.on_pointer(900, 688)
+    assert router.active_device == "mac"
+
+
+def test_the_minimise_button_is_kept_from_the_app_and_minimises_the_mirror():
+    sent, ops = [], Ops()
+    win = {"wid": 7, "pid": 41}
+    ops.window_rect = lambda w: [100, 50, 800, 600]
+    ops.cursor = lambda: (160, 62)
+    ops.title_hit = lambda w, x, y: "min"
+    dev = AppMirrorDevice(lambda t, **d: sent.append((t, d)), now, lambda d, f: None, ops)
+    dev.on_captures([{"id": "app:x", "window": win, "os": [100, 50, 800, 600], "hide": True, "use": True}])
+    assert dev.intercept("left", True) and dev.intercept("left", False)
+    assert sent[-1] == ("app_window", {"id": "app:x", "min": True})
+
+
+def test_a_pc_apps_mirror_on_a_mac_has_the_macs_round_corners():
+    # Kyle, 0.4.125: "app frames aren't rounded": a PC app's 8 px corners,
+    # shown at its size on a Mac, were all but square.
+    lay = desk()
+    transport = Transport(platforms={"mac": "Darwin 24.1"})
+    lay, transport, router, host, apps, lines, clock, ops, released = make(lay, transport)
+    import curslink.appmirror as am
+
+    s = apps.start("mac", dict(SAFARI), lay.screen("pc", "main"))
+    s.window["scale"] = 2.0
+    apps.platform = lambda d: "windows" if d == "mac" else "mac"
+    s.view = (s.view[0], s.view[1], 400, 300)
+    assert apps._corner(s) == am.CORNERS["mac"]
+
+
+def test_this_computers_cursor_is_hidden_while_its_app_is_used_through_the_mirror():
+    lay, transport, router, apps, clock, s = use_this_computers_own_app()
+    hidden = []
+    router.capture.set_cursor_hidden = hidden.append
+    s.view = (2200, 288, 800, 600)  # the mirror clear of the Mac's edges
+    clock.t = 2.0
+    # Out of the app onto the Mac (the mirror's ring), and back in.
+    vx, vy, vw, vh = s.view
+    router.on_pointer(s.rect[0] - 5, s.rect[1] + 100)
+    assert router.active_device == "mac"
+    router.on_motion(vx + 50 - router.x, vy + 100 - router.y)
+    assert router.active_device == "pc" and apps.through == s.id
+    assert hidden[-1] is True
+    # Into a mirrored app from the Mac: the Mac's cursor isn't parked away (it flashed).
+    assert "park" not in transport.of("leave", "mac")[-1]
+
+
+def test_helper_mirror_minimised_stays_put_away_and_says_its_screens_work_area(qapp):
+    from curslink.mirror.helper import MirrorHelper
+
+    out = []
+    helper = MirrorHelper(out.append)
+    show = {"id": "app:mac:7:1", "app": True, "screen": "main", "os": [100, 100, 400, 300], "ratio": 4 / 3,
+            "label": "Safari · MacBook", "edges": [], "hover": False, "corner": 10, "raise": 0, "carried": False}
+    helper.handle("mirror " + json.dumps({"captures": [], "shows": [show]}))
+    frame = "mirror_image " + json.dumps({"id": show["id"], "jpg": jpeg(40, 30), "w": 40, "h": 30})
+    helper.handle(frame)
+    window = helper.windows[show["id"]]
+    assert window.isVisible()
+    said = [json.loads(ln.partition(" ")[2]) for ln in out if ln.startswith("app_view ")]
+    assert any(isinstance(v.get("work"), list) and len(v["work"]) == 4 for v in said)
+    # Minimised (its minimise button, the host says): put away, and a new
+    # picture doesn't bring it back.
+    helper.handle("mirror " + json.dumps({"captures": [], "shows": [{**show, "min": True}]}))
+    assert not window.isVisible() or window.isMinimized()
+    helper.handle(frame)
+    assert not window.isVisible() or window.isMinimized()
+    # Back (its taskbar button, the Dock icon).
+    helper.handle("mirror " + json.dumps({"captures": [], "shows": [{**show, "min": False}]}))
+    assert window.isVisible() and not window.isMinimized()

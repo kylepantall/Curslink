@@ -1064,6 +1064,9 @@ class MirrorWindow(QWidget):
             if not pix.loadFromData(raw, "JPG"):
                 return
             self.pixmap, self.canvas, self.got = pix, None, {}
+        if getattr(self, "_min", False):
+            self.update()  # minimised (an app's mirror): kept for when it comes back
+            return
         if not self.isVisible() or self.closing_at:
             self.closing_at = 0.0
             if not self.isVisible():

@@ -239,6 +239,18 @@ class PynputCapture:
             return
         self._restart(wait)
 
+    def set_cursor_hidden(self, hidden: bool) -> None:
+        """While input is here (not grabbed): hide the cursor, or show it
+        again. In a mirror of one of this computer's own apps, the pointer is
+        drawn in the mirror on the other screen; this one's cursor, over the
+        app's invisible window here, is only in the way."""
+        if self._grabbed:
+            return
+        if self._mac:
+            _mac_cursor_visible(not hidden)
+        elif self._hider is not None:
+            (self._hider.hide if hidden else self._hider.show)()
+
     def _suppress_live(self, on: bool) -> bool:
         """Windows: hold input back (or stop) with the hooks already in,
         rather than new ones. True if that did it.
@@ -1177,10 +1189,12 @@ _mac_hides = 0     # CGDisplayHideCursor calls not yet matched by a show
 _mac_rehides = 0   # times it was found showing and hidden again, this time away
 # While hidden: how soon to look whether it's showing again (the first one
 # soon, after the system shortcuts are turned off), then how often.
-_MAC_HIDE_CHECKS_S = (0.05, 0.2)
+# (Every 0.05 s, not 0.2: going into a mirrored app, macOS shows it as the
+# mirror comes forward, and for 0.2 s it was a second pointer, Kyle 0.4.125.)
+_MAC_HIDE_CHECKS_S = (0.05, 0.05)
 # Hidden again this many times while away and still showing: macOS won't
 # have it, so stop (and say so) rather than pile up hides.
-_MAC_REHIDE_MAX = 50
+_MAC_REHIDE_MAX = 400  # (each time into a mirrored app can be one)
 
 
 def _mac_keep_hidden(gen: int) -> bool:

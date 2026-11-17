@@ -103,7 +103,7 @@ def _win_title_hit(win: dict, x: float, y: float) -> str | None:  # pragma: no c
     # WM_NCHITTEST, SMTO_ABORTIFHUNG, 60 ms
     if not u.SendMessageTimeoutW(wt.HWND(int(win["wid"])), 0x0084, 0, lparam, 0x0002, 60, ctypes.byref(out)):
         return None
-    return {9: "full", 2: "title"}.get(int(out.value))  # HTMAXBUTTON, HTCAPTION
+    return {9: "full", 8: "min", 2: "title"}.get(int(out.value))  # HTMAXBUTTON, HTMINBUTTON, HTCAPTION
 
 
 def _win_undo_full(win: dict) -> bool:  # pragma: no cover - Windows only
@@ -395,6 +395,8 @@ def _mac_title_hit(win: dict, x: float, y: float) -> str | None:  # pragma: no c
     _, sub = AX.AXUIElementCopyAttributeValue(el, "AXSubrole", None)
     if str(sub or "") in ("AXFullScreenButton", "AXZoomButton"):
         return "full"
+    if str(sub or "") == "AXMinimizeButton":
+        return "min"
     r = win.get("os") or [0, 0, 0, 0]
     info = _mac_info(int(win["wid"]))
     if info is not None:
@@ -585,7 +587,8 @@ def popups(win: dict) -> list[tuple[int, list[float]]]:
 
 def title_hit(win: dict, x: float, y: float) -> str | None:
     """What a press at (x, y) (OS pixels) would press on the window:
-    "full" (its full screen or maximise button), "title" (its title bar),
+    "full" (its full screen or maximise button), "min" (its minimise
+    button), "title" (its title bar),
     or None (anything else, or it can't be told)."""
     try:
         if sys.platform == "win32":

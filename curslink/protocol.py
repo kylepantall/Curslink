@@ -152,13 +152,13 @@ Agent -> host
     app_drag     {window} | {none}     App mirror: a window here is being dragged by
                                        its title bar (left held): {wid, pid, app,
                                        title, os, start, grab}; none when it's let go
-    app_window   {id, os} | {id, gone} | {id, full} | {id, icon}
+    app_window   {id, os} | {id, gone} | {id, full} | {id, min} | {id, icon}
                                        a cast window moved or changed size (OS
                                        pixels), or closed; full: the app's own full
                                        screen button (or a double click on its title
                                        bar) asked to fill the screen, or back; icon:
                                        the app's icon (base64 PNG)
-    app_view     {id, os} | {id, closed} | {id, full}
+    app_view     {id, os} | {id, closed} | {id, full} | {id, min} | {id, work} | {id, dpr}
                                        a mirrored app window here was resized or
                                        moved (OS pixels), or closed with its x;
                                        full: its tag's box (fill the screen or back)
