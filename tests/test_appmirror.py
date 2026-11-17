@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import sys
 
 import pytest
 
@@ -124,6 +125,10 @@ def make(lay=None, transport=None):
     released = []
     apps = AppMirrorHost(lay, router, transport, device, changed=host.refresh,
                          release_local=lambda: released.append(True), clock=clock, local_peer=local)
+    # The PC is a PC wherever the tests run (on a Mac runner this computer
+    # would have a menu bar, and its full screen mirrors stop below it).
+    platform = apps.platform
+    apps.platform = lambda d: "windows" if d == "pc" else platform(d)
     host.apps = apps
     router.portal = apps
     router.on_any_button = apps.on_button
@@ -750,8 +755,9 @@ def test_helper_mirror_is_solid_and_its_tag_fills_the_screen_with_it_and_back(qa
     helper.handle("mirror " + json.dumps({"captures": [], "shows": [show]}))
     helper.handle("mirror_image " + json.dumps({"id": show["id"], "jpg": jpeg(40, 30), "w": 40, "h": 30}))
     window = helper.windows[show["id"]]
-    # Never see-through, carried or not, nor while it first shows.
-    assert not window.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+    # Never see-through, carried or not, nor while it first shows (on a Mac
+    # it's clear only round its rounded corners: a mask doesn't cut a solid one).
+    assert window.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground) == (sys.platform == "darwin")
     assert window.windowOpacity() == 1.0
     window.tick()
     assert window.windowOpacity() == 1.0
