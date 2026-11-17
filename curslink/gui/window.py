@@ -151,8 +151,11 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(QSize(760, 520))
         self.glass = False
         self._glass_wanted = False  # one Curslink look: its own solid surfaces, no Mica or vibrancy behind
-        if sys.platform == "darwin" and native.can_glass():
-            native.prepare(self, glass=False)  # the sidebar runs up under the window's buttons
+        # macOS: the sidebar runs up under the window's buttons, so there's no
+        # title bar of the system's to drag; mousePressEvent stands in for it.
+        self.unified_title = sys.platform == "darwin" and native.can_glass()
+        if self.unified_title:
+            native.prepare(self, glass=False)
 
         from curslink.gui.pages.calibrate import CalibratePage
         from curslink.gui.pages.devices import DevicesPage
@@ -432,6 +435,24 @@ class MainWindow(QMainWindow):
             if hasattr(page, "theme_changed"):
                 page.theme_changed()
         self.update()
+
+    # -- moving the window by its top strip (macOS) ----------------------------
+    # Presses that no widget takes (labels, the sidebar, page backgrounds)
+    # come up to the window; buttons and fields keep theirs.
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if (self.unified_title and event.button() == Qt.MouseButton.LeftButton
+                and native.in_title_strip(self, event.position().toPoint()) and native.start_move(self)):
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
+        if (self.unified_title and event.button() == Qt.MouseButton.LeftButton
+                and native.in_title_strip(self, event.position().toPoint())):
+            event.accept()
+            native.title_double_click(self)
+            return
+        super().mouseDoubleClickEvent(event)
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
