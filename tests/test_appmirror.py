@@ -1161,3 +1161,24 @@ def test_the_device_puts_back_a_minimised_cast_window():
     # A parked Mac window is reported at home: where it really is says.
     ops.window_rect = lambda w: None
     assert dev._undo_min({"wid": 1}, [10, 10, 100, 100])
+
+
+def test_ring_look_while_the_pointer_is_in_the_app_shows_no_handle(qapp):
+    # The ring's timer asks where the pointer is 30 times a second; while it's
+    # in the app (the mirror has a pointer) and nothing is being dragged, that
+    # used to raise TypeError ('NoneType' object is not subscriptable) on
+    # every tick, flooding the helper's stderr (0.4.124/0.4.125 on a Mac).
+    from curslink.mirror.helper import MirrorHelper
+
+    helper = MirrorHelper(lambda line: None)
+    show = {"id": "app:pc:7:1", "app": True, "screen": "main", "os": [100, 100, 400, 300], "ratio": 4 / 3,
+            "label": "Notepad · PC", "edges": [], "hover": True, "corner": 10, "raise": 0}
+    helper.handle("mirror " + json.dumps({"captures": [], "shows": [show]}))
+    window = helper.windows[show["id"]]
+    ring = window.ring
+    assert ring is not None
+    window.pointer = (0.5, 0.5)
+    ring.drag = None
+    ring.near = "rb"
+    ring.look()
+    assert ring.near is None
