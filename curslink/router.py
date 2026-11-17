@@ -776,6 +776,11 @@ class Router:
                 if dragging_out:
                     self.drag_out(old)
                     self.transport.send(old, "leave", effect="none", x=exit_x, y=exit_y)
+                elif reason == "app":
+                    # Into a mirrored app from the screen showing it: its
+                    # cursor stays where it is, under the app's pointer drawn
+                    # there (parked at the edge, macOS flashed it into view).
+                    self.transport.send(old, "leave", effect="none", x=exit_x, y=exit_y)
                 else:
                     # Its own cursor stays behind, hidden but still hovering:
                     # left by an edge it sits on title bar buttons and taskbar
@@ -799,6 +804,11 @@ class Router:
                 self._armed_why = f"by {reason}"
                 self._pressing = None
             self.local_sink.move_to(ox, oy)
+            hide = getattr(self.capture, "set_cursor_hidden", None)
+            if hide is not None:
+                # In one of this computer's own apps through its mirror on
+                # another screen: the pointer is drawn there; here it's hidden.
+                hide(reason == "app" and getattr(self.portal, "through", None) is not None)
             if old != new:
                 park = getattr(self.capture, "park_at", None)
                 self._warped = (ox, oy, self.clock(), tuple(park) if park is not None else None)

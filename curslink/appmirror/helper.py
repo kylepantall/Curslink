@@ -319,10 +319,12 @@ class AppCapture(Capture):
         for px in ICON_SIZES if path else ():
             png = icon_png(path, px)
             if png is None:
-                return
+                break
             if len(png) <= MAX_ICON:
                 self.raw_out("app_icon " + json.dumps({"id": self.id, "png": png}, separators=(",", ":")))
+                print("app mirror: %s: sent its icon (%d px)" % (self.id, px), file=sys.stderr, flush=True)
                 return
+        print("app mirror: %s: no icon found for %r" % (self.id, path or pid), file=sys.stderr, flush=True)
 
     def grab(self) -> None:
         if not self.icon_sent:
@@ -910,16 +912,23 @@ class DockPresence:
             want = bool(self.windows)
             if want != self.on:
                 self.on = want
-                app.setActivationPolicy_(0 if want else 1)  # Regular / Accessory
+                ok = app.setActivationPolicy_(0 if want else 1)  # Regular / Accessory
+                # On stderr: the helper's own log only passes on warnings.
+                print("app mirror: Dock icon %s%s" % ("on" if want else "off", "" if ok else " (macOS said no)"),
+                      file=sys.stderr, flush=True)
                 if not want:
                     app.setApplicationIconImage_(None)
+                    self.icon_of = None
             if want:
                 latest = list(self.windows.values())[-1]
                 if latest.icon_png:
                     data = AppKit.NSData.dataWithBytes_length_(latest.icon_png, len(latest.icon_png))
                     image = AppKit.NSImage.alloc().initWithData_(data)
-                    if image is not None:
+                    if image is not None and getattr(self, "icon_of", None) != latest.icon_png:
                         app.setApplicationIconImage_(image)
+                        self.icon_of = latest.icon_png
+                        print("app mirror: Dock icon is now %s's" % (latest.spec.get("app_name") or "the app"),
+                              file=sys.stderr, flush=True)
             if not self._hooked:
                 self._hooked = True
                 QGuiApplication.instance().applicationStateChanged.connect(self._state)
@@ -928,8 +937,13 @@ class DockPresence:
 
     def _state(self, state) -> None:  # pragma: no cover - macOS only
         if state == Qt.ApplicationState.ApplicationActive:
+            # Its Dock icon clicked (or Cmd+Tab): minimised mirrors come back.
             for window in list(self.windows.values()):
-                if not window._gone:
+                if window._gone:
+                    continue
+                if window._min:
+                    window._set_min(False, tell=True)
+                else:
                     window._to_front()
 
 
@@ -991,6 +1005,19 @@ def win_taskbar_button(widget: QWidget, app: str) -> None:  # pragma: no cover -
         release(store)
 
 
+def win_round_corners(widget: QWidget, on: bool) -> bool:  # pragma: no cover - Windows only
+    """Windows 11: round the window's corners as Windows does its own
+    (DWMWA_WINDOW_CORNER_PREFERENCE). False where it can't (Windows 10)."""
+    try:
+        import ctypes
+
+        pref = ctypes.c_int(2 if on else 1)  # DWMWCP_ROUND / DWMWCP_DONOTROUND
+        return ctypes.windll.dwmapi.DwmSetWindowAttribute(int(widget.winId()), 33, ctypes.byref(pref),
+                                                          ctypes.sizeof(pref)) == 0
+    except Exception:
+        return False
+
+
 class AppWindow(MirrorWindow):
     """Another computer's app, in a window of its own with nothing around it."""
 
@@ -1005,6 +1032,11 @@ class AppWindow(MirrorWindow):
         self._gone = False
         self.icon_png: bytes = b""
         self._taskbar = False
+        # Minimised (the host says, spec "min"): to its taskbar button on
+        # Windows; hidden on a Mac, back when the Dock icon is clicked.
+        self._min = False
+        self._work_said: tuple | None = None  # the screen's work area last told
+        self._dwm_round = False  # Windows 11 rounds it (DWM), so no mask
         super().__init__(dict(spec, tune=False), out)
         flags = (Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowDoesNotAcceptFocus
                  | Qt.WindowType.NoDropShadowWindowHint)
@@ -1016,9 +1048,13 @@ class AppWindow(MirrorWindow):
         # Solid: no see-through window (on Windows a see-through window is
         # redrawn by the processor, every frame), and its round corners cut
         # out by a mask instead.
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
-        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, False)
-        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+        # On a Mac a mask doesn't cut a solid window's corners (they showed
+        # square, Kyle 0.4.125): there it's see-through round its rounded
+        # picture (cheap, the window server composites every window anyway).
+        clear = sys.platform == "darwin"
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, clear)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, clear)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, not clear)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
         self._masked: tuple | None = None
         self.setWindowTitle(str(spec.get("label") or "App"))
@@ -1051,9 +1087,37 @@ class AppWindow(MirrorWindow):
         title = str(spec.get("label") or "App")
         if title != self.windowTitle():
             self.setWindowTitle(title)
+        self._set_min(bool(spec.get("min")))
         self._mask()
         self._place_tag()
         return ok
+
+    def _set_min(self, on: bool, tell: bool = False) -> None:
+        """Minimised, or back. ``tell``: done here (its taskbar button, the
+        Dock), so the host is told."""
+        if on == self._min:
+            return
+        self._min = on
+        if tell:
+            self._tell_view(min=on)
+        if on:
+            for part in (self.ring, self.tag, self.sprite):
+                if part is not None:
+                    part.hide()
+            if sys.platform == "win32":
+                if self.isVisible() and not self.windowState() & Qt.WindowState.WindowMinimized:
+                    self.showMinimized()
+            else:
+                self.hide()  # a frameless Mac window can't go into the Dock; the Dock icon brings it back
+            DOCK.update(self, not self._gone)
+            return
+        if self.windowState() & Qt.WindowState.WindowMinimized:
+            self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized)
+        if self.pixmap is not None or (self.canvas is not None and self.got.get("whole")):
+            self.showNormal()
+            QTimer.singleShot(0, self._to_front)
+            QTimer.singleShot(0, self._place_tag)
+        DOCK.update(self, not self._gone)
 
     def set_icon(self, png_b64: str) -> None:
         """The app's icon: its taskbar button's (and the Dock's, on a Mac)."""
@@ -1069,7 +1133,7 @@ class AppWindow(MirrorWindow):
         DOCK.update(self, not self._gone)
 
     def _place_tag(self) -> None:
-        if self.tag is None:
+        if self.tag is None or self._min:
             return
         if self.ring is not None:
             if self.isVisible() and not self.spec.get("carried") and not self.spec.get("full"):
@@ -1100,15 +1164,31 @@ class AppWindow(MirrorWindow):
             self._place_tag()
             # Its screen's pixel ratio (a Windows screen's scaling): the host
             # sizes the app for it, and sends pictures at its pixels.
-            sc = self.screen()
-            if sc is not None:
-                self._tell_view(dpr=round(float(sc.devicePixelRatio() or 1.0), 3))
+            self._tell_screen()
+
+    def _tell_screen(self) -> None:
+        """Its screen's pixel ratio (a Windows screen's scaling: the host
+        sizes the app for it, and sends pictures at its pixels), and the part
+        of it apps fill (not the menu bar and Dock, nor the taskbar: a full
+        screen mirror leaves those, as the computer's own apps do)."""
+        sc = self.screen()
+        if sc is None:
+            return
+        a = sc.availableGeometry()
+        work = logical_to_os(self.spec, a.x(), a.y(), a.width(), a.height())
+        key = (id(sc), tuple(work))
+        if key == self._work_said:
+            return
+        self._work_said = key
+        self._tell_view(dpr=round(float(sc.devicePixelRatio() or 1.0), 3), work=work)
 
     def _to_front(self) -> None:
         full = bool(self.spec.get("full"))
         if self.ring is not None and self.ring.isVisible():
             bring_to_front(self.ring, self._carried)
-        bring_to_front(self, self._carried or full, over_menus=full)
+        # Filling its screen it's an ordinary window, as a full app is: the
+        # menu bar, the Dock and the taskbar stay over it, other apps can come in front.
+        bring_to_front(self, self._carried)
         if self.tag is not None and self.tag.isVisible():
             self.tag.raise_()
         if self.sprite is not None and self.sprite.isVisible():
@@ -1116,14 +1196,15 @@ class AppWindow(MirrorWindow):
 
     def changeEvent(self, e) -> None:  # noqa: N802
         super().changeEvent(e)
-        # Its taskbar button pressed: Windows minimises it. A mirror isn't
-        # put away like that: it comes to the front instead.
+        # Its taskbar button pressed: Windows minimises it, or brings it back,
+        # as any app's window. The host's told (the pointer doesn't go into
+        # a mirror that's put away).
         from PySide6.QtCore import QEvent
 
-        if e.type() == QEvent.Type.WindowStateChange and self.windowState() & Qt.WindowState.WindowMinimized:
-            self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized)
-            self.showNormal()
-            QTimer.singleShot(0, self._to_front)
+        if e.type() == QEvent.Type.WindowStateChange and not self._gone:
+            mini = bool(self.windowState() & Qt.WindowState.WindowMinimized)
+            if mini != self._min:
+                self._set_min(mini, tell=True)
 
     def closed(self) -> None:
         self._tell_view(closed=True)
@@ -1154,7 +1235,15 @@ class AppWindow(MirrorWindow):
         if key == self._masked:
             return
         self._masked = key
-        if corner <= 0:
+        if corner <= 0 or sys.platform == "darwin":
+            self.clearMask()  # (a Mac's is see-through round its rounded corners)
+            if sys.platform == "win32" and self._dwm_round:
+                win_round_corners(self, False)
+                self._dwm_round = False
+            return
+        if sys.platform == "win32" and win_round_corners(self, True):
+            # Windows 11 rounds it, smoothly, as it does its own windows.
+            self._dwm_round = True
             self.clearMask()
             return
         path = QPainterPath()
@@ -1167,6 +1256,8 @@ class AppWindow(MirrorWindow):
 
     def moveEvent(self, e) -> None:  # noqa: N802
         super().moveEvent(e)
+        if self.isVisible():
+            self._tell_screen()  # onto another screen: its scaling, its work area
         if self.ring is not None and self.ring.isVisible():
             self.ring.place()
 
@@ -1218,13 +1309,22 @@ class AppWindow(MirrorWindow):
         if self.pixmap is None and not whole:
             return
         p = QPainter(self)
-        p.fillRect(self.rect(), QColor(0, 0, 0))  # solid: what the picture doesn't cover
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        corner = float(self.spec.get("corner") or 0)
+        if self.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground):
+            # Clear round it; solid inside its rounded corners.
+            p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+            p.fillRect(self.rect(), Qt.GlobalColor.transparent)
+            p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+            back = QPainterPath()
+            back.addRoundedRect(QRectF(self.rect()), corner, corner)
+            p.fillPath(back, QColor(0, 0, 0))
+        else:
+            p.fillRect(self.rect(), QColor(0, 0, 0))  # solid: what the picture doesn't cover
         pic = QRectF(self.canvas.rect()) if whole else QRectF(self.pixmap.rect())
         r = fit_in(QRectF(self.rect()), pic.width(), pic.height())
         p.save()
-        corner = float(self.spec.get("corner") or 0)
         if corner > 0:
             path = QPainterPath()
             path.addRoundedRect(r, corner, corner)

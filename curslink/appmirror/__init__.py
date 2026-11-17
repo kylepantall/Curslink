@@ -55,7 +55,8 @@ answers, with ids that start ``app:``. Besides those:
 * ``app_view`` (device -> host): a mirror there was resized, or closed, or
   its tag's box pressed (``full``);
 * ``app_window`` with ``full``: the app's full screen button, or a double
-  click on its title bar (the press never reaches the app); with ``icon``:
+  click on its title bar (the press never reaches the app); with ``min``:
+  its minimise button (its mirror is minimised); with ``icon``:
   the app's icon, sent on as ``app_icon`` (host -> the device showing it);
 * ``app_do`` (host -> device): bring a cast window to the front, put it
   back where it was, resize it, stop watching it.
@@ -114,7 +115,7 @@ NEAR_PX = 40
 WALL_PX = 48
 # A window's own rounded corners on its computer (its OS pixels): the
 # mirror is cut the same way, so nothing square shows behind them.
-CORNERS = {"mac": 10, "windows": 8}
+CORNERS = {"mac": 12, "windows": 8}
 # Moving a carried mirror sends its new place at most this often.
 PLACE_EVERY_S = 1 / 60
 # Frames a second: the app the pointer is in (at least, and at most), and
@@ -230,7 +231,8 @@ class CastWatch:
     def __init__(self, report: Callable[[str, list | None], None], submit, call_later,
                  rect: Callable[[dict], list | None] | None = None,
                  full: Callable[[dict], bool] | None = None, on_full: Callable[[str], None] = lambda sid: None,
-                 unmin: Callable[[dict, list | None], bool] | None = None, clock: Callable[[], float] = time.monotonic):
+                 unmin: Callable[[dict, list | None], bool] | None = None, clock: Callable[[], float] = time.monotonic,
+                 on_min: Callable[[str], None] = lambda sid: None):
         from curslink.appmirror import windows
 
         self.report = report
@@ -246,6 +248,7 @@ class CastWatch:
         # back (True). Until it's back (MIN_GRACE_S), where it is isn't said,
         # and its not being on screen isn't its being closed.
         self.unmin = unmin
+        self.on_min = on_min
         self.clock = clock
         self.back_by: dict[str, float] = {}
         self.windows: dict[str, dict] = {}
@@ -296,6 +299,7 @@ class CastWatch:
                     log.info("app mirror: %s was minimised where it runs: put back (its mirror is its window)",
                              self.windows[i].get("app") or "an app")
                     self.back_by[i] = now + MIN_GRACE_S
+                    self.on_min(i)  # its mirror is minimised instead
                     continue
                 if now < self.back_by.get(i, 0.0) and (r is None or not _on_desk(r)):
                     continue  # on its way back
@@ -335,7 +339,8 @@ class AppMirrorDevice:
         self.drags = WindowDragWatch(self._dragged, submit, call_later, lambda: self.ops.window_at_cursor(self.skip()),
                                      self.ops.window_rect)
         self.casts = CastWatch(self._cast_moved, submit, call_later, self._rect, self._undo_full,
-                               lambda sid: self.send("app_window", id=sid, full=True), self._undo_min)
+                               lambda sid: self.send("app_window", id=sid, full=True), self._undo_min,
+                               on_min=lambda sid: self.send("app_window", id=sid, min=True))
         self.submit = submit
         self.cast: dict[str, dict] = {}
         # Windows hidden here while their app is cast: id -> [window, home, in use].
@@ -403,6 +408,15 @@ class AppMirrorDevice:
         last = self._title_at
         double = (what == "title" and last is not None and last[0] == sid and now - last[1] <= DOUBLE_S
                   and abs(at[0] - last[2]) <= DOUBLE_PX and abs(at[1] - last[3]) <= DOUBLE_PX)
+        if what == "min":
+            # Its minimise button: its mirror goes to its taskbar button (or
+            # the Dock) where it's shown; the real window stays (its picture
+            # is what the mirror shows when it comes back).
+            self._title_at = None
+            self._kept = True
+            log.info("app mirror: %s's minimise button: its mirror is minimised", win.get("app") or "an app")
+            self.send("app_window", id=sid, min=True)
+            return True
         if what == "full" or double:
             self._title_at = None
             self._kept = True
@@ -592,6 +606,7 @@ class AppSession:
     # Filling its screen: (where it was, the app's size then, k then) to go back to.
     full: tuple | None = None
     icon: str = ""            # the app's icon (base64 PNG), once its computer sends it
+    min: bool = False         # minimised where it's shown (to its taskbar button, or the Dock)
     started_at: float = field(default_factory=time.monotonic)
 
     @property
@@ -639,6 +654,9 @@ class AppMirrorHost:
         self.names = {d.id: d.name for d in layout.devices.values()}
         self.hide = True  # hide a cast app's window on its own computer
         self.dprs: dict[tuple[str, str], float] = {}  # (device, screen) -> its pixel ratio, as helpers say
+        # (device, screen) -> the part of it apps fill (layout px): all but the
+        # menu bar and the Dock, or the taskbar, as the helper showing a mirror there says.
+        self.works: dict[tuple[str, str], tuple[float, float, float, float]] = {}
 
     # -- who can ------------------------------------------------------------------
     def is_phone(self, device_id: str) -> bool:
@@ -726,7 +744,7 @@ class AppMirrorHost:
         """The mirror whose ring (just outside it, where it's resized) is at
         (x, y) on ``screen``, if any."""
         for s in reversed(list(self.sessions.values())):
-            if s.target != screen or s.full is not None:
+            if s.target != screen or s.full is not None or s.min:
                 continue
             vx, vy, vw, vh = s.view
             near = vx - RESIZE_PX <= x < vx + vw + RESIZE_PX and vy - RESIZE_PX <= y < vy + vh + RESIZE_PX
@@ -807,8 +825,11 @@ class AppMirrorHost:
             # beside it and in again (the title bar and tabs are up there).
             # Unless that edge leads on (to another screen, or another
             # device): then out through it, as from a full screen app.
-            walled = ((u < 0 and vx - t.x <= WALL_PX) or (u >= 1 and t.right - (vx + vw) <= WALL_PX)
-                      or (v < 0 and vy - t.y <= WALL_PX) or (v >= 1 and t.bottom - (vy + vh) <= WALL_PX))
+            # Filling the screen, the gaps left are the menu bar and the Dock
+            # (or the taskbar): those are always reached, as from any app.
+            wall = 1 if s.full is not None else WALL_PX
+            walled = ((u < 0 and vx - t.x <= wall) or (u >= 1 and t.right - (vx + vw) <= wall)
+                      or (v < 0 and vy - t.y <= wall) or (v >= 1 and t.bottom - (vy + vh) <= wall))
             if walled:
                 beyond = self._beyond(t, vx + u * vw, vy + v * vh, u, v)
                 if beyond is not None:
@@ -830,7 +851,7 @@ class AppMirrorHost:
         if screen is None:
             return None
         for s in reversed(list(self.sessions.values())):
-            if s.target != screen or not self.router.available(s.source) or s.id == self.resizing:
+            if s.target != screen or not self.router.available(s.source) or s.id == self.resizing or s.min:
                 continue
             vx, vy, vw, vh = s.view
             if not (vx + GRIP <= x < vx + vw - GRIP and vy + GRIP <= y < vy + vh - GRIP):
@@ -881,6 +902,7 @@ class AppMirrorHost:
                 return
             if s.target != r.screen:
                 s.target = r.screen  # carried onto another screen of the same device
+                self._rescale(s)
             now = self.clock()
             if now - self._placed_at < PLACE_EVERY_S:
                 return
@@ -893,7 +915,7 @@ class AppMirrorHost:
             if self.through == s.id:
                 continue
             vx, vy, vw, vh = s.view
-            near = (r.screen == s.target and vx - NEAR_PX <= r.x < vx + vw + NEAR_PX
+            near = (not s.min and r.screen == s.target and vx - NEAR_PX <= r.x < vx + vw + NEAR_PX
                     and vy - NEAR_PX <= r.y < vy + vh + NEAR_PX)
             self._hover(s, near)
 
@@ -1065,6 +1087,11 @@ class AppMirrorHost:
             # Its own full screen button (or its title bar double clicked).
             self.set_full(s, s.full is None)
             return
+        if data.get("min"):
+            # Its own minimise button (or it was minimised where it runs, and
+            # put back there): its mirror goes to its taskbar button, or the Dock.
+            self.set_min(s, True)
+            return
         r = _rect(data.get("os"))
         if r is None:
             return
@@ -1100,6 +1127,11 @@ class AppMirrorHost:
             # Its tag's box: fill the screen, or back.
             self.set_full(s, s.full is None)
             return
+        work = _rect(data.get("work"))
+        if work is not None:
+            self._got_work(s, device_id, work)
+        if isinstance(data.get("min"), bool):
+            self.set_min(s, data["min"], tell=False)
         if isinstance(data.get("dpr"), (int, float)) and 0.5 <= data["dpr"] <= 4:
             self._got_dpr(s, float(data["dpr"]))
         r = _rect(data.get("os"))
@@ -1142,13 +1174,9 @@ class AppMirrorHost:
         t = s.target
         if on:
             s.full = (s.view, (s.rect[2], s.rect[3]), s.k)
-            s.view = (t.x, t.y, t.width, t.height)
-            k = self._k(s.source, s.window, t)
-            aw, ah = self._app_size(s, t.width / k, t.height / k)
-            s.k = t.width / max(1.0, aw)
-            if self.native(s.source):
-                self._do(s, "resize", size=[round(aw), round(ah)])
-            log.info("app mirror: %s fills %s/%s (the app at %.0fx%.0f)", s.name, t.device_id, t.id, aw, ah)
+            aw, ah = self._fill(s)
+            log.info("app mirror: %s fills %s/%s at %s (the app at %.0fx%.0f)", s.name, t.device_id, t.id,
+                     [round(v) for v in s.view], aw, ah)
         else:
             view, size, k = s.full
             s.full = None
@@ -1159,6 +1187,90 @@ class AppMirrorHost:
             log.info("app mirror: %s back to its own size", s.name)
         s.key += 1
         self.changed()
+
+    def _fill(self, s: AppSession) -> tuple[float, float]:
+        """Size a full mirror: all of the screen apps fill there (the menu
+        bar and the Dock, or the taskbar, stay, as for its own apps' full
+        windows), the app sized to that shape."""
+        t = s.target
+        s.view = self.work_area(t)
+        k = self._k(s.source, s.window, t)
+        aw, ah = self._app_size(s, s.view[2] / k, s.view[3] / k)
+        s.k = min(s.view[2] / max(1.0, aw), s.view[3] / max(1.0, ah))
+        if self.native(s.source):
+            self._do(s, "resize", size=[round(aw), round(ah)])
+        return aw, ah
+
+    def work_area(self, t) -> tuple[float, float, float, float]:
+        """The part of screen ``t`` an app fills (layout px): all of it but
+        its menu bar and Dock, or its taskbar, as its helper said; until it
+        says, all but a Mac's menu bar."""
+        got = self.works.get((t.device_id, t.id))
+        if got is not None:
+            return got
+        top = MENU_BAR.get(self.platform(t.device_id), 0)
+        return (float(t.x), float(t.y + top), float(t.width), float(t.height - top))
+
+    def _got_work(self, s: AppSession, device_id: str, os_rect) -> None:
+        ox, oy, w, h = os_rect
+        screen = self._screen_os(device_id, ox + w / 2, oy + h / 2) or s.target
+        if w < 100 or h < 100:
+            return
+        lx, ly = screen.from_os(ox, oy)
+        lx, ly = max(lx, screen.x), max(ly, screen.y)
+        w, h = min(w, screen.right - lx), min(h, screen.bottom - ly)
+        area = (float(lx), float(ly), float(w), float(h))
+        key = (screen.device_id, screen.id)
+        if self.works.get(key) == area:
+            return
+        self.works[key] = area
+        if s.full is not None and s.target == screen and s.view != area:
+            self._fill(s)  # filling it already (sized before its helper said): to the area
+            s.key += 1
+            self.changed()
+
+    def set_min(self, s: AppSession, on: bool, tell: bool = True) -> None:
+        """Minimise ``s``'s mirror (to its taskbar button, or the Dock: it
+        stays on that screen, put away), or bring it back. ``tell``: the
+        device showing it is told (it wasn't the one that did it)."""
+        on = bool(on)
+        if s.min == on:
+            return
+        s.min = on
+        log.info("app mirror: %s %s", s.name, "minimised" if on else "back from minimised")
+        if on:
+            s.hover = False
+            if self.carrying is not None and self.carrying[0] == s.id:
+                self.carrying = None
+            if self.through == s.id:
+                # The pointer was in the app (its minimise button): it stays
+                # where it is on the screen showing it, the mirror gone.
+                self.through = None
+                if self.router.active_device == s.source:
+                    rx, ry, rw, rh = s.rect
+                    u = min(1.0, max(0.0, (self.router.x - rx) / max(1.0, rw)))
+                    v = min(1.0, max(0.0, (self.router.y - ry) / max(1.0, rh)))
+                    vx, vy, vw, vh = s.view
+                    self.router.switch_to(s.target, *s.target.clamp(vx + u * vw, vy + v * vh), "app")
+        else:
+            s.key += 1  # its whole picture again
+        self.changed()
+
+    def _rescale(self, s: AppSession) -> None:
+        """``s``'s mirror moved onto another screen of the same device: at
+        that screen's scaling (a Windows screen's), as a window moved there is."""
+        s.dpr = self.dprs.get((s.target.device_id, s.target.id), s.dpr)
+        if s.phone or s.sized or s.full is not None:
+            return
+        k = self._k(s.source, s.window, s.target)
+        if abs(k - s.k) > 0.01:
+            vw, vh = self._fitted(s.target, s.rect[2] * k, s.rect[3] * k)
+            s.view = self._clamped(s.target, s.view[0], s.view[1], vw, vh)
+            s.k = vw / max(1.0, s.rect[2])
+            if self.carrying is not None and self.carrying[0] == s.id:
+                u, v = self.carrying[1], self.carrying[2]
+                s.view = self._clamped(s.target, self.router.x - u * vw, self.router.y - v * vh, vw, vh)
+            s.key += 1
 
     def _send_icon(self, s: AppSession) -> None:
         """The app's icon to the device showing its mirror (its taskbar
@@ -1243,12 +1355,22 @@ class AppMirrorHost:
                                  "os": [vx, vy, round(s.view[2]), round(s.view[3])],
                                  "screen_os": screen_os(s.target), "size": [round(s.view[2]), round(s.view[3])],
                                  "ratio": round(s.rect[2] / s.rect[3], 5), "label": s.name, "edges": [],
-                                 "corner": 0 if s.full is not None else round(
-                                     CORNERS.get(self.platform(s.source), 0) * s.view[2] / s.rect[2], 1),
+                                 "corner": 0 if s.full is not None else self._corner(s),
+                                 "min": s.min,
                                  "hover": s.hover or self.through == s.id, "raise": s.raised,
                                  "carried": carried, "full": s.full is not None,
                                  "app_name": str(s.window.get("app") or s.name)})
         return out
+
+    def _corner(self, s: AppSession) -> float:
+        """How round its mirror's corners are (its screen's px): the app's
+        own (scaled with it), never less than the windows' of the computer
+        showing it (a PC app's 8 px shown at half size on a Mac looked square)."""
+        own = CORNERS.get(self.platform(s.source), 0) * s.view[2] / max(1.0, s.rect[2])
+        if s.phone:
+            return round(own, 1)  # a phone's whole screen: square, as it's captured
+        here = CORNERS.get(self.platform(s.target.device_id), 0)
+        return round(max(own, here), 1)
 
     # -- geometry --------------------------------------------------------------------------
     def _screen_os(self, device_id: str, ox: float, oy: float):
