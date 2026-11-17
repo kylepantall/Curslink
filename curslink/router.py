@@ -611,7 +611,14 @@ class Router:
             self._remote_buttons.add(button)
         else:
             self._remote_buttons.discard(button)
-        self.transport.send(self.active_device, "button", button=button, pressed=pressed)
+        # Where and when it happened, as the moves say it: a press goes by TCP
+        # and can overtake the last moves (UDP) before it, which put it a few
+        # pixels short, on the row above a file in Finder or on the text beside
+        # it; and a Mac counts double clicks from the time between presses,
+        # which the network can bunch up (see PynputSink.button_at).
+        ox, oy = self.screen.to_os(self.x, self.y)
+        self.transport.send(self.active_device, "button", button=button, pressed=pressed,
+                            x=ox, y=oy, ts=round(self.clock() * 1000.0, 2))
 
     def hold_remote_button(self, button: str) -> None:
         """The device input is on now pressed ``button`` itself (to carry on a

@@ -235,3 +235,33 @@ def test_a_mac_hover_has_no_click_count(monkeypatch):
     sink, _ = mac_sink(monkeypatch)
     sink.move_to(5, 6)
     assert pb._MAC_CLICK_STATE not in posted[0]
+
+
+def test_double_clicks_are_timed_by_the_host_clock():
+    # 0.4.125: a click on a file then a press to drag it, 0.8 s apart on the
+    # PC, could reach the Mac bunched up and count as a double click (a word
+    # selected and dragged instead of the file). The host's times decide.
+    c = pb.ClickCounter(interval=0.5)
+    assert c.press("left", 10, 10, now=100.0) == 1
+    c.release("left")
+    assert c.press("left", 10, 10, now=100.8) == 1     # bunched on arrival, apart on the host
+    c.release("left")
+    assert c.press("left", 10, 10, now=101.0) == 2     # a real double click, however it arrived
+    c.release("left")
+    assert c.press("left", 10, 10) == 1                # a time from another clock doesn't compare
+    assert c.press("left", 10, 10, now=50.0) == 1      # nor one from a restarted host
+
+
+def test_a_mac_agent_counts_clicks_by_when_the_host_pressed(monkeypatch):
+    posted = fake_quartz(monkeypatch)
+    q = sys.modules["Quartz"]
+    q.CGEventCreate = lambda src: None
+    q.CGEventGetLocation = lambda ev: types.SimpleNamespace(x=50.0, y=60.0)
+    monkeypatch.setitem(sys.modules, "pynput", types.SimpleNamespace(
+        mouse=types.SimpleNamespace(Button=types.SimpleNamespace(left="L", right="R", middle="M"))))
+    sink, _ = mac_sink(monkeypatch)
+    sink._down = set()
+    sink._clicks = pb.ClickCounter(interval=0.5)
+    for pressed, ts in ((True, 10.0), (False, 10.1), (True, 11.0), (False, 11.1)):
+        sink.button_at("left", pressed, ts)
+    assert [e[pb._MAC_CLICK_STATE] for e in posted] == [1, 1, 1, 1]
