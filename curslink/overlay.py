@@ -473,7 +473,7 @@ def _run_qt_helper() -> None:
                     continue
                 alive.append(w)
                 w.destroyed.connect(lambda *_a, w=w: alive.remove(w) if w in alive else None)
-            elif parts and parts[0].startswith("mirror"):
+            elif parts and (parts[0].startswith("mirror") or parts[0] == "app_icon"):
                 try:
                     mirror.handle(line)
                 except Exception:  # pragma: no cover - never take the helper down

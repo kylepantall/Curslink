@@ -63,6 +63,50 @@ def prepare(window, glass: bool = True) -> None:
         window.setAttribute(Qt.WidgetAttribute.WA_ContentsMarginsRespectsSafeArea, False)
 
 
+def in_title_strip(window, pos) -> bool:
+    """True if ``pos`` (window coordinates) is in the strip along the top
+    where the title bar would be. :func:`prepare` runs the window's own
+    widgets up under the buttons, so on macOS there is no real title bar
+    left to drag: presses there that no widget takes move the window."""
+    from curslink.gui import theme
+
+    return 0 <= pos.y() < theme.MAC_TOP and 0 <= pos.x() < window.width()
+
+
+def start_move(window) -> bool:
+    """Let the system drag ``window`` from the press now under way."""
+    handle = window.windowHandle()
+    if handle is None:
+        return False
+    try:
+        return bool(handle.startSystemMove())
+    except Exception:
+        log.debug("couldn't start a window move", exc_info=True)
+        return False
+
+
+def title_double_click(window) -> None:
+    """What a double click on a Mac title bar does: zoom (the default),
+    minimise, or nothing, as set in System Settings > Desktop & Dock."""
+    action = "Maximize"
+    try:
+        import Foundation
+
+        defaults = Foundation.NSUserDefaults.standardUserDefaults()
+        action = str(defaults.stringForKey_("AppleActionOnDoubleClick") or "")
+        if not action:
+            action = "Minimize" if defaults.boolForKey_("AppleMiniaturizeOnDoubleClick") else "Maximize"
+    except Exception:
+        log.debug("couldn't read the title bar double-click setting", exc_info=True)
+    if action == "Minimize":
+        window.showMinimized()
+    elif action in ("Maximize", "Fill"):
+        try:
+            _ns_window(window).performZoom_(None)
+        except Exception:
+            window.showNormal() if window.isMaximized() else window.showMaximized()
+
+
 def apply_glass(window, dark: bool) -> bool:
     """Put the platform's backdrop behind ``window``. Call after it's shown
     (it needs the native window), and again when light or dark changes."""
