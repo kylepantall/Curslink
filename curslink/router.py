@@ -57,6 +57,16 @@ STOP_SAY_S = 30.0
 # Points tried along an edge to say where it leads (1% steps).
 NOWHERE_SAMPLES = 100
 
+# Input coming back to this computer, its cursor is put where it lands; for
+# this long, a report nearer the point the cursor was held at while input
+# was away (and further than WARP_NEAR_PX from where it landed) is from
+# before that move went through, and is dropped. Taken as a real move it
+# put the pointer in the middle of the screen: going into a mirror of one
+# of this computer's own apps, that's out of the app, straight out again,
+# and in, out, in every 10-30 ms (Kyle, 0.4.124: "mouse kept jumping").
+WARP_SETTLE_S = 0.25
+WARP_NEAR_PX = 48
+
 
 _SIDE_NAMES = {(-1, 0): "left", (1, 0): "right", (0, -1): "top", (0, 1): "bottom"}
 
@@ -186,6 +196,9 @@ class Router:
         self._carry_armed = True
         self.clock: Callable[[], float] = time.monotonic
         self._arrived: tuple[float, str] | None = None  # (when, from which device)
+        # Input came back here: (x, y) the cursor was put at, when, and where
+        # it was held while away (see WARP_SETTLE_S).
+        self._warped: tuple | None = None
         self._arrived_at: tuple[float, float] | None = None  # where it landed then
         self._moved_at = -1e9  # when the mouse last moved (self.clock())
         self._scrolls = Tally("scroll sent to the other computer")
@@ -281,8 +294,27 @@ class Router:
         self.screen = screen
 
     # ----------------------------------------------------------- local input
+    def _stale(self, ox: float, oy: float) -> bool:
+        """A local report from before the cursor was put where input came
+        back to (see WARP_SETTLE_S)."""
+        if self._warped is None:
+            return False
+        wx, wy, when, park = self._warped
+        if self.clock() - when > WARP_SETTLE_S:
+            self._warped = None
+            return False
+        to_here = max(abs(ox - wx), abs(oy - wy))
+        if to_here <= WARP_NEAR_PX:
+            self._warped = None  # the move went through: everything after is real
+            return False
+        if park is None:
+            return False
+        return max(abs(ox - park[0]), abs(oy - park[1])) < to_here
+
     def on_pointer(self, ox: float, oy: float) -> None:
         if not self.is_local:
+            return
+        if self._stale(ox, oy):
             return
         screen = self.layout.screen_at_os(self.local_id, ox, oy)
         if screen is None:
@@ -299,6 +331,24 @@ class Router:
         self._moved_at = self.clock()
         if self.portal is not None:
             hop = self.portal.hop(self.local_id, screen, x, y)
+            if hop is None and getattr(self.portal, "inside", None) is not None \
+                    and self.portal.inside(self.local_id, x, y) is not None:
+                # In a mirror of one of this computer's own apps: the mirror's
+                # edges are the app's, not this screen's. Pushing on this
+                # screen's edge (the window against it) is moving out of the
+                # app that way; nothing else here (edge switching, the screens
+                # in front) applies (it took the pointer off to wherever this
+                # screen's edge leads, and straight back into the mirror).
+                for ex, ey in self.layout.edge_pushes(self.local_id, x, y):
+                    hop = self.portal.hop(self.local_id, screen, x + 2 * ex, y + 2 * ey)
+                    if hop is not None:
+                        break
+                if hop is None:
+                    self._set_screen(screen)
+                    self.x, self.y = x, y
+                    self.on_moved()
+                    self.on_position(self.local_id, x, y)
+                    return
             if hop is not None and hop[0].device_id == self.local_id:
                 # Held in the app, at its edge: the cursor goes back there.
                 screen, x, y = hop
@@ -742,6 +792,9 @@ class Router:
                 self._armed_why = f"by {reason}"
                 self._pressing = None
             self.local_sink.move_to(ox, oy)
+            if old != new:
+                park = getattr(self.capture, "park_at", None)
+                self._warped = (ox, oy, self.clock(), tuple(park) if park is not None else None)
             if old != new:
                 # The screen as the layout has it: the helper places the
                 # animation as a fraction of it (see curslink.overlay.screen_box).

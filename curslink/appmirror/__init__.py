@@ -100,6 +100,9 @@ DRAG_POLL_S = 0.06
 CAST_POLL_S = 0.3
 # A window put back is put back again this much later (see AppMirrorDevice).
 RESTORE_AGAIN_S = 0.35
+# A cast window minimised where it runs is put back; for this long it may
+# still be off screen (macOS's animation), and that isn't its being closed.
+MIN_GRACE_S = 2.0
 # A mirror is never bigger than this share of the screen showing it, nor
 # narrower than MIN_VIEW px.
 MAX_VIEW = 0.9
@@ -124,6 +127,11 @@ STILL_FPS = 1
 # An app's icon is no bigger than this (base64 PNG): it goes in one frame
 # (curslink.protocol.MAX_FRAME_BYTES).
 MAX_ICON = 48_000
+
+
+def _on_desk(rect) -> bool:
+    """Not where Windows keeps a minimised window (-32000, -32000)."""
+    return rect[0] > -30000 and rect[1] > -30000
 
 
 def is_app(stream_id) -> bool:
@@ -221,7 +229,8 @@ class CastWatch:
 
     def __init__(self, report: Callable[[str, list | None], None], submit, call_later,
                  rect: Callable[[dict], list | None] | None = None,
-                 full: Callable[[dict], bool] | None = None, on_full: Callable[[str], None] = lambda sid: None):
+                 full: Callable[[dict], bool] | None = None, on_full: Callable[[str], None] = lambda sid: None,
+                 unmin: Callable[[dict, list | None], bool] | None = None, clock: Callable[[], float] = time.monotonic):
         from curslink.appmirror import windows
 
         self.report = report
@@ -233,6 +242,12 @@ class CastWatch:
         # its screen instead.
         self.full = full
         self.on_full = on_full
+        # unmin(window, rect): it was minimised where it runs, and was put
+        # back (True). Until it's back (MIN_GRACE_S), where it is isn't said,
+        # and its not being on screen isn't its being closed.
+        self.unmin = unmin
+        self.clock = clock
+        self.back_by: dict[str, float] = {}
         self.windows: dict[str, dict] = {}
         self.last: dict[str, list] = {}
         self._running = False
@@ -240,6 +255,7 @@ class CastWatch:
     def set(self, windows: dict[str, dict]) -> None:
         self.windows = dict(windows)
         self.last = {i: r for i, r in self.last.items() if i in self.windows}
+        self.back_by = {i: t for i, t in self.back_by.items() if i in self.windows}
         for i, win in self.windows.items():
             self.last.setdefault(i, list(win.get("os") or []))
         if self.windows and not self._running:
@@ -261,13 +277,28 @@ class CastWatch:
                         went_full = bool(self.full(w))
                     except Exception:  # pragma: no cover - platform trouble
                         log.debug("app mirror: couldn't check for full screen", exc_info=True)
-                out[i] = (self.rect(w), went_full)
+                r = self.rect(w)
+                went_min = False
+                if self.unmin is not None:
+                    try:
+                        went_min = bool(self.unmin(w, r))
+                    except Exception:  # pragma: no cover - platform trouble
+                        log.debug("app mirror: couldn't check for minimised", exc_info=True)
+                out[i] = (r, went_full, went_min)
             return out
 
         def got(rects):
-            for i, (r, went_full) in rects.items():
+            now = self.clock()
+            for i, (r, went_full, went_min) in rects.items():
                 if i not in self.windows:
                     continue
+                if went_min:
+                    log.info("app mirror: %s was minimised where it runs: put back (its mirror is its window)",
+                             self.windows[i].get("app") or "an app")
+                    self.back_by[i] = now + MIN_GRACE_S
+                    continue
+                if now < self.back_by.get(i, 0.0) and (r is None or not _on_desk(r)):
+                    continue  # on its way back
                 if went_full:
                     # Where it is now is on its way back: the next look says.
                     self.on_full(i)
@@ -304,7 +335,7 @@ class AppMirrorDevice:
         self.drags = WindowDragWatch(self._dragged, submit, call_later, lambda: self.ops.window_at_cursor(self.skip()),
                                      self.ops.window_rect)
         self.casts = CastWatch(self._cast_moved, submit, call_later, self._rect, self._undo_full,
-                               lambda sid: self.send("app_window", id=sid, full=True))
+                               lambda sid: self.send("app_window", id=sid, full=True), self._undo_min)
         self.submit = submit
         self.cast: dict[str, dict] = {}
         # Windows hidden here while their app is cast: id -> [window, home, in use].
@@ -388,6 +419,24 @@ class AppMirrorDevice:
         put it back, True. Its mirror fills its screen instead."""
         undo = getattr(self.ops, "undo_full", None)
         return bool(undo(win)) if undo is not None else False
+
+    def _undo_min(self, win: dict, rect: list | None) -> bool:
+        """(Off the event loop.) The window was minimised where it runs (its
+        own button, its taskbar button, a key): put it back, True. Cast, its
+        mirror is its window: minimised, the picture is whatever is behind
+        where it was (Kyle, 0.4.124: "we could see the boundary because the
+        app was minimised"), and input sent to it misses it. Only checked
+        when it looks put away (off every screen there, or not showing)."""
+        undo = getattr(self.ops, "undo_minimise", None)
+        if undo is None:
+            return False
+        if rect is not None and _on_desk(rect):
+            # Where the host's told it is (a parked Mac window: at home). Where
+            # it really is: minimised, it's off every screen, or not showing.
+            rect = self.ops.window_rect(win)
+            if rect is not None and _on_desk(rect):
+                return False
+        return bool(undo(win))
 
     def _fit(self, rect: list) -> list:
         """``rect`` moved (and made smaller) to be all on one of this

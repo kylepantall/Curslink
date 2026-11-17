@@ -115,6 +115,18 @@ def _win_undo_full(win: dict) -> bool:  # pragma: no cover - Windows only
     return True
 
 
+def _win_minimised(hwnd: int) -> bool:  # pragma: no cover - Windows only
+    return bool(_u32().IsIconic(int(hwnd)))
+
+
+def _win_undo_minimise(win: dict) -> bool:  # pragma: no cover - Windows only
+    hwnd = int(win["wid"])
+    if not _win_minimised(hwnd):
+        return False
+    _u32().ShowWindow(hwnd, 4)  # SW_SHOWNOACTIVATE: back where it was, nothing else changes
+    return True
+
+
 def _win_at(x: int, y: int, skip: set[int]) -> dict | None:  # pragma: no cover - Windows only
     import ctypes
     import ctypes.wintypes as wt
@@ -404,6 +416,18 @@ def _mac_undo_full(win: dict) -> bool:  # pragma: no cover - macOS only
     return True
 
 
+def _mac_undo_minimise(win: dict) -> bool:  # pragma: no cover - macOS only
+    AX = _ax()
+    w = _mac_ax_window(win)
+    if w is None:
+        return False
+    err, mini = AX.AXUIElementCopyAttributeValue(w, "AXMinimized", None)
+    if err != 0 or not mini:
+        return False
+    AX.AXUIElementSetAttributeValue(w, "AXMinimized", False)
+    return True
+
+
 def _mac_park_at() -> tuple[float, float] | None:  # pragma: no cover - macOS only
     """The bottom-right corner of the desk (macOS won't put a window
     wholly off every screen: there, all but a pixel of it is)."""
@@ -583,6 +607,38 @@ def undo_full(win: dict) -> bool:
             return _mac_undo_full(win)
     except Exception:
         log.debug("app mirror: couldn't check for full screen", exc_info=True)
+    return False
+
+
+def minimised(win: dict) -> bool:
+    """The window is minimised (to the taskbar, or the Dock)."""
+    try:
+        if sys.platform == "win32":
+            return _win_minimised(int(win["wid"]))
+        if sys.platform == "darwin":
+            AX = _ax()
+            w = _mac_ax_window(win)
+            if w is None:
+                return False
+            err, mini = AX.AXUIElementCopyAttributeValue(w, "AXMinimized", None)
+            return err == 0 and bool(mini)
+    except Exception:
+        log.debug("app mirror: couldn't check for minimised", exc_info=True)
+    return False
+
+
+def undo_minimise(win: dict) -> bool:
+    """The window is minimised: put it back where it was (without bringing
+    it forward), and say so (True). A cast app's window is its mirror; put
+    away where it runs, its picture is gone (what's behind it shows, or
+    nothing), and input sent to it lands on whatever is there instead."""
+    try:
+        if sys.platform == "win32":
+            return _win_undo_minimise(win)
+        if sys.platform == "darwin":
+            return _mac_undo_minimise(win)
+    except Exception:
+        log.debug("app mirror: couldn't bring a minimised window back", exc_info=True)
     return False
 
 
