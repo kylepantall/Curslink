@@ -1521,3 +1521,29 @@ async def test_an_agent_throws_away_files_sent_ahead_of_a_drop_that_went_elsewhe
     receiver.handle(decode(encode("file_cancel", id="p1", reason="carried elsewhere")))
     assert not [t for t in toasts if t.startswith("toast ")]
     assert "p1" not in receiver.active and not (tmp_path / "drops" / "p1").exists()
+
+
+def test_a_press_lands_where_the_host_pressed():
+    # A press comes by TCP and can overtake the last UDP moves before it: it
+    # moves the pointer to where the host pressed first, and the older moves
+    # that arrive after it are dropped.
+    from curslink.protocol import Message
+
+    sink = FakeSink()
+    session = AgentSession(sink, lambda *a: None)
+    session.handle(Message("enter", {"x": 5, "y": 6}))
+    session.handle(Message("move", {"x": 10, "y": 10, "ts": 1.0}))
+    session.handle(Message("button", {"button": "left", "pressed": True, "x": 14, "y": 30, "ts": 3.0}))
+    session.udp_move(12, 20, 2.0)
+    assert sink.calls[-2:] == [("move", 14, 30), ("button", "left", True)]
+
+
+def test_a_router_press_says_where_and_when(layout):
+    transport = FakeTransport({"laptop"})
+    router = Router(layout, "desktop", FakeCapture(), FakeSink(), transport, FakeOverlay())
+    router.clock = lambda: 12.5
+    router.on_pointer(3839, 500)
+    router.on_button("left", True)
+    sent = transport.of_type("button")[-1][2]
+    assert sent["pressed"] is True and sent["ts"] == 12500.0
+    assert isinstance(sent["x"], int) and isinstance(sent["y"], int)

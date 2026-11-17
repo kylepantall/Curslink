@@ -40,6 +40,9 @@ WARM_ON = frozenset({"enter", "leave", "move", "button", "scroll", "key", "drag"
 NETSTATS_EVERY_S = 5.0
 
 
+def _is_xy(data: dict) -> bool:
+    return all(isinstance(data.get(k), (int, float)) and not isinstance(data.get(k), bool) for k in ("x", "y"))
+
 class AgentSession:
     """Applies host messages to the local OS. Pure logic, no networking."""
 
@@ -145,6 +148,11 @@ class AgentSession:
             else:
                 self.sink.move_to(int(msg.data["x"]), int(msg.data["y"]))
             return None
+        if t == "button" and self.active and _is_xy(msg.data):
+            # Where the host's pointer was as the button went: first, as a move
+            # (the moves before it come by UDP, and this one by TCP can get here
+            # ahead of them; older moves arriving after it are then dropped).
+            self.handle(Message("move", {"x": msg.data["x"], "y": msg.data["y"], "ts": msg.data.get("ts")}))
         if self.smoother is not None and t in ("button", "scroll", "key"):
             self.smoother.snap()  # these happen where the pointer is now, not where playback is
         if t == "enter":
@@ -224,7 +232,12 @@ class AgentSession:
             # never reaches the app (see curslink.appmirror).
             if self.app_mirror is not None and self.app_mirror.intercept(name, pressed):
                 return None
-            self.sink.button(name, pressed)
+            ts = msg.data.get("ts")
+            button_at = getattr(self.sink, "button_at", None)
+            if button_at is not None and isinstance(ts, (int, float)) and not isinstance(ts, bool):
+                button_at(name, pressed, ts / 1000.0)  # double clicks timed by the host's clock
+            else:
+                self.sink.button(name, pressed)
             if self.app_mirror is not None:
                 self.app_mirror.on_button(name, pressed)
             if self.drag_out is not None:

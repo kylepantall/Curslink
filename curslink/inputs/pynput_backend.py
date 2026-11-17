@@ -1072,18 +1072,22 @@ class ClickCounter:
 
     def __init__(self, interval: float = 0.5):
         self.interval = interval
-        self._last: tuple[str, float, float, float, int] | None = None  # button, t, x, y, count
+        self._last: tuple[str, float, float, float, int, str] | None = None  # button, t, x, y, count, clock
         self._held: dict[str, int] = {}
 
     def press(self, button: str, x: float, y: float, now: float | None = None) -> int:
+        """``now``: when it was pressed on the host's mouse (the host's
+        clock), else when it got here."""
+        clock = "local" if now is None else "host"
         now = time.monotonic() if now is None else now
         count = 1
         if self._last is not None:
-            b, t, lx, ly, n = self._last
-            if (b == button and now - t <= self.interval
+            b, t, lx, ly, n, c = self._last
+            # Only times on the same clock compare (a restarted host has a new one).
+            if (b == button and c == clock and 0 <= now - t <= self.interval
                     and abs(x - lx) <= self.SLOP_PX and abs(y - ly) <= self.SLOP_PX):
                 count = n + 1
-        self._last = (button, now, x, y, count)
+        self._last = (button, now, x, y, count, clock)
         self._held[button] = count
         return count
 
@@ -1105,7 +1109,7 @@ def _mac_double_click_interval() -> float:
         return 0.5
 
 
-def _mac_post_button(button: str, pressed: bool, clicks: ClickCounter) -> bool:
+def _mac_post_button(button: str, pressed: bool, clicks: ClickCounter, ts: float | None = None) -> bool:
     """Press or let go of a mouse button where the cursor is, as a real
     mouse would, with the click count set so double and triple clicks
     work. False if it couldn't be posted."""
@@ -1115,7 +1119,7 @@ def _mac_post_button(button: str, pressed: bool, clicks: ClickCounter) -> bool:
         down, up, number = _MAC_BUTTONS[button]
         loc = Quartz.CGEventGetLocation(Quartz.CGEventCreate(None))
         at = (float(loc.x), float(loc.y))
-        count = clicks.press(button, *at) if pressed else clicks.release(button)
+        count = clicks.press(button, *at, now=ts) if pressed else clicks.release(button)
         ev = Quartz.CGEventCreateMouseEvent(None, down if pressed else up, at, number)
         Quartz.CGEventSetIntegerValueField(ev, _MAC_CLICK_STATE, count)
         Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
@@ -1335,6 +1339,18 @@ class PynputSink:
             return
         self.move_to(x, y)
 
+    def button_at(self, button: str, pressed: bool, ts: float) -> None:
+        """``button`` with when it went on the host's mouse (seconds, the
+        host's clock): a Mac counts a double click by the time between the
+        presses as they happened, not as they arrived. The network can bunch
+        a click and the press after it into a double click (a word selected
+        and dragged in place of a file) or spread a real one apart."""
+        self._button_ts = ts
+        try:
+            self.button(button, pressed)
+        finally:
+            self._button_ts = None
+
     def button(self, button: str, pressed: bool) -> None:
         from pynput import mouse
 
@@ -1349,7 +1365,7 @@ class PynputSink:
             clicks = self.__dict__.get("_clicks")
             if clicks is None:
                 clicks = self._clicks = ClickCounter(_mac_double_click_interval())
-            if _mac_post_button(button, pressed, clicks):
+            if _mac_post_button(button, pressed, clicks, self.__dict__.get("_button_ts")):
                 return
         (self._mouse.press if pressed else self._mouse.release)(target)
 

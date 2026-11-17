@@ -192,7 +192,7 @@ async def test_a_chat_dragged_over_the_edge_opens_on_the_laptop(popups):
     assert link.closed == ["h_chat"]
     # The laptop's press is let go of with the real release.
     router.on_button("left", False)
-    assert transport.of_type("button")[-1][2] == {"button": "left", "pressed": False}
+    assert {k: transport.of_type("button")[-1][2][k] for k in ("button", "pressed")} == {"button": "left", "pressed": False}
 
 
 async def test_a_chat_stays_when_the_other_isolink_is_another_account(popups):
@@ -226,7 +226,7 @@ async def test_a_chat_dragged_on_the_laptop_comes_home(popups):
     router.go_home("edge")
     await settle()
     assert handoff_files == [], "a chat isn't a file: the laptop lets go as usual"
-    assert transport.of_type("button")[-1][2] == {"button": "left", "pressed": False}
+    assert {k: transport.of_type("button")[-1][2][k] for k in ("button", "pressed")} == {"button": "left", "pressed": False}
     assert pressed == [True] and link.opened == [("h_chat", True, True)]
     assert link.prepared == ["h_chat"] and link.unprepared == []
     (dev, _, data), = transport.of_type("popup_close")
