@@ -947,6 +947,73 @@ def test_windows_puts_dropped_hooks_back_and_gives_up_if_they_keep_going(monkeyp
     assert not capture._grabbed and capture.took_back  # gave up after HOOK_LOST_MAX
 
 
+def test_windows_parks_a_cursor_a_drag_held_at_the_edge_without_calling_the_hooks_lost(monkeypatch):
+    # 0.4.125: a file dragged over the edge kept the cursor there when input
+    # left; half a second later the watchdog said "Windows dropped the input
+    # hooks" and took them out for up to a second mid-drag.
+    pb, capture, _, restarts = _pc_capture(monkeypatch)
+    capture.park_at = (1440, 810)
+
+    class Controller:
+        def __init__(self):
+            self.at, self.sets = (2879, 16), []
+
+        @property
+        def position(self):
+            return self.at
+
+        @position.setter
+        def position(self, at):
+            self.sets.append(at)
+            if len(self.sets) > 1:   # the park on grab doesn't take; parking again does
+                self.at = at
+
+    controller = capture._controller = Controller()
+    capture.set_grab(True)
+    capture._grabbed_at -= 1
+    restarts.clear()
+    checks = {"n": 0}
+
+    def sleep(_s):
+        checks["n"] += 1
+        if checks["n"] > 6:
+            capture._closed = True
+
+    capture._restart = lambda *a, **k: restarts.append(1) or True
+    monkeypatch.setattr(pb.time, "sleep", sleep)
+    capture._watch_hooks()
+    assert capture.hooks_lost == 0 and not restarts
+    assert controller.at == (1440, 810) and capture._grabbed
+
+
+def test_windows_watches_a_held_cursor_the_hook_still_hears(monkeypatch):
+    pb, capture, _, restarts = _pc_capture(monkeypatch)
+    capture.park_at = (1440, 810)
+
+    class Controller:
+        position = (2879, 16)   # parking never takes while the drag holds it
+
+        def __setattr__(self, name, value):
+            pass
+
+    capture._controller = Controller()
+    capture.set_grab(True)
+    capture._grabbed_at -= 1
+    restarts.clear()
+    checks = {"n": 0}
+
+    def sleep(_s):
+        checks["n"] += 1
+        capture._own_heard_at = pb.time.monotonic()   # the hook hears the mouse
+        if checks["n"] > 6:
+            capture._closed = True
+
+    capture._restart = lambda *a, **k: restarts.append(1) or True
+    monkeypatch.setattr(pb.time, "sleep", sleep)
+    capture._watch_hooks()
+    assert capture.hooks_lost == 0 and not restarts
+
+
 def test_windows_takes_deltas_from_where_the_held_cursor_really_is(monkeypatch):
     # Kyle's PC held the cursor at (1442, 815) for a park point of (1440, 810):
     # every mouse report carried (2, 5) extra and the pointer on the Mac crept
