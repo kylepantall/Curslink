@@ -11,7 +11,8 @@ isn't under the pointer, so:
   screen edges that lead to another device. A file dragged to the edge
   passes over one, and the OS tells the helper what's being dragged
   (``drag`` lines on its stdout, read by :meth:`DragHandoff.on_helper`).
-* Gaze (or any switch that isn't over an edge): input leaves with the
+* Gaze (or any switch that isn't over an edge, or that crossed one too
+  quickly for its strip to hear of the drag): input leaves with the
   button still held, so the helper covers the host's screens with an
   invisible drop target (the "shield") and the host nudges the parked
   pointer, which makes the OS report the drag to it.
@@ -287,7 +288,16 @@ class DragHandoff:
             self.carry(event.to_device)
         elif self.drag_source is not None:
             asyncio.get_running_loop().create_task(self._check_pasteboard(self._gen))
-        elif self.paths is None and event.reason != "edge":
+        elif self.paths is None:
+            # Not over an edge, or over one too fast for its strip: a quick
+            # flick reaches the edge and input leaves on the same mouse
+            # report, before the OS has moved the drag onto the strip, and
+            # then the parked pointer never comes back to it (0.4.125: Kyle's
+            # PC saw only slow drags; quick ones crossed with nothing). The
+            # shield finds out either way.
+            if event.reason == "edge":
+                log.info("drag: crossed to %s before the edge's drop target heard of a drag; asking the shield",
+                         event.to_device)
             self.probe()
 
     async def _check_pasteboard(self, gen: int) -> None:

@@ -265,6 +265,30 @@ async def test_looking_away_mid_drag_probes_for_a_file(drag, tmp_path):
     assert transport.of_type("drag")[0][2]["card"]["name"] == "a.txt"
 
 
+async def test_a_quick_drag_over_the_edge_still_finds_the_file(drag, tmp_path):
+    # 0.4.125: a flick reaches the edge and input leaves on the same report,
+    # before the OS moves the drag onto the strip; the parked pointer never
+    # gets back to it, so only slow drags carried their file.
+    handoff, router, transport, helper, injected = drag
+    f = tmp_path / "a.txt"
+    f.write_text("hi")
+    handoff.on_button("left", True)
+    handoff.on_pointer(3000, 500)
+    handoff.on_pointer(3830, 500)
+    assert helper[-1].startswith("strips ")
+    router.on_pointer(3839, 500)        # over the edge, the strip never spoke
+    assert router.active_device == "laptop"
+    assert helper[-2:] == ["strips off", "shield on"]
+    await settle()
+    assert injected == ["nudge"]
+    handoff.on_helper("drag " + json.dumps({"paths": [str(f)]}))
+    await settle()
+    assert transport.of_type("drag")[0][2]["card"]["name"] == "a.txt"
+    assert handoff.on_button("left", False) is True
+    await settle()
+    assert [t for _, t, _ in transport.bulk][0] == "file_begin"
+
+
 async def test_coming_home_with_the_drag_hands_it_back(drag, tmp_path):
     handoff, router, transport, helper, injected = drag
     f = tmp_path / "a.txt"
