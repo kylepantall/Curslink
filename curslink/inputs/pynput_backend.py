@@ -480,6 +480,7 @@ class PynputCapture:
         seen: tuple[float, tuple[float, float]] | None = None  # (grab it's for, where the cursor sat)
         lost: list[float] = []
         escape: tuple[float, str | None] | None = None  # (grab it's for, way out seen last)
+        reparked: float | None = None  # the grab the cursor was parked again for
         deaf = _DeafHook(self)
         while not self._closed:
             time.sleep(HOOK_CHECK_S)
@@ -514,6 +515,26 @@ class PynputCapture:
             if seen is None or seen[0] != self._grabbed_at:
                 px, py = self.park_at
                 if abs(x - px) + abs(y - py) <= HOOK_DRIFT_PX:
+                    seen = (self._grabbed_at, (x, y))
+                    continue
+                if reparked != self._grabbed_at:
+                    # Never got there: a file dragged over the edge holds the
+                    # cursor at the edge when it's parked (0.4.125: "dropped
+                    # the input hooks" half a second into every carried drag,
+                    # then a second without hooks while they went back in).
+                    # Park it again and look once more before calling the
+                    # hooks lost.
+                    reparked = self._grabbed_at
+                    log.info("input: the cursor stayed at (%d, %d), not the park point (%d, %d); parking it again",
+                             x, y, px, py)
+                    try:
+                        self._controller.position = self.park_at
+                    except Exception:
+                        pass
+                    continue
+                if time.monotonic() - self._own_heard_at < HOOK_CHECK_S * 2:
+                    # Still not there, but the hook hears the mouse: it holds
+                    # the cursor where it is, so that's the place to watch.
                     seen = (self._grabbed_at, (x, y))
                     continue
                 seen = (self._grabbed_at, (px, py))
