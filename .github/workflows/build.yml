@@ -57,7 +57,7 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
           cache: pip
@@ -192,7 +192,7 @@ jobs:
           got=$("$exe" _install-kind | tr -d '\r')
           [ "$got" = "$want" ] || { echo "::error::installed copy says it is '$got', not '$want'"; exit 1; }
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: app-${{ matrix.platform }}
           path: out/*

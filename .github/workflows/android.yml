@@ -40,16 +40,16 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
       # The interop test runs the Python host's own pairing and server.
       - run: python -m pip install -e .
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v5
       - run: echo "VERSION=${TAG#v}" >> "$GITHUB_ENV"
       # A stable signing key, so each release installs over the last. Without
       # the secret the APK is signed with this runner's throwaway debug key.
@@ -74,13 +74,13 @@ jobs:
       - run: |
           mkdir -p dist
           cp android/app/build/outputs/apk/release/app-release.apk "dist/curslink-$VERSION-android.apk"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: app-android
           path: dist/*.apk
           if-no-files-found: error
       - if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: android-reports
           path: android/*/build/reports
