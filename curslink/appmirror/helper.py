@@ -10,12 +10,26 @@ with this computer's cursor drawn in where it's over the window.
 
 A show with ``app`` is an :class:`AppWindow`: a borderless window with the
 app's picture and nothing else (no frame of its own: the app brings its
-title bar), its corners rounded like the app's on its own computer. Its
-outer :data:`curslink.appmirror.GRIP` px resize it, keeping its shape;
-each change is printed as ``app_view {"id", "os"}``. Next to it, while the
-pointer is near (``hover``), a small glass tag names the app and has a
-close button (``app_view {"id", "closed": true}``). ``raise`` going up
-brings it to the front (the pointer went into it).
+title bar), its corners rounded like the app's on its own computer. Round
+it, outside the picture, is a :class:`GripRing` (:data:`RING` px): drag it
+to resize the mirror, any shape; each change is printed as ``app_view
+{"id", "os"}``. Near a corner, the ring shows a short curved handle round
+it, as the Isolink chat popups do. Next to it, while the pointer is near
+(``hover``), a small glass tag names the app and has a box (``app_view
+{"id", "full": true}``: fill the screen, or back) and a close button
+(``app_view {"id", "closed": true}``). ``raise`` going up brings it to the
+front (the pointer went into it). ``full``: it fills its screen, over the
+taskbar and the menu bar, as a full screen app does.
+
+The pointer in it is the app's own cursor (``mirror_shape``, sent from the
+computer the app runs on), drawn by a :class:`PointerSprite`: a little
+window of its own, moved to where the host says (``mirror_pointer``), so
+the mirror's picture isn't drawn again for every move.
+
+Each mirror has a taskbar button of its own (Windows), with the app's icon
+(``app_icon {"id", "png"}``); on a Mac the helper takes a Dock icon while it
+shows a mirror, the app's. A capture with ``window`` prints the app's icon
+once, as ``app_icon {"id", "png"}``.
 """
 
 from __future__ import annotations
@@ -25,13 +39,16 @@ import logging
 import sys
 import time
 
-from PySide6.QtCore import QPointF, QRect, QRectF, Qt, QTimer
-from PySide6.QtGui import (QColor, QCursor, QFont, QFontMetricsF, QGuiApplication, QImage, QLinearGradient, QPainter,
-                           QPainterPath, QPen, QRegion)
+import base64
+import math
+
+from PySide6.QtCore import QBuffer, QFileInfo, QIODevice, QPointF, QRect, QRectF, QSize, Qt, QTimer
+from PySide6.QtGui import (QColor, QCursor, QFont, QFontMetricsF, QGuiApplication, QIcon, QImage, QLinearGradient,
+                           QPainter, QPainterPath, QPen, QPixmap, QRegion)
 from PySide6.QtWidgets import QWidget
 
-from curslink.appmirror import GRIP
-from curslink.mirror.helper import (FADE_S, Capture, MirrorWindow, _qscreen, mac_screen_recording, spec_to_logical,
+from curslink.appmirror import RING
+from curslink.mirror.helper import (Capture, MirrorWindow, _qscreen, mac_screen_recording, spec_to_logical,
                                     MAC_NO_RECORDING, cgimage_to_qimage)
 from curslink.overlay import ACCENT
 
@@ -43,14 +60,27 @@ MAC_APP_FPS = 60
 STATS_S = 30.0  # how often a capture says how it's keeping up
 POPUP_CHECK_S = 0.25  # how often to look for the app's menus, while it's in use
 TAG_H = 26
+# The corner handles, as the Isolink chat popups draw theirs: a quarter round
+# this far outside the mirror's rounded corner, this thick, shown while the
+# pointer is this near the corner; how strong, near it and on it (or dragging).
+HANDLE_GAP = 5.0
+HANDLE_W = 4.0
+HANDLE_REACH = 72.0
+HANDLE_ALPHA = (0.3, 0.55)
+# How far along each side from a corner the ring resizes from the corner.
+CORNER_GRIP = 22
+# An app's icon goes as big as this, or smaller to fit in a frame.
+ICON_SIZES = (128, 96, 64, 48, 32)
 
 
-def bring_to_front(widget: QWidget, above_all: bool) -> None:
+def bring_to_front(widget: QWidget, above_all: bool, over_menus: bool = False) -> None:
     """Put ``widget`` in front of every other app's windows, without taking
     the focus. ``above_all``: and keep it there (while it's carried, so it
-    passes over every window); otherwise it's an ordinary window again, at
-    the front for now. Qt's raise_() alone can't do this from an app that
-    isn't the active one: other apps' windows stay on top of it."""
+    passes over every window; or filling the screen); otherwise it's an
+    ordinary window again, at the front for now. ``over_menus``: over a
+    Mac's menu bar and Dock too (a full screen mirror). Qt's raise_() alone
+    can't do this from an app that isn't the active one: other apps'
+    windows stay on top of it."""
     if not widget.isVisible():
         return
     platform = QGuiApplication.platformName()
@@ -74,7 +104,8 @@ def bring_to_front(widget: QWidget, above_all: bool) -> None:
 
             window = objc.objc_object(c_void_p=int(widget.winId())).window()
             if window is not None:
-                window.setLevel_(3 if above_all else 0)  # NSFloatingWindowLevel / NSNormalWindowLevel
+                # NSMainMenuWindowLevel + 1 / NSFloatingWindowLevel / NSNormalWindowLevel
+                window.setLevel_(25 if over_menus else 3 if above_all else 0)
                 window.orderFrontRegardless()
                 return
     except Exception:
@@ -213,6 +244,46 @@ def mac_window_image(wid: int) -> QImage | None:  # pragma: no cover - macOS onl
         return None
 
 
+def process_path(pid: int) -> str:
+    """The app's file (its .exe, or its .app bundle on a Mac), or ""."""
+    try:
+        if sys.platform == "win32":  # pragma: no cover - Windows only
+            from curslink.appmirror.windows import _win_process_path
+
+            return _win_process_path(pid)
+        if sys.platform == "darwin":  # pragma: no cover - macOS only
+            import AppKit
+
+            app = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(int(pid))
+            url = app.bundleURL() if app is not None else None
+            return str(url.path()) if url is not None else ""
+    except Exception:
+        log.debug("app mirror: couldn't find the app's file", exc_info=True)
+    return ""
+
+
+def icon_png(path: str, px: int = 64) -> str | None:
+    """The icon of the file at ``path`` (an app), as base64 PNG: what Finder
+    or Explorer shows for it."""
+    if not path:
+        return None
+    try:
+        from PySide6.QtWidgets import QFileIconProvider
+
+        icon = QFileIconProvider().icon(QFileInfo(path))
+        pix = icon.pixmap(QSize(px, px))
+    except Exception:  # pragma: no cover - platform trouble
+        log.debug("app mirror: couldn't read the app's icon", exc_info=True)
+        return None
+    if pix.isNull():
+        return None
+    buf = QBuffer()
+    buf.open(QIODevice.OpenModeFlag.WriteOnly)
+    if not pix.toImage().save(buf, "PNG"):
+        return None
+    return base64.b64encode(bytes(buf.data())).decode()
+
+
 class AppCapture(Capture):
     """A :class:`curslink.mirror.helper.Capture` of one window, wherever it is."""
 
@@ -224,9 +295,40 @@ class AppCapture(Capture):
         self.popups_at = 0.0
         self.stats = {"since": time.monotonic(), "frames": 0, "busy": 0.0, "bytes": 0}
         self.raw_out = out
+        self.icon_sent = False
         super().__init__(spec, self._out)
 
+    def set(self, spec: dict) -> None:
+        if spec.get("use") and not self.spec.get("use"):
+            # Used again: its pointer's look goes again too (the mirror may
+            # be a new one, on another device, that never had it).
+            self.shape_key = None
+        super().set(spec)
+
+    def send_icon(self) -> None:
+        """The app's icon, once: for its mirror's taskbar button (or the Dock)."""
+        self.icon_sent = True
+        win = self.spec.get("window") or {}
+        try:
+            pid = int(win.get("pid") or 0)
+        except (TypeError, ValueError):
+            return
+        from curslink.appmirror import MAX_ICON
+
+        path = process_path(pid) if pid else ""
+        for px in ICON_SIZES if path else ():
+            png = icon_png(path, px)
+            if png is None:
+                break
+            if len(png) <= MAX_ICON:
+                self.raw_out("app_icon " + json.dumps({"id": self.id, "png": png}, separators=(",", ":")))
+                print("app mirror: %s: sent its icon (%d px)" % (self.id, px), file=sys.stderr, flush=True)
+                return
+        print("app mirror: %s: no icon found for %r" % (self.id, path or pid), file=sys.stderr, flush=True)
+
     def grab(self) -> None:
+        if not self.icon_sent:
+            self.send_icon()
         if self.spec.get("pointer"):
             try:
                 self.send_shape()
@@ -354,6 +456,12 @@ class AppCapture(Capture):
         if rect is not None:
             self._area(rect)
         if sys.platform == "win32":
+            if windows.minimised(win):
+                # Put away (it's put back in a moment): its picture would be
+                # black, and the screen where it was shows what's behind it.
+                # The mirror keeps its last picture meanwhile.
+                self.skip = True
+                return None
             got = win_print_window(wid)
             if got is not None and not mostly_black(got[0]):
                 self._area(got[1])
@@ -450,7 +558,9 @@ class AppTag(QWidget):
         x = r.right() - w
         y = r.top() - TAG_H - 6
         screen = self.owner.screen().geometry() if self.owner.screen() is not None else None
-        if screen is not None and y < screen.top():
+        if self.owner.spec.get("full"):
+            x, y = r.center().x() - w // 2, r.top() + 8  # filling the screen: at its top, inside
+        elif screen is not None and y < screen.top():
             y = r.bottom() + 6  # no room above: below it
         self.setGeometry(QRect(x, y, w, TAG_H))
         self.update()
@@ -517,7 +627,7 @@ class AppTag(QWidget):
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.setPen(pen)
         c, k = box.center(), 3.4
-        if self.owner.maxed is None:
+        if not self.owner.spec.get("full"):
             p.drawRoundedRect(QRectF(c.x() - k, c.y() - k, 2 * k, 2 * k), 1.2, 1.2)
         else:
             p.drawRoundedRect(QRectF(c.x() - k, c.y() - k + 1.6, 2 * k - 1.6, 2 * k - 1.6), 1.0, 1.0)
@@ -535,52 +645,504 @@ class AppTag(QWidget):
         p.end()
 
 
+class GripRing(QWidget):
+    """The ring round a mirror, outside its picture (:data:`RING` px): drag
+    it to resize the mirror, any shape (the app is resized to it), with
+    the resize arrows of the computer showing it. Near a corner a short
+    curved handle shows round it, as the Isolink chat popups draw theirs;
+    stronger on it, or dragging. All but clear: presses on it come here
+    (a fully clear pixel lets them through to what's behind)."""
+
+    def __init__(self, owner: "AppWindow"):
+        flags = (Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool | Qt.WindowType.WindowDoesNotAcceptFocus
+                 | Qt.WindowType.NoDropShadowWindowHint)
+        super().__init__(None, flags)
+        for attr in (Qt.WidgetAttribute.WA_TranslucentBackground, Qt.WidgetAttribute.WA_ShowWithoutActivating,
+                     Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow):
+            self.setAttribute(attr, True)
+        self.owner = owner
+        self.setMouseTracking(True)
+        self.near: str | None = None  # the corner the pointer is near: "lt", "rt", "lb" or "rb"
+        self.hot = False              # the pointer is on the ring
+        self.drag: tuple[str, QPointF, QRect] | None = None
+        self._masked: tuple | None = None
+        self._kept_out = False
+        self.timer = QTimer(self)
+        self.timer.setInterval(33)
+        self.timer.timeout.connect(self.look)
+
+    def place(self) -> None:
+        g = self.owner.geometry()
+        self.setGeometry(g.adjusted(-RING, -RING, RING, RING))
+        corner = float(self.owner.spec.get("corner") or 0)
+        key = (g.width(), g.height(), round(corner, 1))
+        if key != self._masked:
+            self._masked = key
+            # The ring, and the bits of the corners the mirror's rounding
+            # cuts away (they'd let presses through to what's behind).
+            inner = QPainterPath()
+            inner.addRoundedRect(QRectF(RING, RING, g.width(), g.height()), corner, corner)
+            ring = QRegion(self.rect()).subtracted(QRegion(inner.toFillPolygon().toPolygon()))
+            self.setMask(ring)
+        self.update()
+
+    def showEvent(self, e) -> None:  # noqa: N802
+        super().showEvent(e)
+        if not self._kept_out:
+            self._kept_out = True
+            from curslink.capturehide import exclude_from_capture
+
+            exclude_from_capture(self)
+        self.timer.start()
+
+    def hideEvent(self, e) -> None:  # noqa: N802
+        super().hideEvent(e)
+        self.timer.stop()
+        if self.near is not None:
+            self.near = None
+
+    # -- where the pointer is ----------------------------------------------------
+    def corners(self) -> dict[str, QPointF]:
+        g = self.owner.geometry()
+        return {"lt": QPointF(g.left(), g.top()), "rt": QPointF(g.right() + 1, g.top()),
+                "lb": QPointF(g.left(), g.bottom() + 1), "rb": QPointF(g.right() + 1, g.bottom() + 1)}
+
+    def look(self) -> None:
+        """The pointer's place (it may be over the mirror, which has it):
+        the handle of the corner it's near shows."""
+        at = QPointF(QCursor.pos())
+        near = None
+        if self.drag is None and self.owner.pointer is None:  # (in the app, it's the app's)
+            best = HANDLE_REACH
+            for name, c in self.corners().items():
+                d = math.hypot(at.x() - c.x(), at.y() - c.y())
+                if d <= best:
+                    near, best = name, d
+        elif self.drag is not None:
+            near = self.drag[0] if len(self.drag[0]) == 2 else None
+        if near != self.near:
+            self.near = near
+            self.update()
+
+    def sides(self, pos: QPointF) -> str:
+        """Which sides a press at ``pos`` (on the ring) drags: "l", "r", "t",
+        "b", or a corner's two."""
+        x, y = pos.x() - RING, pos.y() - RING
+        w, h = self.owner.width(), self.owner.height()
+        if 0 <= x < w and 0 <= y < h:
+            # In a rounded-off corner of the mirror itself.
+            return ("l" if x < w / 2 else "r") + ("t" if y < h / 2 else "b")
+        out = ""
+        if x < 0 or (x < CORNER_GRIP and (y < 0 or y >= h)):
+            out += "l"
+        elif x >= w or (x >= w - CORNER_GRIP and (y < 0 or y >= h)):
+            out += "r"
+        if y < 0 or (y < CORNER_GRIP and (x < 0 or x >= w)):
+            out += "t"
+        elif y >= h or (y >= h - CORNER_GRIP and (x < 0 or x >= w)):
+            out += "b"
+        return out
+
+    def mousePressEvent(self, e) -> None:  # noqa: N802
+        sides = self.sides(e.position())
+        if sides:
+            self.drag = (sides, e.globalPosition(), self.owner.geometry())
+            self.update()
+
+    def mouseMoveEvent(self, e) -> None:  # noqa: N802
+        if self.drag is None:
+            sides = self.sides(e.position())
+            shapes = {"l": Qt.CursorShape.SizeHorCursor, "r": Qt.CursorShape.SizeHorCursor,
+                      "t": Qt.CursorShape.SizeVerCursor, "b": Qt.CursorShape.SizeVerCursor,
+                      "lt": Qt.CursorShape.SizeFDiagCursor, "rb": Qt.CursorShape.SizeFDiagCursor,
+                      "rt": Qt.CursorShape.SizeBDiagCursor, "lb": Qt.CursorShape.SizeBDiagCursor}
+            self.setCursor(shapes.get(sides, Qt.CursorShape.ArrowCursor))
+            if not self.hot:
+                self.hot = True
+                self.update()
+            return
+        sides, start, g = self.drag
+        now = e.globalPosition()
+        dx, dy = now.x() - start.x(), now.y() - start.y()
+        # Any shape: the app itself is resized to it, and lays itself out
+        # again (the picture is fitted in until it has).
+        w = max(160.0, g.width() + (dx if "r" in sides else -dx if "l" in sides else 0))
+        h = max(100.0, g.height() + (dy if "b" in sides else -dy if "t" in sides else 0))
+        x = g.right() + 1 - w if "l" in sides else g.x()
+        y = g.bottom() + 1 - h if "t" in sides else g.y()
+        self.owner.setGeometry(QRect(round(x), round(y), round(w), round(h)))
+        self.place()
+        self.owner._place_tag()
+        self.owner.update()
+
+    def mouseReleaseEvent(self, _e) -> None:  # noqa: N802
+        if self.drag is not None:
+            self.drag = None
+            g = self.owner.geometry()
+            self.owner._tell_view(os=logical_to_os(self.owner.spec, g.x(), g.y(), g.width(), g.height()))
+            self.update()
+
+    def leaveEvent(self, _e) -> None:  # noqa: N802
+        if self.hot:
+            self.hot = False
+            self.update()
+
+    def paintEvent(self, _e) -> None:  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.fillRect(self.rect(), QColor(0, 0, 0, 2))
+        corner = self.near if self.drag is None else (self.drag[0] if len(self.drag[0]) == 2 else None)
+        if corner is not None:
+            strong = self.hot or self.drag is not None
+            self.paint_handle(p, corner, HANDLE_ALPHA[1] if strong else HANDLE_ALPHA[0])
+        p.end()
+
+    def paint_handle(self, p: QPainter, corner: str, alpha: float) -> None:
+        """A quarter round about the mirror's rounded corner, just outside
+        it, a little short of each end: the Isolink chat popups' handle."""
+        radius = max(8.0, float(self.owner.spec.get("corner") or 0))
+        w, h = self.owner.width(), self.owner.height()
+        left, top = corner[0] == "l", corner[1] == "t"
+        cx = RING + radius if left else RING + w - radius
+        cy = RING + radius if top else RING + h - radius
+        r = radius + HANDLE_GAP
+        # Qt's angles go anticlockwise from three o'clock; this corner's
+        # quarter, clockwise, starts at (Isolink's drawArc start):
+        start = {"rb": 0.0, "lb": 90.0, "lt": 180.0, "rt": 270.0}[corner]
+        trim = math.degrees(0.2)
+        dark = True
+        try:
+            dark = QGuiApplication.styleHints().colorScheme() != Qt.ColorScheme.Light
+        except AttributeError:  # pragma: no cover - an older Qt
+            pass
+        color = QColor(255, 255, 255) if dark else QColor(0, 0, 0)
+        color.setAlphaF(alpha)
+        pen = QPen(color, HANDLE_W)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        rect = QRectF(cx - r, cy - r, 2 * r, 2 * r)
+        p.drawArc(rect, round(-(start + trim) * 16), round(-(90 - 2 * trim) * 16))
+
+
+class PointerSprite(QWidget):
+    """The app's own cursor over its mirror: a little window of its own,
+    moved to where the host says the pointer is (so the mirror isn't drawn
+    again for each move), in the look sent from the app's computer."""
+
+    def __init__(self):
+        flags = (Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint
+                 | Qt.WindowType.WindowDoesNotAcceptFocus | Qt.WindowType.NoDropShadowWindowHint
+                 | Qt.WindowType.WindowTransparentForInput)
+        super().__init__(None, flags)
+        for attr in (Qt.WidgetAttribute.WA_TranslucentBackground, Qt.WidgetAttribute.WA_ShowWithoutActivating,
+                     Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow, Qt.WidgetAttribute.WA_TransparentForMouseEvents):
+            self.setAttribute(attr, True)
+        self.look: tuple | None = None  # (picture, w, h, hx, hy) in this screen's logical pixels
+        self.hot = QPointF(0, 0)
+        self._kept_out = False
+
+    def show_at(self, at: QPointF, shape, k: float) -> None:
+        """At ``at`` (global, logical px), the hot spot of ``shape`` (a
+        parsed mirror_shape, or None: an arrow), ``k`` times its size."""
+        if shape is not None:
+            pix, w, h, hx, hy, _cw = shape
+            look = (pix, w * k, h * k, hx * k, hy * k)
+        else:
+            look = (None, 16.0, 24.0, 1.0, 1.0)
+        if look != self.look:
+            self.look = look
+            self.resize(max(1, math.ceil(look[1]) + 2), max(1, math.ceil(look[2]) + 2))
+            self.update()
+        self.hot = QPointF(look[3], look[4])
+        self.move(round(at.x() - look[3]), round(at.y() - look[4]))
+        if not self.isVisible():
+            self.show()
+            if not self._kept_out:
+                self._kept_out = True
+                from curslink.capturehide import exclude_from_capture
+
+                exclude_from_capture(self)
+            bring_to_front(self, True, over_menus=True)
+
+    def paintEvent(self, _e) -> None:  # noqa: N802
+        from curslink.mirror.helper import ARROW
+
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        if self.look is not None and self.look[0] is not None:
+            pix, w, h = self.look[0], self.look[1], self.look[2]
+            p.drawPixmap(QRectF(0, 0, w, h), pix, QRectF(pix.rect()))
+        else:
+            at = QPointF(1, 1)
+            path = QPainterPath()
+            path.moveTo(at + QPointF(*ARROW[0]))
+            for x, y in ARROW[1:]:
+                path.lineTo(at + QPointF(x, y))
+            path.closeSubpath()
+            p.setPen(QPen(QColor(17, 17, 17), 1.3))
+            p.setBrush(QColor("white"))
+            p.drawPath(path)
+        p.end()
+
+
+class DockPresence:
+    """macOS: while the helper shows another computer's app, it has a Dock
+    icon (and a place in Cmd+Tab), the latest app's; clicking it brings the
+    mirrors to the front. Back to no Dock icon when there are none."""
+
+    def __init__(self):
+        self.windows: dict[str, "AppWindow"] = {}
+        self.on = False
+        self._hooked = False
+
+    def update(self, window: "AppWindow", alive: bool) -> None:
+        sid = str(window.spec.get("id"))
+        if alive:
+            self.windows[sid] = window
+        else:
+            self.windows.pop(sid, None)
+        if sys.platform != "darwin" or QGuiApplication.platformName() != "cocoa":
+            return
+        try:  # pragma: no cover - macOS only
+            import AppKit
+
+            app = AppKit.NSApplication.sharedApplication()
+            want = bool(self.windows)
+            if want != self.on:
+                self.on = want
+                ok = app.setActivationPolicy_(0 if want else 1)  # Regular / Accessory
+                # On stderr: the helper's own log only passes on warnings.
+                print("app mirror: Dock icon %s%s" % ("on" if want else "off", "" if ok else " (macOS said no)"),
+                      file=sys.stderr, flush=True)
+                if not want:
+                    app.setApplicationIconImage_(None)
+                    self.icon_of = None
+            if want:
+                latest = list(self.windows.values())[-1]
+                if latest.icon_png:
+                    data = AppKit.NSData.dataWithBytes_length_(latest.icon_png, len(latest.icon_png))
+                    image = AppKit.NSImage.alloc().initWithData_(data)
+                    if image is not None and getattr(self, "icon_of", None) != latest.icon_png:
+                        app.setApplicationIconImage_(image)
+                        self.icon_of = latest.icon_png
+                        print("app mirror: Dock icon is now %s's" % (latest.spec.get("app_name") or "the app"),
+                              file=sys.stderr, flush=True)
+            if not self._hooked:
+                self._hooked = True
+                QGuiApplication.instance().applicationStateChanged.connect(self._state)
+        except Exception:
+            log.debug("app mirror: couldn't show the mirror in the Dock", exc_info=True)
+
+    def _state(self, state) -> None:  # pragma: no cover - macOS only
+        if state == Qt.ApplicationState.ApplicationActive:
+            # Its Dock icon clicked (or Cmd+Tab): minimised mirrors come back.
+            for window in list(self.windows.values()):
+                if window._gone:
+                    continue
+                if window._min:
+                    window._set_min(False, tell=True)
+                else:
+                    window._to_front()
+
+
+DOCK = DockPresence()
+
+
+def win_taskbar_button(widget: QWidget, app: str) -> None:  # pragma: no cover - Windows only
+    """Windows: a taskbar button of its own for the mirror (a window that
+    takes no focus has none unless it says it's an app window), grouped as
+    the app, not as Curslink, so its button shows the app's icon."""
+    import ctypes
+    from ctypes import wintypes
+
+    hwnd = int(widget.winId())
+    user32 = ctypes.windll.user32
+    get = getattr(user32, "GetWindowLongPtrW", user32.GetWindowLongW)
+    put = getattr(user32, "SetWindowLongPtrW", user32.SetWindowLongW)
+    get.restype, get.argtypes = ctypes.c_ssize_t, [wintypes.HWND, ctypes.c_int]
+    put.restype, put.argtypes = ctypes.c_ssize_t, [wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t]
+    ex = get(hwnd, -20)  # GWL_EXSTYLE
+    put(hwnd, -20, (ex | 0x00040000) & ~0x00000080)  # + WS_EX_APPWINDOW, - WS_EX_TOOLWINDOW
+
+    class GUID(ctypes.Structure):
+        _fields_ = [("d1", ctypes.c_uint32), ("d2", ctypes.c_uint16), ("d3", ctypes.c_uint16),
+                    ("d4", ctypes.c_ubyte * 8)]
+
+    class PROPERTYKEY(ctypes.Structure):
+        _fields_ = [("fmtid", GUID), ("pid", ctypes.c_uint32)]
+
+    class PROPVARIANT(ctypes.Structure):
+        _fields_ = [("vt", ctypes.c_ushort), ("r1", ctypes.c_ushort), ("r2", ctypes.c_ushort),
+                    ("r3", ctypes.c_ushort), ("value", ctypes.c_void_p), ("pad", ctypes.c_void_p)]
+
+    def guid(text: str) -> GUID:
+        import uuid
+
+        b = uuid.UUID(text).bytes_le
+        return GUID.from_buffer_copy(b)
+
+    store = ctypes.c_void_p()
+    iid = guid("886d8eeb-8cf2-4446-8d02-cdba1dbdcf99")  # IPropertyStore
+    shell32 = ctypes.windll.shell32
+    shell32.SHGetPropertyStoreForWindow.argtypes = [wintypes.HWND, ctypes.POINTER(GUID), ctypes.POINTER(ctypes.c_void_p)]
+    if shell32.SHGetPropertyStoreForWindow(hwnd, ctypes.byref(iid), ctypes.byref(store)) != 0 or not store:
+        return
+    vtable = ctypes.cast(ctypes.cast(store, ctypes.POINTER(ctypes.c_void_p))[0], ctypes.POINTER(ctypes.c_void_p))
+    set_value = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.POINTER(PROPERTYKEY),
+                                   ctypes.POINTER(PROPVARIANT))(vtable[6])
+    commit = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p)(vtable[7])
+    release = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(vtable[2])
+    try:
+        key = PROPERTYKEY(guid("9f4c2855-9f79-4b39-a8d0-e1d42de1d5f3"), 5)  # PKEY_AppUserModel_ID
+        name = "Curslink.Mirror." + "".join(c for c in app if c.isalnum())[:60]
+        text = ctypes.create_unicode_buffer(name)
+        value = PROPVARIANT(31, 0, 0, 0, ctypes.cast(text, ctypes.c_void_p), None)  # VT_LPWSTR
+        if set_value(store, ctypes.byref(key), ctypes.byref(value)) == 0:
+            commit(store)
+    finally:
+        release(store)
+
+
+def win_round_corners(widget: QWidget, on: bool) -> bool:  # pragma: no cover - Windows only
+    """Windows 11: round the window's corners as Windows does its own
+    (DWMWA_WINDOW_CORNER_PREFERENCE). False where it can't (Windows 10)."""
+    try:
+        import ctypes
+
+        pref = ctypes.c_int(2 if on else 1)  # DWMWCP_ROUND / DWMWCP_DONOTROUND
+        return ctypes.windll.dwmapi.DwmSetWindowAttribute(int(widget.winId()), 33, ctypes.byref(pref),
+                                                          ctypes.sizeof(pref)) == 0
+    except Exception:
+        return False
+
+
 class AppWindow(MirrorWindow):
     """Another computer's app, in a window of its own with nothing around it."""
 
     def __init__(self, spec: dict, out=None):
         self.tag: AppTag | None = None
-        self._resize: tuple[str, QPointF, QRect] | None = None
+        self.ring: GripRing | None = None
+        self.sprite: PointerSprite | None = None
         self._raised = spec.get("raise", 0)
         self._carried = bool(spec.get("carried"))
+        self._full = bool(spec.get("full"))
         self.app_out = out
         self._gone = False
+        self.icon_png: bytes = b""
+        self._taskbar = False
+        # Minimised (the host says, spec "min"): to its taskbar button on
+        # Windows; hidden on a Mac, back when the Dock icon is clicked.
+        self._min = False
+        self._work_said: tuple | None = None  # the screen's work area last told
+        self._dwm_round = False  # Windows 11 rounds it (DWM), so no mask
         super().__init__(dict(spec, tune=False), out)
-        flags = (Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool | Qt.WindowType.WindowDoesNotAcceptFocus
+        flags = (Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowDoesNotAcceptFocus
                  | Qt.WindowType.NoDropShadowWindowHint)
+        if sys.platform != "win32":
+            # A Windows mirror has a taskbar button of its own (see
+            # win_taskbar_button); a Mac's goes in the Dock as the helper's.
+            flags |= Qt.WindowType.Tool
         self.setWindowFlags(flags)
         # Solid: no see-through window (on Windows a see-through window is
         # redrawn by the processor, every frame), and its round corners cut
         # out by a mask instead.
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
-        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, False)
-        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+        # On a Mac a mask doesn't cut a solid window's corners (they showed
+        # square, Kyle 0.4.125): there it's see-through round its rounded
+        # picture (cheap, the window server composites every window anyway).
+        clear = sys.platform == "darwin"
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, clear)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, clear)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, not clear)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
-        self.maxed: QRect | None = None  # filling its screen: where it was before
         self._masked: tuple | None = None
-        self.setMouseTracking(True)
+        self.setWindowTitle(str(spec.get("label") or "App"))
         self.tag = AppTag(self)
+        self.ring = GripRing(self)
+        self.sprite = PointerSprite()
         if self.ok:
             self.set(spec)
+        DOCK.update(self, True)
+
+    @property
+    def maxed(self):
+        """Filling its screen (the host says: spec ``full``)."""
+        return True if self.spec.get("full") else None
 
     def set(self, spec: dict) -> bool:
         ok = super().set(dict(spec, tune=False))
         if not ok or self.tag is None:
             return ok
         carried = bool(spec.get("carried"))
-        if spec.get("raise", 0) != self._raised or carried != self._carried:
-            # Pointed into, or picked up / put down: in front of every app
-            # here, and over all of them while it's carried.
+        full = bool(spec.get("full"))
+        if spec.get("raise", 0) != self._raised or carried != self._carried or full != self._full:
+            # Pointed into, or picked up / put down, or filling its screen:
+            # in front of every app here (over all of them while it's carried
+            # or fills the screen).
             self._raised = spec.get("raise", 0)
             self._carried = carried
+            self._full = full
             self._to_front()
+        title = str(spec.get("label") or "App")
+        if title != self.windowTitle():
+            self.setWindowTitle(title)
+        self._set_min(bool(spec.get("min")))
         self._mask()
         self._place_tag()
         return ok
 
-    def _place_tag(self) -> None:
-        if self.tag is None:
+    def _set_min(self, on: bool, tell: bool = False) -> None:
+        """Minimised, or back. ``tell``: done here (its taskbar button, the
+        Dock), so the host is told."""
+        if on == self._min:
             return
+        self._min = on
+        if tell:
+            self._tell_view(min=on)
+        if on:
+            for part in (self.ring, self.tag, self.sprite):
+                if part is not None:
+                    part.hide()
+            if sys.platform == "win32":
+                if self.isVisible() and not self.windowState() & Qt.WindowState.WindowMinimized:
+                    self.showMinimized()
+            else:
+                self.hide()  # a frameless Mac window can't go into the Dock; the Dock icon brings it back
+            DOCK.update(self, not self._gone)
+            return
+        if self.windowState() & Qt.WindowState.WindowMinimized:
+            self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized)
+        if self.pixmap is not None or (self.canvas is not None and self.got.get("whole")):
+            self.showNormal()
+            QTimer.singleShot(0, self._to_front)
+            QTimer.singleShot(0, self._place_tag)
+        DOCK.update(self, not self._gone)
+
+    def set_icon(self, png_b64: str) -> None:
+        """The app's icon: its taskbar button's (and the Dock's, on a Mac)."""
+        try:
+            raw = base64.b64decode(png_b64, validate=True)
+        except (ValueError, TypeError):
+            return
+        pix = QPixmap()
+        if not pix.loadFromData(raw, "PNG"):
+            return
+        self.icon_png = raw
+        self.setWindowIcon(QIcon(pix))
+        DOCK.update(self, not self._gone)
+
+    def _place_tag(self) -> None:
+        if self.tag is None or self._min:
+            return
+        if self.ring is not None:
+            if self.isVisible() and not self.spec.get("carried") and not self.spec.get("full"):
+                self.ring.place()
+                if not self.ring.isVisible():
+                    self.ring.show()
+                    bring_to_front(self.ring, False)
+            else:
+                self.ring.hide()
         if self.spec.get("hover") and self.isVisible() and not self.spec.get("carried"):
             self.tag.place(str(self.spec.get("label") or "App"), self.geometry())
             self.tag.show()
@@ -592,18 +1154,57 @@ class AppWindow(MirrorWindow):
         was = self.isVisible()
         super().image(data)
         if self.isVisible() and not was:
+            if sys.platform == "win32" and not self._taskbar:
+                self._taskbar = True
+                try:
+                    win_taskbar_button(self, str(self.spec.get("app_name") or self.spec.get("label") or "App"))
+                except Exception:  # pragma: no cover - platform trouble
+                    log.debug("app mirror: no taskbar button of its own", exc_info=True)
             self._to_front()
             self._place_tag()
             # Its screen's pixel ratio (a Windows screen's scaling): the host
             # sizes the app for it, and sends pictures at its pixels.
-            sc = self.screen()
-            if sc is not None:
-                self._tell_view(dpr=round(float(sc.devicePixelRatio() or 1.0), 3))
+            self._tell_screen()
+
+    def _tell_screen(self) -> None:
+        """Its screen's pixel ratio (a Windows screen's scaling: the host
+        sizes the app for it, and sends pictures at its pixels), and the part
+        of it apps fill (not the menu bar and Dock, nor the taskbar: a full
+        screen mirror leaves those, as the computer's own apps do)."""
+        sc = self.screen()
+        if sc is None:
+            return
+        a = sc.availableGeometry()
+        work = logical_to_os(self.spec, a.x(), a.y(), a.width(), a.height())
+        key = (id(sc), tuple(work))
+        if key == self._work_said:
+            return
+        self._work_said = key
+        self._tell_view(dpr=round(float(sc.devicePixelRatio() or 1.0), 3), work=work)
 
     def _to_front(self) -> None:
+        full = bool(self.spec.get("full"))
+        if self.ring is not None and self.ring.isVisible():
+            bring_to_front(self.ring, self._carried)
+        # Filling its screen it's an ordinary window, as a full app is: the
+        # menu bar, the Dock and the taskbar stay over it, other apps can come in front.
         bring_to_front(self, self._carried)
         if self.tag is not None and self.tag.isVisible():
             self.tag.raise_()
+        if self.sprite is not None and self.sprite.isVisible():
+            bring_to_front(self.sprite, True, over_menus=True)  # the pointer over it, always
+
+    def changeEvent(self, e) -> None:  # noqa: N802
+        super().changeEvent(e)
+        # Its taskbar button pressed: Windows minimises it, or brings it back,
+        # as any app's window. The host's told (the pointer doesn't go into
+        # a mirror that's put away).
+        from PySide6.QtCore import QEvent
+
+        if e.type() == QEvent.Type.WindowStateChange and not self._gone:
+            mini = bool(self.windowState() & Qt.WindowState.WindowMinimized)
+            if mini != self._min:
+                self._set_min(mini, tell=True)
 
     def closed(self) -> None:
         self._tell_view(closed=True)
@@ -615,10 +1216,12 @@ class AppWindow(MirrorWindow):
         if self._gone:
             return
         self._gone = True
-        if self.tag is not None:
-            self.tag.hide()
-            self.tag.deleteLater()
-            self.tag = None
+        DOCK.update(self, False)
+        for part in (self.tag, self.ring, self.sprite):
+            if part is not None:
+                part.hide()
+                part.deleteLater()
+        self.tag = self.ring = self.sprite = None
         super().close_soon()
 
     def setWindowOpacity(self, _level: float) -> None:  # noqa: N802
@@ -632,7 +1235,15 @@ class AppWindow(MirrorWindow):
         if key == self._masked:
             return
         self._masked = key
-        if corner <= 0:
+        if corner <= 0 or sys.platform == "darwin":
+            self.clearMask()  # (a Mac's is see-through round its rounded corners)
+            if sys.platform == "win32" and self._dwm_round:
+                win_round_corners(self, False)
+                self._dwm_round = False
+            return
+        if sys.platform == "win32" and win_round_corners(self, True):
+            # Windows 11 rounds it, smoothly, as it does its own windows.
+            self._dwm_round = True
             self.clearMask()
             return
         path = QPainterPath()
@@ -643,73 +1254,52 @@ class AppWindow(MirrorWindow):
         super().resizeEvent(e)
         self._mask()
 
+    def moveEvent(self, e) -> None:  # noqa: N802
+        super().moveEvent(e)
+        if self.isVisible():
+            self._tell_screen()  # onto another screen: its scaling, its work area
+        if self.ring is not None and self.ring.isVisible():
+            self.ring.place()
+
     def toggle_max(self) -> None:
-        """Fill its screen (as much as apps get: not the taskbar or the menu
-        bar), or back to where it was; the app itself takes the size."""
-        sc = self.screen()
-        if sc is None:
-            return
-        if self.maxed is None:
-            self.maxed = self.geometry()
-            g = sc.availableGeometry()
-        else:
-            g, self.maxed = self.maxed, None
-        self.setGeometry(g)
-        self._place_tag()
-        if self.tag is not None:
-            self.tag.update()
-        self._tell_view(os=logical_to_os(self.spec, g.x(), g.y(), g.width(), g.height()))
+        """Fill its screen, or back (the tag's box): the host does it, so the
+        app takes that screen's shape."""
+        self._tell_view(full=True)
 
     def _tell_view(self, **data) -> None:
         if self.app_out is not None:
             self.app_out("app_view " + json.dumps({"id": self.spec.get("id"), **data}, separators=(",", ":")))
 
-    # -- its own outer pixels: resize, keeping its shape ---------------------------
-    def _grip_sides(self, pos: QPointF) -> str:
-        w, h = self.width(), self.height()
-        out = ""
-        if pos.x() < GRIP:
-            out += "l"
-        elif pos.x() > w - GRIP:
-            out += "r"
-        if pos.y() < GRIP:
-            out += "t"
-        elif pos.y() > h - GRIP:
-            out += "b"
-        return out
+    # -- the pointer: the app's own cursor, in a little window of its own -----------
+    def picture_rect(self) -> QRectF:
+        whole = self.canvas is not None and self.got.get("whole")
+        if self.pixmap is None and not whole:
+            return QRectF(self.rect())
+        pic = QRectF(self.canvas.rect()) if whole else QRectF(self.pixmap.rect())
+        return fit_in(QRectF(self.rect()), pic.width(), pic.height())
 
-    def mousePressEvent(self, e) -> None:  # noqa: N802
-        sides = self._grip_sides(e.position())
-        if sides:
-            self._resize = (sides, e.globalPosition(), self.geometry())
-
-    def mouseMoveEvent(self, e) -> None:  # noqa: N802
-        if self._resize is None:
-            sides = self._grip_sides(e.position())
-            shapes = {"l": Qt.CursorShape.SizeHorCursor, "r": Qt.CursorShape.SizeHorCursor,
-                      "t": Qt.CursorShape.SizeVerCursor, "b": Qt.CursorShape.SizeVerCursor,
-                      "lt": Qt.CursorShape.SizeFDiagCursor, "rb": Qt.CursorShape.SizeFDiagCursor,
-                      "rt": Qt.CursorShape.SizeBDiagCursor, "lb": Qt.CursorShape.SizeBDiagCursor}
-            self.setCursor(shapes.get(sides, Qt.CursorShape.ArrowCursor))
+    def set_pointer(self, p: tuple[float, float] | None) -> None:
+        self.pointer = p
+        if self.sprite is None:
             return
-        sides, start, g = self._resize
-        now = e.globalPosition()
-        dx, dy = now.x() - start.x(), now.y() - start.y()
-        # Any shape: the app itself is resized to it, and lays itself out
-        # again (the picture is fitted in until it has).
-        w = max(160.0, g.width() + (dx if "r" in sides else -dx if "l" in sides else 0))
-        h = max(100.0, g.height() + (dy if "b" in sides else -dy if "t" in sides else 0))
-        x = g.right() + 1 - w if "l" in sides else g.x()
-        y = g.bottom() + 1 - h if "t" in sides else g.y()
-        self.setGeometry(QRect(round(x), round(y), round(w), round(h)))
-        self._place_tag()
-        self.update()
+        if p is None or not self.isVisible():
+            self.sprite.hide()
+            return
+        r = self.picture_rect()
+        g = self.geometry()
+        at = QPointF(g.x() + r.x() + p[0] * r.width(), g.y() + r.y() + p[1] * r.height())
+        k = self.width() / self.shape[5] if self.shape is not None and self.shape[5] > 0 else 1.0
+        self.sprite.show_at(at, self.shape, k)
 
-    def mouseReleaseEvent(self, _e) -> None:  # noqa: N802
-        if self._resize is not None:
-            self._resize = None
-            g = self.geometry()
-            self._tell_view(os=logical_to_os(self.spec, g.x(), g.y(), g.width(), g.height()))
+    def set_shape(self, data: dict | None) -> None:
+        super().set_shape(data)
+        if self.pointer is not None:
+            self.set_pointer(self.pointer)
+
+    # A press on the mirror itself (its last pixel or two, or a rounded-off
+    # corner): nothing; the ring round it resizes it.
+    def mousePressEvent(self, _e) -> None:  # noqa: N802
+        return
 
     def wheelEvent(self, _e) -> None:  # noqa: N802
         return
@@ -719,13 +1309,22 @@ class AppWindow(MirrorWindow):
         if self.pixmap is None and not whole:
             return
         p = QPainter(self)
-        p.fillRect(self.rect(), QColor(0, 0, 0))  # solid: what the picture doesn't cover
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        corner = float(self.spec.get("corner") or 0)
+        if self.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground):
+            # Clear round it; solid inside its rounded corners.
+            p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+            p.fillRect(self.rect(), Qt.GlobalColor.transparent)
+            p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+            back = QPainterPath()
+            back.addRoundedRect(QRectF(self.rect()), corner, corner)
+            p.fillPath(back, QColor(0, 0, 0))
+        else:
+            p.fillRect(self.rect(), QColor(0, 0, 0))  # solid: what the picture doesn't cover
         pic = QRectF(self.canvas.rect()) if whole else QRectF(self.pixmap.rect())
         r = fit_in(QRectF(self.rect()), pic.width(), pic.height())
         p.save()
-        corner = float(self.spec.get("corner") or 0)
         if corner > 0:
             path = QPainterPath()
             path.addRoundedRect(r, corner, corner)
@@ -735,8 +1334,4 @@ class AppWindow(MirrorWindow):
         else:
             p.drawPixmap(r, self.pixmap, pic)
         p.restore()
-        if self.pointer is not None:
-            # Drawn here, where the host says it is: it moves as fast as the
-            # pointer does, not as fast as pictures come.
-            self.paint_pointer(p, QPointF(r.x() + self.pointer[0] * r.width(), r.y() + self.pointer[1] * r.height()))
         p.end()

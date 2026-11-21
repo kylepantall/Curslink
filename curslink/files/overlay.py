@@ -368,7 +368,12 @@ def make_drag_source(tid: str, paths: list[str], info: dict):
     # A Mac's press comes as a real mouse-down at the pointer, which may be
     # moving fast as the drag arrives (0.4.98: 190 px between showing and
     # the press, so it landed beside a 48 px window, in the app under it).
-    size = MAC_SOURCE_PX if cocoa else 48
+    # Windows likewise: the press is injected at the pointer by another
+    # process a moment after this window was put there, and a fast drag
+    # arriving from another computer can be past a small one by then. The
+    # press then went to the app under the pointer, which dragged the text
+    # selected in it instead of the file (Kyle, 0.4.125, Mac -> PC into Claude).
+    size = MAC_SOURCE_PX if cocoa else WIN_SOURCE_PX if windows else 48
 
     class Source(QWidget):
         def __init__(self):
@@ -390,7 +395,7 @@ def make_drag_source(tid: str, paths: list[str], info: dict):
             pos = QCursor.pos()
             self.move(pos.x() - size // 2, pos.y() - size // 2)
             if windows and not self.dragging and _win_left_down():
-                QTimer.singleShot(0, self.start_drag)
+                QTimer.singleShot(0, self.start_held)
 
         def paintEvent(self, _e) -> None:  # noqa: N802
             p = QPainter(self)
@@ -448,11 +453,23 @@ def make_drag_source(tid: str, paths: list[str], info: dict):
                 # AppKit's own drag does, now with the press behind it.
                 self.start_appkit(True) if cocoa else self.start_drag()
 
+        def start_held(self) -> None:
+            """Windows: the button is down, but the press didn't come here."""
+            if self.dragging:
+                return
+            if not self.geometry().contains(QCursor.pos()):
+                _say("log the press landed beside the drag source; starting the drag anyway")
+            self.start_drag()
+
         def start_drag(self) -> None:
             if self.dragging:
                 return
             self.dragging = True
             self.timer.stop()
+            if windows:
+                # Now it's under the pointer it mustn't be the first window the
+                # drag goes over (it takes no drops), or catch the drop.
+                win_click_through(self)
             mime = QMimeData()
             mime.setUrls([QUrl.fromLocalFile(p) for p in paths])
             drag = QDrag(self)
@@ -531,6 +548,7 @@ MAC_SHOWN_MS = 30         # after the first paint, before asking for the press
 MAC_READY_MAX_MS = 150    # ask for it anyway if no paint came by then
 MAC_REPRESS_WAIT_MS = 250  # after pressing again, before starting without a press
 MAC_SOURCE_PX = 480
+WIN_SOURCE_PX = 480
 MAC_START_TRIES = 4
 MAC_RETRY_MS = 150
 
@@ -564,10 +582,39 @@ def mac_repress() -> bool:
         at = Quartz.CGEventGetLocation(Quartz.CGEventCreate(None))
         for kind in (Quartz.kCGEventLeftMouseUp, Quartz.kCGEventLeftMouseDown):
             ev = Quartz.CGEventCreateMouseEvent(None, kind, at, Quartz.kCGMouseButtonLeft)
+            Quartz.CGEventSetIntegerValueField(ev, 1, 1)  # kCGMouseEventClickState: a single press
             Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
         return True
     except Exception as exc:  # pragma: no cover - macOS only
         _say(f"log couldn't press again: {type(exc).__name__}: {exc}")
+        return False
+
+
+def win_click_through(widget) -> bool:
+    """Windows: let every click, hover and drop through ``widget``'s window
+    (WS_EX_LAYERED | WS_EX_TRANSPARENT), without re-creating it the way
+    changing its Qt flags would. False if it couldn't."""
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        hwnd = int(widget.winId())
+        get = getattr(user32, "GetWindowLongPtrW", user32.GetWindowLongW)
+        put = getattr(user32, "SetWindowLongPtrW", user32.SetWindowLongW)
+        get.restype = put.restype = ctypes.c_ssize_t
+        get.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        put.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_ssize_t]
+        gwl_exstyle, ws_ex_layered, ws_ex_transparent = -20, 0x80000, 0x20
+        put(hwnd, gwl_exstyle, get(hwnd, gwl_exstyle) | ws_ex_layered | ws_ex_transparent)
+        return True
+    except Exception as exc:  # pragma: no cover - Windows only
+        _say(f"log couldn't let clicks through the drag source: {type(exc).__name__}: {exc}")
+        try:
+            widget.move(-30000, -30000)  # out of the way, then
+        except Exception:
+            pass
         return False
 
 

@@ -252,6 +252,23 @@ without a camera keep the host-only behaviour, and `confirm_with_agents =
 false` in `[gaze]` turns the check off. Agents only send `facing` to a
 host that lists it in `welcome.features`, so mixed versions keep working.
 
+**Every camera from its own angle.** "Facing it" only works for a camera
+you look straight into. A laptop at the side of the desk sees the look at
+its second monitor, or at the host's screen, as a head turned well away,
+and the host's own camera loses the face altogether with a bright window
+behind you. So an agent's camera also sends its head angles (`pose`
+frames, about 12 a second, to a host whose features list `"pose"`). While
+the Calibrate page runs, the host passes them to the app, which records
+each look as every camera saw it: `calibration.json` gains a `cameras`
+map (device id to the same targets-and-samples as the host's own). A look
+counts as recorded when any camera saw it. At run time
+`gaze.zones.JointClassifier` measures each camera against its own centres
+and takes the cameras that see you now together (root mean square of
+their distances), so a screen wins when they agree on it and the others
+carry on when one loses your face. A camera calibrated this way is part
+of that decision: it is no longer asked to confirm, and its `facing`
+reports move nothing by themselves.
+
 ### Any device's camera, on its own
 
 The host's camera isn't required. When it's off, uncalibrated, or has
@@ -431,6 +448,42 @@ front of it shows the part it covers, live (`curslink.mirror`).
   it) and reports drags, side stretches and wheel zooms as `mirror_tune`
   frames; `MirrorHost.tune` turns them into `fit` changes. Save writes the
   `[[layout.fit]]` without a restart.
+- The set-up guide (`curslink.gui.guide`): set-up as steps in the order
+  they're needed (this computer, devices, your desk, your seat, looking,
+  try it) instead of spread over the pages. `steps(app)` works out where
+  each stands from the config and the files beside it (`seat.json`, the gaze
+  calibration), so nothing is kept twice; only "continued past" and
+  "skipped" are remembered (desktop.json `guide_done`, `guide_skipped`, and
+  `guide`, the step being done). `GuideBar` is the strip across the top of
+  the window while it runs: the step, what to do, the button that does it
+  (`Guide.act`: the phone scan, the seat step, the looking pass, each on its
+  own page) and Continue. A host's first run goes straight into it;
+  `SetupCard` on the Status page lists the steps afterwards, each with a
+  button to do it again. The seat step only shows when screens overlap.
+  An agent has no guide: it waits to be added.
+- One look (`curslink.gui.theme`): the same colours, sizes and style sheet
+  on every platform (`TOKENS`, `SIZES` under `LOOK`), solid surfaces with
+  nothing of the platform's behind the window. `Theme.platform` is only
+  for what a platform needs (room for the Mac's window buttons).
+- Line up from your seat (`curslink.seatalign`, `curslink.gui.seatalign`):
+  what the Layout page's "Line up from your seat…" opens, in place of
+  the free-form fine-tune. `Align` picks up to three spots on the front
+  screen's rim that are seen against the screen behind (two corners where
+  it can, and halfway between them), and the window walks through them:
+  the arrow keys move the whole picture at the first, turn and size it
+  about the first at the second, and draw it out along the edge at the
+  third. Each nudge is a `fit` command with the picture's four corners
+  (`quad`), `"keep": true` (the guides behind stay put) and `rings`
+  (`[x, y, radius, on]` per spot, the screen behind's pixels), which the
+  host passes on in the capture and show specs in OS pixels; both helpers
+  draw them (`paint_guides(rings=...)`), with "Look here" by the one being
+  joined. With a desk a live line-up solved (`seat.json`), two joined spots
+  are two lines back to the eyes: `seatalign.eye_from` finds where they
+  meet, `seat.joined_shape` gives the picture's shape from there for the
+  third spot, and `seat.apply_joined` saves the fit as joined, aims the
+  desk and every other overlap from the eyes, and gives this one the
+  `eye`/`depth` head tracking follows. An older agent or the phone app
+  ignores `rings` and shows the plain guides.
 - Alignment guides while adjusting: the capture and show specs carry
   `guides`, the covered area when adjusting began (in the screen behind's
   OS pixels; it stays put so only the mirror's copy moves), and the show

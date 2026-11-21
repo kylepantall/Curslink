@@ -239,6 +239,18 @@ class PynputCapture:
             return
         self._restart(wait)
 
+    def set_cursor_hidden(self, hidden: bool) -> None:
+        """While input is here (not grabbed): hide the cursor, or show it
+        again. In a mirror of one of this computer's own apps, the pointer is
+        drawn in the mirror on the other screen; this one's cursor, over the
+        app's invisible window here, is only in the way."""
+        if self._grabbed:
+            return
+        if self._mac:
+            _mac_cursor_visible(not hidden)
+        elif self._hider is not None:
+            (self._hider.hide if hidden else self._hider.show)()
+
     def _suppress_live(self, on: bool) -> bool:
         """Windows: hold input back (or stop) with the hooks already in,
         rather than new ones. True if that did it.
@@ -1012,7 +1024,8 @@ def _mac_warp(x: float, y: float) -> None:
         log.debug("couldn't warp the cursor", exc_info=True)
 
 
-def _mac_post_move(x: int, y: int, held: set[str], last: tuple[int, int] | None) -> bool:
+def _mac_post_move(x: int, y: int, held: set[str], last: tuple[int, int] | None,
+                   clicks: "ClickCounter | None" = None) -> bool:
     """Move the cursor to (x, y) with a real mouse event, as a mouse would:
     mouse-dragged while a button is held (so a window being dragged moves,
     and a drag of files begins and moves), mouse-moved otherwise (so what's
@@ -1036,6 +1049,14 @@ def _mac_post_move(x: int, y: int, held: set[str], last: tuple[int, int] | None)
         else:
             kind, button = Quartz.kCGEventMouseMoved, Quartz.kCGMouseButtonLeft
         ev = Quartz.CGEventCreateMouseEvent(None, kind, (float(x), float(y)), button)
+        if kind != Quartz.kCGEventMouseMoved:
+            # A real mouse's drag events carry the click count of the press
+            # that began them (1, or 2 for a double-click drag selecting by
+            # words); a created one may say 0, and an app can take that for
+            # a drag with no press behind it.
+            name = "left" if "left" in held else "right" if "right" in held else "middle"
+            count = clicks.held(name) if clicks is not None else 1
+            Quartz.CGEventSetIntegerValueField(ev, _MAC_CLICK_STATE, count)
         if last is not None:  # some apps (and games) read how far it moved
             Quartz.CGEventSetIntegerValueField(ev, _MAC_DELTA_X, int(x - last[0]))
             Quartz.CGEventSetIntegerValueField(ev, _MAC_DELTA_Y, int(y - last[1]))
@@ -1043,6 +1064,82 @@ def _mac_post_move(x: int, y: int, held: set[str], last: tuple[int, int] | None)
         return True
     except Exception:  # pragma: no cover - macOS only
         log.debug("couldn't post the mouse move", exc_info=True)
+        return False
+
+
+_MAC_BUTTONS = {"left": (1, 2, 0), "right": (3, 4, 1), "middle": (25, 26, 2)}  # down, up, CGMouseButton
+_MAC_CLICK_STATE = 1                       # kCGMouseEventClickState
+
+
+class ClickCounter:
+    """Counts clicks the way the OS would for a real mouse: a press of the
+    same button soon enough after the last one, close enough to it, is the
+    next click of a double (or triple) click; its release carries the same
+    count. A Mac app sees a double click only from the click count on the
+    event (kCGMouseEventClickState), not from the timing, and a bare posted
+    press always says 1: 0.4.121 and before, double clicks driven from
+    another computer never registered on a Mac."""
+
+    SLOP_PX = 5
+
+    def __init__(self, interval: float = 0.5):
+        self.interval = interval
+        self._last: tuple[str, float, float, float, int, str] | None = None  # button, t, x, y, count, clock
+        self._held: dict[str, int] = {}
+
+    def press(self, button: str, x: float, y: float, now: float | None = None) -> int:
+        """``now``: when it was pressed on the host's mouse (the host's
+        clock), else when it got here."""
+        clock = "local" if now is None else "host"
+        now = time.monotonic() if now is None else now
+        count = 1
+        if self._last is not None:
+            b, t, lx, ly, n, c = self._last
+            # Only times on the same clock compare (a restarted host has a new one).
+            if (b == button and c == clock and 0 <= now - t <= self.interval
+                    and abs(x - lx) <= self.SLOP_PX and abs(y - ly) <= self.SLOP_PX):
+                count = n + 1
+        self._last = (button, now, x, y, count, clock)
+        self._held[button] = count
+        return count
+
+    def release(self, button: str) -> int:
+        return self._held.pop(button, 1)
+
+    def held(self, button: str) -> int:
+        """The click count of ``button``'s press, while it's held (1 if this
+        counter didn't see it go down)."""
+        return self._held.get(button, 1)
+
+
+def _mac_double_click_interval() -> float:
+    try:
+        from AppKit import NSEvent
+
+        return float(NSEvent.doubleClickInterval()) or 0.5
+    except Exception:  # pragma: no cover - macOS only
+        return 0.5
+
+
+def _mac_post_button(button: str, pressed: bool, clicks: ClickCounter, ts: float | None = None) -> bool:
+    """Press or let go of a mouse button where the cursor is, as a real
+    mouse would, with the click count set so double and triple clicks
+    work. False if it couldn't be posted."""
+    try:
+        import Quartz
+
+        down, up, number = _MAC_BUTTONS[button]
+        loc = Quartz.CGEventGetLocation(Quartz.CGEventCreate(None))
+        at = (float(loc.x), float(loc.y))
+        count = clicks.press(button, *at, now=ts) if pressed else clicks.release(button)
+        ev = Quartz.CGEventCreateMouseEvent(None, down if pressed else up, at, number)
+        Quartz.CGEventSetIntegerValueField(ev, _MAC_CLICK_STATE, count)
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
+        if count > 1:
+            log.debug("click %d of %s", count, button)
+        return True
+    except Exception:  # pragma: no cover - macOS only
+        log.debug("couldn't post the mouse button", exc_info=True)
         return False
 
 
@@ -1096,10 +1193,12 @@ _mac_hides = 0     # CGDisplayHideCursor calls not yet matched by a show
 _mac_rehides = 0   # times it was found showing and hidden again, this time away
 # While hidden: how soon to look whether it's showing again (the first one
 # soon, after the system shortcuts are turned off), then how often.
-_MAC_HIDE_CHECKS_S = (0.05, 0.2)
+# (Every 0.05 s, not 0.2: going into a mirrored app, macOS shows it as the
+# mirror comes forward, and for 0.2 s it was a second pointer, Kyle 0.4.125.)
+_MAC_HIDE_CHECKS_S = (0.05, 0.05)
 # Hidden again this many times while away and still showing: macOS won't
 # have it, so stop (and say so) rather than pile up hides.
-_MAC_REHIDE_MAX = 50
+_MAC_REHIDE_MAX = 400  # (each time into a mirrored app can be one)
 
 
 def _mac_keep_hidden(gen: int) -> bool:
@@ -1229,7 +1328,8 @@ class PynputSink:
         if sys.platform == "win32" and _win_move(x, y):
             return
         if sys.platform == "darwin" and self.post_moves:
-            if _mac_post_move(x, y, self.__dict__.get("_down", set()), self._posted_at):
+            if _mac_post_move(x, y, self.__dict__.get("_down", set()), self._posted_at,
+                              self.__dict__.get("_clicks")):
                 self._posted_at = (x, y)
                 return
         if sys.platform == "darwin":
@@ -1253,6 +1353,18 @@ class PynputSink:
             return
         self.move_to(x, y)
 
+    def button_at(self, button: str, pressed: bool, ts: float) -> None:
+        """``button`` with when it went on the host's mouse (seconds, the
+        host's clock): a Mac counts a double click by the time between the
+        presses as they happened, not as they arrived. The network can bunch
+        a click and the press after it into a double click (a word selected
+        and dragged in place of a file) or spread a real one apart."""
+        self._button_ts = ts
+        try:
+            self.button(button, pressed)
+        finally:
+            self._button_ts = None
+
     def button(self, button: str, pressed: bool) -> None:
         from pynput import mouse
 
@@ -1263,6 +1375,12 @@ class PynputSink:
             return
         down = self.__dict__.setdefault("_down", set())
         (down.add if pressed else down.discard)(button)
+        if sys.platform == "darwin" and button in _MAC_BUTTONS:
+            clicks = self.__dict__.get("_clicks")
+            if clicks is None:
+                clicks = self._clicks = ClickCounter(_mac_double_click_interval())
+            if _mac_post_button(button, pressed, clicks, self.__dict__.get("_button_ts")):
+                return
         (self._mouse.press if pressed else self._mouse.release)(target)
 
     def scroll(self, dx: float, dy: float) -> None:
@@ -1371,6 +1489,7 @@ def press_left_here() -> None:
         at = mac_cursor()
         for kind in (Quartz.kCGEventLeftMouseUp, Quartz.kCGEventLeftMouseDown):
             ev = Quartz.CGEventCreateMouseEvent(None, kind, at, Quartz.kCGMouseButtonLeft)
+            Quartz.CGEventSetIntegerValueField(ev, _MAC_CLICK_STATE, 1)
             Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
             time.sleep(0.02)
     except Exception:  # pragma: no cover - macOS only
@@ -1394,6 +1513,7 @@ def _drag_move(x: int, y: int) -> None:
             for px in (x + 1, x):
                 ev = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventLeftMouseDragged, (px, y),
                                                     Quartz.kCGMouseButtonLeft)
+                Quartz.CGEventSetIntegerValueField(ev, _MAC_CLICK_STATE, 1)
                 Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
                 time.sleep(0.03)
         except Exception:  # pragma: no cover - macOS only
@@ -1425,6 +1545,7 @@ def _drag_release(x: int, y: int) -> None:
 
             ev = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventLeftMouseUp, (x, y),
                                                 Quartz.kCGMouseButtonLeft)
+            Quartz.CGEventSetIntegerValueField(ev, _MAC_CLICK_STATE, 1)
             Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
         except Exception:  # pragma: no cover - macOS only
             log.warning("couldn't let go of the drag on this Mac", exc_info=True)

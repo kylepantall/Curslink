@@ -158,11 +158,7 @@ def _windows(dpr: float) -> dict | None:  # pragma: no cover - Windows only
         _fields_ = [("cbSize", wintypes.DWORD), ("flags", wintypes.DWORD),
                     ("hCursor", wintypes.HANDLE), ("ptScreenPos", wintypes.POINT)]
 
-    class ICONINFO(ctypes.Structure):
-        _fields_ = [("fIcon", wintypes.BOOL), ("xHotspot", wintypes.DWORD), ("yHotspot", wintypes.DWORD),
-                    ("hbmMask", wintypes.HBITMAP), ("hbmColor", wintypes.HBITMAP)]
-
-    user32, gdi32 = _win_dlls()
+    user32, _gdi32 = _win_dlls()
     info = CURSORINFO()
     info.cbSize = ctypes.sizeof(CURSORINFO)
     if not user32.GetCursorInfo(ctypes.byref(info)) or not info.flags & 1 or not info.hCursor:
@@ -170,6 +166,30 @@ def _windows(dpr: float) -> dict | None:  # pragma: no cover - Windows only
     handle = int(info.hCursor)
     if _win_last is not None and _win_last[0] == handle:
         return _win_last[1]
+    out, blank = _win_read(handle, dpr)
+    which = _win_system_id(handle)
+    if not blank:
+        if which is not None:
+            _win_originals[which] = out
+    else:
+        # Curslink's own hidden cursor (curslink.cursorhide swaps the system's
+        # cursors for blank ones while this computer's app is used through
+        # its mirror on another screen): the look it stands for.
+        out = (_win_originals.get(which) if which is not None else None) or _win_scheme(which, dpr) or arrow()
+    _win_last = (handle, out)
+    return out
+
+
+def _win_read(handle: int, dpr: float) -> tuple[dict, bool]:  # pragma: no cover - Windows only
+    """A cursor's look, and whether it's blank (all clear)."""
+    import ctypes
+    from ctypes import wintypes
+
+    class ICONINFO(ctypes.Structure):
+        _fields_ = [("fIcon", wintypes.BOOL), ("xHotspot", wintypes.DWORD), ("yHotspot", wintypes.DWORD),
+                    ("hbmMask", wintypes.HBITMAP), ("hbmColor", wintypes.HBITMAP)]
+
+    user32, gdi32 = _win_dlls()
     icon = ICONINFO()
     if not user32.GetIconInfo(handle, ctypes.byref(icon)):
         raise OSError(f"GetIconInfo failed ({ctypes.get_last_error()})")
@@ -180,6 +200,9 @@ def _windows(dpr: float) -> dict | None:  # pragma: no cover - Windows only
         image = QImage.fromHICON(handle)
         if image.isNull():
             raise OSError("Qt couldn't read the cursor's picture")
+        argb = image.convertToFormat(QImage.Format.Format_ARGB32)
+        raw = bytes(argb.constBits())[: argb.sizeInBytes()]
+        blank = not any(raw[3::4])
         buf = QBuffer()
         buf.open(QIODevice.OpenModeFlag.WriteOnly)
         image.save(buf, "PNG")
@@ -189,6 +212,69 @@ def _windows(dpr: float) -> dict | None:  # pragma: no cover - Windows only
             if bitmap:
                 gdi32.DeleteObject(bitmap)
     k = max(0.5, float(dpr) or 1.0)
-    out = shape(png, image.width() / k, image.height() / k, icon.xHotspot / k, icon.yHotspot / k)
-    _win_last = (handle, out)
+    return shape(png, image.width() / k, image.height() / k, icon.xHotspot / k, icon.yHotspot / k), blank
+
+
+# The system's cursors (OCR_ / IDC_ ids): their names in the user's cursor
+# scheme (HKCU\Control Panel\Cursors), and Windows' own files for them.
+_WIN_CURSORS = {
+    32512: ("Arrow", "aero_arrow.cur"), 32513: ("IBeam", "beam_r.cur"), 32514: ("Wait", "aero_busy.ani"),
+    32515: ("Crosshair", "cross_r.cur"), 32516: ("UpArrow", "aero_up.cur"), 32642: ("SizeNWSE", "aero_nwse.cur"),
+    32643: ("SizeNESW", "aero_nesw.cur"), 32644: ("SizeWE", "aero_ew.cur"), 32645: ("SizeNS", "aero_ns.cur"),
+    32646: ("SizeAll", "aero_move.cur"), 32648: ("No", "aero_unavail.cur"), 32649: ("Hand", "aero_link.cur"),
+    32650: ("AppStarting", "aero_working.ani"), 32651: ("Help", "aero_helpsel.cur"),
+}
+_win_originals: dict[int, dict] = {}  # system cursor id -> its look, as last seen not hidden
+
+
+def _win_system_id(handle: int) -> int | None:  # pragma: no cover - Windows only
+    """Which of the system's cursors ``handle`` is (they're shared: an app
+    showing the arrow shows the system's arrow), if any."""
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = _win_dlls()[0]
+    user32.LoadCursorW.argtypes = [wintypes.HINSTANCE, ctypes.c_void_p]
+    user32.LoadCursorW.restype = wintypes.HANDLE
+    for which in _WIN_CURSORS:
+        h = user32.LoadCursorW(None, ctypes.c_void_p(which))
+        if h and int(h) == handle:
+            return which
+    return None
+
+
+def _win_scheme(which: int | None, dpr: float) -> dict | None:  # pragma: no cover - Windows only
+    """A system cursor's look from the user's scheme's file (or Windows' own),
+    when it hasn't been seen unhidden yet."""
+    if which is None or which not in _WIN_CURSORS:
+        return None
+    import ctypes
+    import os
+    import winreg
+    from ctypes import wintypes
+
+    name, default = _WIN_CURSORS[which]
+    path = ""
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Control Panel\Cursors") as key:
+            path = os.path.expandvars(str(winreg.QueryValueEx(key, name)[0] or ""))
+    except OSError:
+        pass
+    if not path or not os.path.exists(path):
+        path = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "Cursors", default)
+    user32 = _win_dlls()[0]
+    user32.LoadImageW.argtypes = [wintypes.HINSTANCE, wintypes.LPCWSTR, wintypes.UINT, ctypes.c_int, ctypes.c_int,
+                                  wintypes.UINT]
+    user32.LoadImageW.restype = wintypes.HANDLE
+    h = user32.LoadImageW(None, path, 2, 0, 0, 0x0010 | 0x0040)  # IMAGE_CURSOR, LR_LOADFROMFILE | LR_DEFAULTSIZE
+    if not h:
+        return None
+    try:
+        out, blank = _win_read(int(h), dpr)
+    finally:
+        user32.DestroyCursor.argtypes = [wintypes.HANDLE]
+        user32.DestroyCursor(h)
+    if blank:
+        return None
+    _win_originals[which] = out
     return out

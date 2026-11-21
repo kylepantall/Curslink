@@ -70,6 +70,9 @@ TILES_IN_FLIGHT = 16
 APP_TILES_FACTOR = 4
 # The pointer in a mirror is sent at most this often.
 POINTER_EVERY_S = 1 / 90
+# In an app's mirror the pointer is the only one there is (the app's own
+# cursor, drawn where the host's mouse puts it): as often as the mouse moves.
+APP_POINTER_EVERY_S = 1 / 250
 # An agent's idle cursor is moved off a mirror this long after it shows
 # (input has just left, and a file drag leaving may still need it there).
 PARK_AFTER_S = 0.8
@@ -263,7 +266,7 @@ def device_states(streams: list[Stream], names: dict[str, str], fps: int | Calla
                   tuning: tuple[str, str] | None = None, anchors: dict | None = None,
                   cast: Callable[[Stream], bool] | None = None,
                   tiles: Callable[[Stream], bool] | None = None, quality: str | Callable[[Stream], str] = "high",
-                  keys: dict[str, int] | None = None) -> dict[str, dict]:
+                  keys: dict[str, int] | None = None, rings: list | None = None) -> dict[str, dict]:
     """What each device should capture and show for ``streams`` (the payload
     of its ``mirror`` frame). Devices with nothing to do aren't listed.
 
@@ -274,7 +277,11 @@ def device_states(streams: list[Stream], names: dict[str, str], fps: int | Calla
 
     ``cast(stream)``: the device behind draws its cursor into the picture
     (capture ``cursor``). ``tiles(stream)``: the device in front takes it in
-    tiles at full resolution (capture ``tiles``)."""
+    tiles at full resolution (capture ``tiles``).
+
+    ``rings``: that overlap is being joined from the seat, a spot at a time
+    (curslink.seatalign): ``[x, y, radius, on]`` each in the screen behind's
+    own pixels, sent on as ``rings`` in its OS pixels, drawn on both."""
     out: dict[str, dict] = {}
     for s in streams:
         src = out.setdefault(s.source.device_id, {"captures": [], "shows": []})
@@ -306,7 +313,29 @@ def device_states(streams: list[Stream], names: dict[str, str], fps: int | Calla
             # guides go across the screen behind and the mirror alike.
             dst["shows"][-1].update(tune=True, guides=list(at), src=covered)
             src["captures"][-1].update(tune=True, guides=list(at))
+            if rings:
+                marks = []
+                for x, y, r, on in rings:
+                    ox, oy = s.source.to_os(s.source.x + x, s.source.y + y)
+                    marks.append([round(ox, 1), round(oy, 1), round(r, 1), 1 if on else 0])
+                dst["shows"][-1]["rings"] = marks
+                src["captures"][-1]["rings"] = marks
     return out
+
+
+def clean_rings(rings) -> list | None:
+    """The ``rings`` of a ``fit`` command, if they make sense."""
+    if not isinstance(rings, list):
+        return None
+    out = []
+    for ring in rings[:8]:
+        try:
+            x, y, r = (float(v) for v in ring[:3])
+        except (TypeError, ValueError):
+            continue
+        if all(abs(v) < 1e6 for v in (x, y, r)) and r > 0:
+            out.append((x, y, r, bool(ring[3]) if len(ring) > 3 else False))
+    return out or None
 
 
 EMPTY = {"captures": [], "shows": []}
@@ -490,6 +519,11 @@ class MirrorPeer:
         elif t == "mirror_pointer":
             if data.get("id") in self.showing:
                 self.helper(_command("mirror_pointer", data))
+        elif t == "app_icon":
+            # A mirrored app's icon, for its taskbar button or the Dock: the
+            # helper keeps it for the mirror, which may not be made yet.
+            if isinstance(data.get("id"), str) and isinstance(data.get("png"), str):
+                self.helper(_command("app_icon", {"id": data["id"], "png": data["png"]}))
         elif t == "mirror_ack":
             self.source.ack(data.get("id"))
 
@@ -605,7 +639,7 @@ class MirrorHost:
         self.sent: dict[str, dict] = {}  # device -> the state it was last sent
         self._screen: tuple | None = None  # (screen mirrored, screen in use) last planned for
         self._pointer: dict[str, tuple[float, float] | None] = {}
-        self._pointer_at = 0.0
+        self._pointer_at: dict[str, float] = {}
         self._logged: set[str] = set()
         # Fine-tuning an overlap: mirror the screen behind it, wherever the pointer is.
         self.held: Screen | None = None
@@ -616,6 +650,7 @@ class MirrorHost:
         self.tuning: tuple[str, str] | None = None
         self._through = layout.pointer_through
         self._anchors: dict = {}  # where its guides are (see device_states)
+        self.rings: list | None = None  # joining it from the seat: the spots' rings (curslink.seatalign)
         # App mirror (curslink.appmirror.AppMirrorHost): its captures and
         # shows go in the same mirror states, its frames the same way.
         self.apps = None
@@ -644,7 +679,9 @@ class MirrorHost:
             return
         if "tune" in data or data.get("hold") is False:
             self.set_tuning((str(data["behind"]), str(data["front"])) if data.get("tune") else None)
-        if any(k in data for k in ("place", "x", "reset")):
+        if "rings" in data:
+            self.rings = clean_rings(data["rings"])
+        if any(k in data for k in ("place", "x", "reset")) and not data.get("keep"):
             # Put somewhere new: the guides start again from there.
             self._anchors.pop((str(data["behind"]), str(data["front"])), None)
         if "hold" in data:
@@ -666,6 +703,8 @@ class MirrorHost:
             self._through = self.layout.pointer_through
         self.tuning = pair
         self._anchors = {}
+        if pair is None:
+            self.rings = None
         self.layout.pointer_through = False if pair is not None else self._through
         self.sent = {d: {} for d in self.sent}  # send the shows again, with or without "tune"
 
@@ -714,6 +753,7 @@ class MirrorHost:
         streams = streams_for(self.layout, screen, self.can, joined=self.held is None, gap=self.gap)
         self.streams = {s.id: s for s in streams}
         self._pointer = {sid: p for sid, p in self._pointer.items() if sid in self.streams or sid.startswith("app:")}
+        self._pointer_at = {sid: t for sid, t in self._pointer_at.items() if sid in self._pointer}
         for s in streams:
             # A mirror that's new on the device in front (or the device came
             # back) starts from nothing: it needs every tile, not just changes.
@@ -724,7 +764,7 @@ class MirrorHost:
         states = device_states(streams, self.names, self.stream_fps, self.tuning, self._anchors,
                                cast=lambda s: self.router.screen == s.source and self._captures_cursor(s.source.device_id),
                                tiles=lambda s: self._takes_tiles(s.target.device_id), quality=self.stream_quality,
-                               keys=self.keys)
+                               keys=self.keys, rings=self.rings)
         if self.apps is not None:
             extra = self.apps.states(lambda a, b: self.pair_fps(a, b), lambda a, b: self.pair_quality(a, b),
                                      self._takes_tiles)
@@ -868,10 +908,11 @@ class MirrorHost:
             last = self._pointer.get(sid)
             if p == last:
                 continue
-            if p is not None and last is not None and now - self._pointer_at < POINTER_EVERY_S:
+            every_s = APP_POINTER_EVERY_S if app is not None else POINTER_EVERY_S
+            if p is not None and last is not None and now - self._pointer_at.get(sid, -1.0) < every_s:
                 continue  # the next move sends it
             self._pointer[sid] = p
-            self._pointer_at = now
+            self._pointer_at[sid] = now
             if p is None:
                 self._to(device, "mirror_pointer", id=sid, hide=True)
             else:

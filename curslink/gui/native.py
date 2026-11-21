@@ -37,11 +37,15 @@ def can_glass() -> bool:
     return False
 
 
-def prepare(window) -> None:
-    """Call before the window is first shown, when glass will be used."""
+def prepare(window, glass: bool = True) -> None:
+    """Call before the window is first shown: on macOS the window's own
+    surface runs up under its buttons (no separate title bar). ``glass``:
+    a backdrop will be put behind it too (:func:`apply_glass`), so it must
+    be see-through; Curslink's own look is solid and passes False."""
     from PySide6.QtCore import Qt
 
-    window.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+    if glass:
+        window.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
     if sys.platform == "darwin":
         # Let Qt own the unified title bar: it rewrites the window's style
         # mask and titlebarAppearsTransparent from these flags whenever it
@@ -57,6 +61,50 @@ def prepare(window) -> None:
         # by default, which left an empty strip where the title bar was. The
         # sidebar's own top padding clears the traffic lights instead.
         window.setAttribute(Qt.WidgetAttribute.WA_ContentsMarginsRespectsSafeArea, False)
+
+
+def in_title_strip(window, pos) -> bool:
+    """True if ``pos`` (window coordinates) is in the strip along the top
+    where the title bar would be. :func:`prepare` runs the window's own
+    widgets up under the buttons, so on macOS there is no real title bar
+    left to drag: presses there that no widget takes move the window."""
+    from curslink.gui import theme
+
+    return 0 <= pos.y() < theme.MAC_TOP and 0 <= pos.x() < window.width()
+
+
+def start_move(window) -> bool:
+    """Let the system drag ``window`` from the press now under way."""
+    handle = window.windowHandle()
+    if handle is None:
+        return False
+    try:
+        return bool(handle.startSystemMove())
+    except Exception:
+        log.debug("couldn't start a window move", exc_info=True)
+        return False
+
+
+def title_double_click(window) -> None:
+    """What a double click on a Mac title bar does: zoom (the default),
+    minimise, or nothing, as set in System Settings > Desktop & Dock."""
+    action = "Maximize"
+    try:
+        import Foundation
+
+        defaults = Foundation.NSUserDefaults.standardUserDefaults()
+        action = str(defaults.stringForKey_("AppleActionOnDoubleClick") or "")
+        if not action:
+            action = "Minimize" if defaults.boolForKey_("AppleMiniaturizeOnDoubleClick") else "Maximize"
+    except Exception:
+        log.debug("couldn't read the title bar double-click setting", exc_info=True)
+    if action == "Minimize":
+        window.showMinimized()
+    elif action in ("Maximize", "Fill"):
+        try:
+            _ns_window(window).performZoom_(None)
+        except Exception:
+            window.showNormal() if window.isMaximized() else window.showMaximized()
 
 
 def apply_glass(window, dark: bool) -> bool:

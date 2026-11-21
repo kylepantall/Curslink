@@ -855,10 +855,30 @@ def guide_shapes(c: QRectF) -> list[tuple[str, QPointF, QPointF]]:
     return out
 
 
-def paint_guides(p: QPainter, c: QRectF, width: float = 2.0) -> None:
+RING_ON = QColor(255, 79, 110)  # the ring being joined (curslink.seatalign)
+RING_OFF = QColor(126, 224, 195)  # the others
+
+
+def paint_guides(p: QPainter, c: QRectF, width: float = 2.0, rings: list | None = None) -> None:
+    """``rings``: lining up from the seat (curslink.seatalign), a spot at a
+    time: ``(centre, radius, the one being joined)`` each, in the painter's
+    coordinates. They take the place of the one big ring, and lines level
+    and upright either side of the one being joined that of the lines in thirds."""
     p.save()
     p.setBrush(Qt.BrushStyle.NoBrush)
-    shapes = guide_shapes(c)
+    if rings is None:
+        shapes = guide_shapes(c)
+    else:
+        far = 20 * max(c.width(), c.height(), 1.0) + 10_000
+        shapes = [s for s in guide_shapes(c) if s[0] == "d"]
+        for at, r, on in rings:
+            if not on:
+                continue
+            # Either side of the spot, not through it: a spot is on the front
+            # screen's rim, and a line along the rim is hidden by its frame.
+            for off in (-r / 2, r / 2):
+                shapes.append(("h", QPointF(at.x() - far, at.y() + off), QPointF(at.x() + far, at.y() + off)))
+                shapes.append(("v", QPointF(at.x() + off, at.y() - far), QPointF(at.x() + off, at.y() + far)))
     for halo in (True, False):
         for kind, a, b in shapes:
             p.setPen(QPen(QColor(0, 0, 0, 150), width + 2.5) if halo else QPen(GUIDE_COLORS[kind], width))
@@ -866,7 +886,29 @@ def paint_guides(p: QPainter, c: QRectF, width: float = 2.0) -> None:
                 p.drawEllipse(a, b.x(), b.y())
             else:
                 p.drawLine(a, b)
+        for at, r, on in rings or ():
+            thick = width + (2.0 if on else 0.5)
+            p.setPen(QPen(QColor(0, 0, 0, 170), thick + 2.5) if halo else QPen(RING_ON if on else RING_OFF, thick))
+            p.drawEllipse(at, r, r)
+            if on:
+                p.drawEllipse(at, r * 0.45, r * 0.45)
     p.restore()
+
+
+def spec_rings(spec: dict) -> list | None:
+    """Spec ``rings`` (``[x, y, radius, on]`` each, the screen behind's OS
+    pixels) if it has any that make sense."""
+    rings = spec.get("rings")
+    if not isinstance(rings, list):
+        return None
+    out = []
+    for ring in rings[:8]:
+        try:
+            x, y, r = (float(v) for v in ring[:3])
+            out.append((x, y, r, bool(ring[3]) if len(ring) > 3 else False))
+        except (TypeError, ValueError, IndexError):
+            continue
+    return out or None
 
 
 class GuideOverlay(QWidget):
@@ -903,6 +945,16 @@ class GuideOverlay(QWidget):
             self.setScreen(qs)
         self.setGeometry(QRect(round(sx), round(sy), max(1, round(sw)), max(1, round(sh))))
         self.covered = QRectF(lx - round(sx), ly - round(sy), lw, lh)
+        self.rings = None
+        rings = spec_rings(spec)
+        if rings is not None:
+            # each ring's box through the same sum as the covered area
+            self.rings = []
+            for x, y, r, on in rings:
+                box = spec_to_logical({**spec, "os": [x - r, y - r, 2 * r, 2 * r]})
+                if box is not None:
+                    self.rings.append((QPointF(box[0] + box[2] / 2 - round(sx), box[1] + box[3] / 2 - round(sy)),
+                                       box[2] / 2, on))
         if not self.isVisible():
             self.show()
         self.update()
@@ -911,8 +963,33 @@ class GuideOverlay(QWidget):
     def paintEvent(self, _e) -> None:  # noqa: N802
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        paint_guides(p, self.covered)
+        paint_guides(p, self.covered, rings=self.rings)
+        if self.rings:
+            for at, r, on in self.rings:
+                if on:
+                    paint_look_here(p, at, r, QRectF(self.rect()))
         p.end()
+
+
+def paint_look_here(p: QPainter, at: QPointF, r: float, within: QRectF) -> None:
+    """A small "Look here" tag by the ring being joined, kept on the screen."""
+    p.save()
+    font = p.font()
+    font.setPixelSize(15)
+    font.setBold(True)
+    p.setFont(font)
+    text = "Look here"
+    w = p.fontMetrics().horizontalAdvance(text) + 20
+    box = QRectF(at.x() - w / 2, at.y() - r - 40, w, 28)
+    if box.top() < within.top() + 4:
+        box.moveTop(at.y() + r + 12)
+    box.moveLeft(min(max(box.left(), within.left() + 4), within.right() - w - 4))
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QColor(0, 0, 0, 190))
+    p.drawRoundedRect(box, 14, 14)
+    p.setPen(QColor(255, 255, 255))
+    p.drawText(box, Qt.AlignmentFlag.AlignCenter, text)
+    p.restore()
 
 
 ARROW = [(0, 0), (0, 17.5), (4.4, 13.4), (7.4, 20.6), (10.4, 19.4), (7.5, 12.4), (13.2, 12.4)]
@@ -987,6 +1064,9 @@ class MirrorWindow(QWidget):
             if not pix.loadFromData(raw, "JPG"):
                 return
             self.pixmap, self.canvas, self.got = pix, None, {}
+        if getattr(self, "_min", False):
+            self.update()  # minimised (an app's mirror): kept for when it comes back
+            return
         if not self.isVisible() or self.closing_at:
             self.closing_at = 0.0
             if not self.isVisible():
@@ -1179,10 +1259,22 @@ class MirrorWindow(QWidget):
                 p.drawLine(a, b)
         if self.pointer is not None:
             self.paint_pointer(p, QPointF(r.x() + self.pointer[0] * r.width(), r.y() + self.pointer[1] * r.height()))
+        rings = spec_rings(self.spec) if self.tune else None
+        if self.tune:
+            # Drawn with the picture (inside its lean): the same marks as on
+            # the screen behind, where the picture has them.
+            marks = None
+            if rings is not None:
+                marks = []
+                for x, y, rad, on in rings:
+                    box = self.guide_rect(r, (x - rad, y - rad, 2 * rad, 2 * rad))
+                    marks.append((box.center(), box.width() / 2, on))
+            paint_guides(p, self.guide_rect(r), rings=marks)
         if lean is not None:
             p.restore()
-        if self.tune:
-            paint_guides(p, self.guide_rect(r))
+        if self.tune and rings is not None:
+            self.paint_tag(p, r, 1.0, "Arrow keys nudge this picture until the ring closes")
+        elif self.tune:
             pen = QPen(QColor(ACCENT), 3, Qt.PenStyle.DashLine)
             p.setPen(pen)
             p.setBrush(Qt.BrushStyle.NoBrush)
@@ -1207,11 +1299,11 @@ class MirrorWindow(QWidget):
                                     QPolygonF(pts))
         return out if isinstance(out, QTransform) and out.isInvertible() else None
 
-    def guide_rect(self, r: QRectF) -> QRectF:
-        """Where the guides' area (spec ``guides``, on the screen behind) is
-        on this mirror, which shows spec ``src`` of there."""
+    def guide_rect(self, r: QRectF, area=None) -> QRectF:
+        """Where the guides' area (spec ``guides``, on the screen behind; or
+        ``area`` of it) is on this mirror, which shows spec ``src`` of there."""
         try:
-            gx, gy, gw, gh = (float(v) for v in self.spec["guides"])
+            gx, gy, gw, gh = (float(v) for v in (area if area is not None else self.spec["guides"]))
             x, y, w, h = (float(v) for v in self.spec["src"])
         except (KeyError, TypeError, ValueError):
             return r
@@ -1291,6 +1383,7 @@ class MirrorHelper:
         self.captures: dict[str, Capture] = {}
         self.windows: dict[str, MirrorWindow] = {}
         self.shapes: dict[str, dict] = {}  # the pointer's look behind each mirror
+        self.icons: dict[str, str] = {}  # each app mirror's app's icon (base64 PNG)
         self.closed: set[str] = set()  # app mirrors closed here, until the host drops them too
 
     def _window(self, sid) -> MirrorWindow | None:
@@ -1305,7 +1398,7 @@ class MirrorHelper:
 
     def handle(self, line: str) -> bool:
         word, _, rest = line.strip().partition(" ")
-        if word not in ("mirror", "mirror_image", "mirror_pointer", "mirror_shape"):
+        if word not in ("mirror", "mirror_image", "mirror_pointer", "mirror_shape", "app_icon"):
             return False
         try:
             data = json.loads(rest)
@@ -1319,6 +1412,13 @@ class MirrorHelper:
             window = self._window(data.get("id"))
             if window is not None:
                 window.image(data)
+        elif word == "app_icon":
+            sid = data.get("id")
+            if isinstance(sid, str) and isinstance(data.get("png"), str):
+                self.icons[sid] = data["png"]
+                window = self._window(sid)
+                if window is not None and hasattr(window, "set_icon"):
+                    window.set_icon(data["png"])
         elif word == "mirror_shape":
             sid = data.get("id")
             if isinstance(sid, str):
@@ -1360,6 +1460,7 @@ class MirrorHelper:
             if sid not in shows:
                 self.windows.pop(sid).close_soon()
         self.shapes = {sid: d for sid, d in self.shapes.items() if sid in shows}
+        self.icons = {sid: d for sid, d in self.icons.items() if sid in shows}
         for sid, spec in shows.items():
             if sid in self.closed:
                 continue  # closed here; the host is about to drop it
@@ -1377,8 +1478,12 @@ class MirrorHelper:
                 window = AppWindow(spec, self.out)
                 if not window.ok:
                     log.warning("app mirror: no screen here at %s", spec.get("os"))
-                    window.deleteLater()
+                    window.close_soon()
                     continue
+                if sid in self.shapes:
+                    window.set_shape(self.shapes[sid])
+                if sid in self.icons:
+                    window.set_icon(self.icons[sid])
                 self.windows[sid] = window
                 continue
             if window is None:

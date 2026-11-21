@@ -5,7 +5,15 @@ The colours, sizes, type and illustrations behind the redesign
 reads its theme from these values. When a value changes, change it here and in
 `curslink/gui/theme.py` together.
 
-Status: **draft, awaiting Kyle's approval** (6 Nov 2026).
+Status: sections 1 and 2 below are **superseded** (16 Nov 2026). Kyle asked for
+one Curslink look on every platform in place of the Fluent, macOS glass and
+Adwaita looks described here: its own colours (the icon's link blue `#3FA9FF`
+on navy `#0F1B2D` in dark, a deeper blue `#0F6FD1` on a cool white in light),
+its own shapes (12 px cards, 8 px controls, 34 px buttons and fields) and solid
+surfaces with no Mica or vibrancy behind the window. The values live in
+`curslink/gui/theme.py` (`TOKENS`, `SIZES`); the only thing a platform changes
+is room for the Mac's window buttons and which font is to hand. The rest of
+this document (type, illustrations, page structure) still applies.
 
 ---
 

@@ -669,21 +669,7 @@ def apply(cfg, desk: dict, eye, how: str, path: Path | None = None) -> dict:
     """Aim every saved overlap from ``eye`` and save both the layout
     (``cfg``: a curslink.configedit.ConfigFile) and the desk. The desk as
     it now is."""
-    fits = []
-    for t in cfg.fits():
-        try:
-            fit = {"behind": str(t["behind"]), "front": str(t["front"]), "x": float(t["x"]), "y": float(t["y"]),
-                   "scale": float(t["scale"])}
-            for key, n in (("quad", 8), ("eye", 3), ("depth", 4)):
-                if key in t:
-                    fit[key] = [float(v) for v in t[key]]
-                    if len(fit[key]) != n:
-                        del fit[key]
-            if "mm" in t:
-                fit["mm"] = float(t["mm"])
-        except (KeyError, TypeError, ValueError):
-            continue
-        fits.append(fit)
+    fits = _config_fits_full(cfg)
     new_desk, aimed = seated(desk, fits, eye, how)
     changed = False
     for was, now_ in zip(fits, aimed):
@@ -713,3 +699,89 @@ def config_fits(cfg) -> list[dict]:
             continue
         out.append(fit)
     return out
+
+
+# -- joined by eye, from the seat (curslink.seatalign) ------------------------------------
+def apply_joined(cfg, behind: str, front: str, fit: dict, joins, desk: dict | None = None,
+                 path: Path | None = None) -> dict:
+    """Keep an overlap joined by eye from the seat: ``fit`` (``x``, ``y``,
+    ``scale``, ``quad``: curslink.seatalign.Align.command) for ``front``
+    before ``behind``, as it stands. With a desk a line-up solved, the spots
+    that were joined (``joins``) also say where the eyes are: the desk is
+    aimed from there, every *other* overlap with it, and this one is given
+    the eye and depths head tracking follows it by.
+
+    ``{"eye": the eye found or None, "moved_mm": how far that is from where
+    it was thought to be, "others": how many other overlaps were re-aimed}``."""
+    from curslink import seatalign
+
+    out: dict = {"eye": None, "moved_mm": 0.0, "others": 0}
+    lean: dict = {}
+    eye = None
+    if desk is not None and valid(desk):
+        try:
+            eye = seatalign.eye_from(desk, behind, front, joins)
+        except (KeyError, TypeError, ValueError, ZeroDivisionError):
+            eye = None
+    if eye is not None:
+        mm = mm_of(desk)
+        out["eye"] = [float(v) for v in eye]
+        out["moved_mm"] = float(_norm(_sub(eye, desk["eye"])) * mm) if mm else 0.0
+        others = [f for f in _config_fits_full(cfg) if (f["behind"], f["front"]) != (behind, front)]
+        new_desk, aimed = seated(desk, others, eye, "joined")
+        for was, now_ in zip(others, aimed):
+            if now_ is not was:
+                cfg.set_fit(now_["behind"], now_["front"], now_["x"], now_["y"], now_["scale"], quad=now_.get("quad"),
+                            eye=now_.get("eye"), depth=now_.get("depth"), mm=now_.get("mm"))
+                out["others"] += 1
+        try:
+            seen = _leans(desk, [(behind, front)], eye).get((behind, front)) or {}
+        except ImportError:
+            seen = {}
+        if seen.get("eye") and seen.get("depth"):
+            lean = {"eye": seen["eye"], "depth": seen["depth"], "mm": mm}
+        save(new_desk, path)
+        log.info("joined by eye: %s before %s; eyes at %s, %.0f mm from where they were thought to be; %d other "
+                 "overlap(s) re-aimed", front, behind, [round(v) for v in eye], out["moved_mm"], out["others"])
+    cfg.set_fit(behind, front, float(fit["x"]), float(fit["y"]), float(fit["scale"]), quad=fit.get("quad"), **lean)
+    cfg.save()
+    return out
+
+
+def joined_shape(desk: dict | None, behind: str, front: str, joins) -> list[float] | None:
+    """How ``front`` is seen on ``behind`` (its four corners there) from
+    where spots joined by eye put the eyes, by the desk as solved: the shape
+    for curslink.seatalign.Align.adopt. None without a desk that can say
+    (or without numpy)."""
+    from curslink import seatalign
+
+    if desk is None or not valid(desk):
+        return None
+    try:
+        eye = seatalign.eye_from(desk, behind, front, joins)
+        if eye is None:
+            return None
+        seen = _leans(desk, [(behind, front)], eye).get((behind, front)) or {}
+    except (ImportError, KeyError, TypeError, ValueError, ZeroDivisionError):
+        return None
+    return list(seen["quad"]) if seen.get("quad") else None
+
+
+def _config_fits_full(cfg) -> list[dict]:
+    """The saved overlaps with all that says how they lean (as :func:`reaim` takes them)."""
+    fits = []
+    for t in cfg.fits():
+        try:
+            fit = {"behind": str(t["behind"]), "front": str(t["front"]), "x": float(t["x"]), "y": float(t["y"]),
+                   "scale": float(t["scale"])}
+            for key, n in (("quad", 8), ("eye", 3), ("depth", 4)):
+                if key in t:
+                    fit[key] = [float(v) for v in t[key]]
+                    if len(fit[key]) != n:
+                        del fit[key]
+            if "mm" in t:
+                fit["mm"] = float(t["mm"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        fits.append(fit)
+    return fits

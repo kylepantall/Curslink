@@ -724,12 +724,14 @@ class LineupFlow(QObject):
         elif kind == "lineup_photo":
             live_frame = isinstance(event.get("seq"), int)
             if event.get("cancelled"):
+                log.info("line-up: cancelled on the phone (%s)", event.get("device"))
                 self.dialog.say("Scan your desk with your phone",
                                 "It was cancelled on the phone. Ask it again, or choose a photo "
                                 "taken with another camera.", again=bool(self.phones))
             elif event.get("done"):
                 self.use_now()
             elif event.get("error"):
+                log.info("line-up: the phone reported %r (%s)", event.get("error"), event.get("device"))
                 if live_frame:  # one frame lost: on with the next
                     self.send_live(event.get("device"), {"seq": event["seq"]})
                 else:
@@ -1062,6 +1064,10 @@ class LineupFlow(QObject):
     def cancel(self) -> None:
         if not self.over:
             import json
+
+            # (Said for the log: "the alignment sometimes gives up" had no line saying what ended it.)
+            log.info("line-up: cancelled on this computer (Cancel, Esc or its window closed)%s",
+                     "" if self.live is None else f" after {self.live.frames} frame(s)")
 
             self.send("lineup_camera " + json.dumps({"id": self.id, "cancel": True}))
             self._end(None)

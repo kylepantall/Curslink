@@ -470,3 +470,51 @@ def test_turned_off_in_the_config(layout):
     assert router.turned_off == {"laptop"}
     router.on_pointer(3839, 500)
     assert router.is_local
+
+
+def _laptop_in_front():
+    from curslink.layout import Device, Layout, Screen
+
+    lay = Layout.from_devices(
+        [
+            Device("pc", "PC", (Screen("main", "pc", 0, 0, 1000, 600),)),
+            Device("lap", "Laptop", (Screen("main", "lap", 800, 400, 500, 300, z=1),)),
+            Device("far", "Far", (Screen("main", "far", 3000, 0, 500, 300),)),
+        ],
+        allow_overlap=True,
+    )
+    capture, sink, transport = FakeCapture(), FakeSink(), FakeTransport({"lap", "far"})
+    return Router(lay, "pc", capture, sink, transport, FakeOverlay())
+
+
+def test_gaze_does_not_pull_the_pointer_between_a_screen_and_the_one_in_front_of_it():
+    router = _laptop_in_front()
+    router.on_gaze(Target("lap", "main"))  # looking the laptop's way, pointer on the screen behind it
+    assert router.is_local
+    router.on_gaze(Target("far", "main"))  # a screen that isn't in the pair: gaze still switches
+    assert router.active_device == "far"
+    router.on_gaze(Target("lap", "main"))
+    assert router.active_device == "lap"
+    router.on_gaze(Target("pc", "main"))  # ...and not back from the one in front to the one behind
+    assert router.active_device == "lap"
+
+
+def test_a_wobble_on_the_join_just_crossed_does_not_send_the_pointer_back(parts):
+    router, capture, _, transport, _ = parts
+    now = [100.0]
+    router.clock = lambda: now[0]
+    router.on_pointer(3839, 500)  # off the right edge: to the laptop
+    assert router.active_device == "laptop"
+    now[0] += 0.3  # past the short guard, still where it landed
+    router.on_motion(-3, 0)
+    assert router.active_device == "laptop"
+    now[0] += 0.1
+    router.on_motion(-2, 1)
+    assert router.active_device == "laptop"
+    now[0] += 0.4  # the time is up: the same small push now goes back
+    router.on_motion(-3, 0)
+    assert router.is_local
+    router.on_pointer(3839, 500)
+    now[0] += 0.3
+    router.on_motion(-40, 0)  # a real pull back needn't wait
+    assert router.is_local

@@ -119,6 +119,8 @@ def read_commands(loop: asyncio.AbstractEventLoop, handle: Callable[[str], None]
                   stream: TextIO | None = None) -> threading.Thread:
     """Feed each command line on ``stream`` (stdin) to ``handle`` on ``loop``;
     ``stop`` once the stream closes."""
+    from curslink import pipein
+
     stream = stream or sys.stdin
 
     def send(command: str) -> None:
@@ -129,7 +131,9 @@ def read_commands(loop: asyncio.AbstractEventLoop, handle: Callable[[str], None]
 
     def run() -> None:
         try:
-            for line in stream:
+            # (Not ``for line in stream``: a read left waiting on stdin stalls
+            # every DLL load in this process on Windows, see curslink.pipein.)
+            for line in pipein.lines(stream):
                 command = " ".join(line.split()).lower()
                 if command.startswith("look "):
                     command = "look " + line.strip()[5:].strip()  # JSON: keep its case

@@ -49,6 +49,9 @@ class Curslink(QObject):
         super().__init__()
         self.prefs = prefs
         self.status = Status(self)
+        from curslink.gui.guide import Guide
+
+        self.guide = Guide(self)  # setting up, a step at a time
         from curslink.gui.console import DebugFeed
 
         self.debug_feed = DebugFeed(self)
@@ -227,6 +230,36 @@ class Curslink(QObject):
         return role
 
     # -- the service ----------------------------------------------------------
+    def rename_cameras(self, names: list[str] | None = None) -> None:
+        """Windows, once: the saved camera's name came from a list that wasn't
+        in the order cameras are opened in (curslink.gaze.cameras.renamed),
+        so match it to its number again before anything goes by the name."""
+        if sys.platform != "win32" and names is None:
+            return
+        try:
+            cfg = self.config()
+            tables = [t for t in ("gaze", "agent.gaze") if cfg.get(t, "camera_list", "") != "mf"
+                      and (cfg.get(t, "camera_name", "") or t == "gaze")]
+            if not tables:
+                return
+            from curslink.gaze import cameras
+
+            if names is None:
+                names = cameras.media_foundation_names()
+            found = [cameras.Camera(i, n) for i, n in enumerate(names)]
+            for table in tables:
+                was = (int(cfg.get(table, "camera", 0) or 0), str(cfg.get(table, "camera_name", "") or ""))
+                now = cameras.renamed(was[0], found) if found else was
+                if now != was:
+                    log.info("camera: [%s] was %d %r, by the list cameras are opened from that's %d %r",
+                             table, was[0], was[1], now[0], now[1])
+                    cfg.set(table, "camera", now[0])
+                    cfg.set(table, "camera_name", now[1])
+                cfg.set(table, "camera_list", "mf")
+            cfg.save()
+        except Exception:  # a camera's name mustn't stop linking
+            log.warning("couldn't match the saved camera to its name", exc_info=True)
+
     def start_linking(self) -> None:
         role = self.role
         if role is None:
@@ -236,6 +269,7 @@ class Curslink(QObject):
             self.service.error = problem
             self.service._set_state(FAILED)  # noqa: SLF001 - reported like a failed start
             return
+        self.rename_cameras()
         self.service.start(role, self.config_path)
 
     def stop_linking(self) -> None:

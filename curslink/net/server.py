@@ -100,6 +100,8 @@ class HostServer:
         self.on_screens: Callable[[AgentConnection], None] = lambda conn: None
         # (device_id, facing): an agent's own camera sees the user facing it or not.
         self.on_facing: Callable[[str, bool], None] = lambda device_id, facing: None
+        # (device_id, yaw, pitch): where an agent's own camera sees the head turned.
+        self.on_pose: Callable[[str, float, float], None] = lambda device_id, yaw, pitch: None
         # (device_id, file_result frame data): an agent saved dropped files, or couldn't.
         self.on_file_result: Callable[[str, dict], None] = lambda device_id, data: None
         # (device_id, drag_out frame data): what a drag leaving that agent carries.
@@ -404,6 +406,8 @@ class HostServer:
         elif msg.t == "facing":
             conn.facing = msg.data["facing"]
             self.on_facing(conn.device_id, conn.facing)
+        elif msg.t == "pose":
+            self.on_pose(conn.device_id, float(msg.data["yaw"]), float(msg.data["pitch"]))
         elif msg.t == "file_result":
             self.on_file_result(conn.device_id, dict(msg.data))
         elif msg.t == "drag_out":

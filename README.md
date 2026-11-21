@@ -287,7 +287,7 @@ session for now.
   unless the agent runs elevated too.
   The Windows build isn't code-signed yet, so behaviour-based antivirus
   (Bitdefender Advanced Threat Defense and similar) can flag it. Since
-  0.4.118 Curslink never starts itself through `cmd.exe`, which is what
+  0.4.129 Curslink never starts itself through `cmd.exe`, which is what
   Bitdefender blocked; if it still quarantines Curslink, restore it from
   the quarantine and add `%LOCALAPPDATA%\Programs\Curslink\` as an
   exception.
