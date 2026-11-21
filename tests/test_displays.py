@@ -156,3 +156,67 @@ def test_a_phone_reporting_its_one_screen_by_name_changes_nothing(tmp_path):
     cfg.add_device("pixel", "Pixel", [{"id": "phone", "x": 0, "y": 0, "width": 412, "height": 915}])
     cfg.save()
     assert sync_agent_screens(cfg, "pixel", [{"x": 0, "y": 0, "width": 412, "height": 915, "name": "phone"}]) is None
+
+
+# ------------------------------------------------- a phone's Samsung DeX screen
+def phone_beside_host(tmp_path):
+    path = tmp_path / "curslink.toml"
+    path.write_text(new_host_config("pc", "PC", [{"id": "main", "x": 0, "y": 0, "width": 2560, "height": 1440}]))
+    cfg = ConfigFile(path)
+    cfg.add_device("s25", "Galaxy S25 Ultra", [{"id": "phone", "x": 0, "y": 0, "width": 412, "height": 891}])
+    cfg.place_beside("s25", "pc", "left", whole_side=True)
+    cfg.save()
+    return cfg
+
+
+PHONE = {"x": 0, "y": 0, "width": 412, "height": 891, "name": "phone"}
+DEX = {"id": "dex", "name": "Samsung DeX", "x": 412, "y": 0, "width": 1920, "height": 1080}
+
+
+def phone_screens(cfg):
+    return {s["id"]: s for d in ConfigFile(cfg.path).devices() if d["id"] == "s25" for s in d["screens"]}
+
+
+def test_dex_coming_on_adds_its_own_screen_and_moves_only_that_clear(tmp_path):
+    cfg = phone_beside_host(tmp_path)
+    before = phone_screens(cfg)["phone"]
+    links = ConfigFile(cfg.path).links()
+    # Beside the phone, in the phone's own space, DeX would sit on the PC's screen.
+    done = sync_agent_screens(cfg, "s25", [PHONE, DEX])
+    assert done["added"] == ["dex"] and done.get("moved_new") and not done.get("moved")
+    s = phone_screens(cfg)
+    assert (s["phone"]["x"], s["phone"]["y"]) == (before["x"], before["y"])  # the phone stays put
+    assert s["dex"]["x"] == 2560 and (s["dex"]["width"], s["dex"]["os_x"]) == (1920, 412)
+    assert ConfigFile(cfg.path).links() == links  # and so do its edges
+    layout = parse_layout(ConfigFile(cfg.path).raw())
+    dex = layout.screen("s25", "dex")
+    assert dex.to_os(dex.x + 10, dex.y + 20) == (422, 20)  # input lands on DeX, not the phone's screen
+    assert "added Samsung DeX" in screens_note("Galaxy S25 Ultra", done)
+
+
+def test_dex_comes_back_where_it_was_arranged(tmp_path):
+    cfg = phone_beside_host(tmp_path)
+    sync_agent_screens(cfg, "s25", [PHONE, DEX])
+    cfg = ConfigFile(cfg.path)
+    cfg.move_screen("s25", "dex", 2560, -1080)  # put above-right by hand
+    cfg.save()
+    done = sync_agent_screens(cfg, "s25", [PHONE])  # DeX off
+    assert done["removed"] == ["dex"]
+    assert "took away Samsung DeX" in screens_note("Galaxy S25 Ultra", done)
+    assert list(phone_screens(cfg)) == ["phone"]
+    sync_agent_screens(ConfigFile(cfg.path), "s25", [PHONE, DEX])  # and on again
+    s = phone_screens(cfg)
+    assert (s["dex"]["x"], s["dex"]["y"]) == (2560, -1080)
+    assert "parked" not in next(d for d in ConfigFile(cfg.path).devices() if d["id"] == "s25")
+
+
+def test_picking_an_edge_for_a_phone_with_dex_links_the_phones_own_screen(tmp_path):
+    cfg = phone_beside_host(tmp_path)
+    sync_agent_screens(cfg, "s25", [PHONE, DEX])
+    cfg = ConfigFile(cfg.path)
+    cfg.place_beside("s25", "pc", "right", whole_side=True)
+    assert {(lk["a"], lk["b"]) for lk in cfg.links()} == {("pc/main", "s25/phone")}
+    s = {x["id"]: x for d in cfg.devices() if d["id"] == "s25" for x in d["screens"]}
+    assert s["phone"]["x"] == 2560
+    cfg.save()
+    parse_layout(cfg.raw())  # DeX moved off anything it would overlap

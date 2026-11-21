@@ -305,6 +305,17 @@ session for now.
   Curslink install apps and to confirm the first update; on Android 12
   and later the ones after that go in by themselves. *Updates* in the app
   shows the version, checks by hand, and turns this off.
+* **Samsung DeX** (Android 11 or later): with DeX on, its desktop is a
+  screen of its own. The phone tells the computer, and **Samsung DeX**
+  shows up on the Layout page beside the phone, like a monitor plugged
+  into it. Put it where its picture really is and the pointer and
+  keyboard go into DeX from there, drawn and clicked on the DeX desktop
+  rather than the phone's screen. DeX can go to a monitor or TV by cable,
+  or by Wireless DeX to a TV, a Miracast monitor, or a Windows PC with the
+  *Wireless Display* app (Settings → System → Projecting to this PC; turn
+  off that app's own "allow input" so Curslink's is the only input). DeX
+  keeps its place on the Layout page when it goes off and comes back. Plain screen mirroring
+  (Smart View) isn't DeX and adds no screen.
 
 ## Security
 

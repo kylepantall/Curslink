@@ -129,6 +129,10 @@ class MainActivity : AppCompatActivity() {
             else -> "Looking for ${pairing.hostName}…" + if (detail.isNotEmpty() && detail != "not paired") "\n$detail" else ""
         }
         root.addView(text(status, 16f))
+        if (pairing != null && state == LinkState.CONNECTED && Dex.current(this) != null) {
+            root.addView(text("Samsung DeX is on. It's a screen of its own on ${pairing.hostName}'s Layout page: " +
+                "put it where its picture is, and the pointer and keyboard go into DeX from there.", 14f))
+        }
         if (pairing != null && state == LinkState.CONNECTED) {
             root.addView(button("Line up screens with the camera") {
                 thread(name = "curslink-lineup") {

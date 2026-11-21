@@ -70,6 +70,14 @@ class InputService : AccessibilityService() {
         finger = null
     }
     private var sideways = false
+    // Samsung DeX (see Dex): the pointer drawn on its display, and whether
+    // the pointer is there now rather than on the phone's own screen.
+    private var dexView: PointerView? = null
+    private var dexWm: WindowManager? = null
+    private var dexDisplay = -1
+    private var onDex = false
+    /** The pointer as drawn where it is now. */
+    private val here: PointerView? get() = if (onDex) dexView else view
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -88,6 +96,7 @@ class InputService : AccessibilityService() {
         screenLock(false)
         view?.let { runCatching { wm.removeView(it) } }
         mirrorView?.let { runCatching { wm.removeView(it) } }
+        removeDexOverlay()
         touchWatch?.let { runCatching { wm.removeView(it) } }
         shapeThread.quitSafely()
         super.onDestroy()
@@ -146,6 +155,90 @@ class InputService : AccessibilityService() {
         view = null
         params = null
         addOverlay()
+    }
+
+    // ------------------------------------------------------------- DeX
+    /** The pointer's overlay on the DeX display, added there if it isn't yet. */
+    private fun ensureDexOverlay(): PointerView? {
+        val d = Dex.current(this) ?: run { removeDexOverlay(); return null }
+        val v = dexView
+        if (v != null && v.isAttachedToWindow && dexDisplay == d.displayId) return v
+        removeDexOverlay()
+        if (Build.VERSION.SDK_INT < 30) return null
+        val display = (getSystemService(DISPLAY_SERVICE) as android.hardware.display.DisplayManager).getDisplay(d.displayId)
+            ?: return null
+        return runCatching {
+            val ctx = if (Build.VERSION.SDK_INT >= 31) createWindowContext(display, WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY, null)
+                else createDisplayContext(display).createWindowContext(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY, null)
+            val dwm = ctx.getSystemService(WindowManager::class.java)
+            val pv = PointerView(ctx) { x, y -> dexPxFree(x, y).let { it.x to it.y } }
+            dwm.addView(pv, overlayParams())
+            dexView = pv
+            dexWm = dwm
+            dexDisplay = d.displayId
+            AppLog.i(TAG, "pointer overlay added on Samsung DeX (display ${d.displayId})")
+            pv
+        }.onFailure { AppLog.w(TAG, "couldn't draw the pointer on Samsung DeX", it) }.getOrNull()
+    }
+
+    private fun removeDexOverlay() {
+        val v = dexView ?: return
+        runCatching { dexWm?.removeViewImmediate(v) }
+        dexView = null
+        dexWm = null
+        dexDisplay = -1
+    }
+
+    /** DeX came on, went off or changed size (from LinkService). */
+    fun displaysChanged() = main.post {
+        val d = Dex.current(this)
+        if (d == null || d.displayId != dexDisplay) removeDexOverlay()
+        if (d == null && onDex) {
+            if (gestures.down) gestures.release(pointer)
+            onDex = false
+            gestures.displayId = android.view.Display.DEFAULT_DISPLAY
+            view?.shown = active
+        }
+        if (d != null && active && onDex) ensureDexOverlay()?.apply { moveTo(pointer.x, pointer.y); shown = true }
+    }
+
+    /** The phone's own screen is this wide in host coordinates: DeX starts there. */
+    private fun phoneWidth(): Int = (Prefs(this).layoutSize ?: Screen.naturalSizeDp(this)).first
+
+    /** Host coordinates on DeX to its display's pixels, unclamped (null: not on DeX). */
+    private fun dexPxFree(x: Double, y: Double): PointF {
+        val d = Dex.current(this) ?: return PointF(-1f, -1f)
+        val w = phoneWidth()
+        return PointF(((x - w) / d.widthDp * d.widthPx).toFloat(), (y / d.heightDp * d.heightPx).toFloat())
+    }
+
+    /**
+     * Where host (x, y) is: on DeX (past the phone's own screen, while DeX
+     * is on) or on the phone, in that display's pixels. Going from one to
+     * the other lifts a finger that's down and moves the drawn pointer over.
+     */
+    private fun locate(x: Double, y: Double): PointF {
+        val d = Dex.current(this)
+        val dex = d != null && x >= phoneWidth()
+        if (dex != onDex) {
+            if (gestures.down) gestures.release(pointer)
+            finger = null
+            here?.shown = false
+            onDex = dex
+            gestures.displayId = if (dex) d!!.displayId else android.view.Display.DEFAULT_DISPLAY
+            if (dex) ensureDexOverlay() else ensureOverlay()
+            here?.shown = active
+            AppLog.i(TAG, if (dex) "the pointer is on Samsung DeX" else "the pointer is on the phone's screen")
+        }
+        if (!dex) return toPx(x, y)
+        val p = dexPxFree(x, y)
+        return PointF(p.x.coerceIn(0f, d!!.widthPx - 1f), p.y.coerceIn(0f, d.heightPx - 1f))
+    }
+
+    /** The pixel size of the display the pointer is on. */
+    private fun hereSizePx(): android.graphics.Point {
+        val d = if (onDex) Dex.current(this) else null
+        return if (d != null) android.graphics.Point(d.widthPx, d.heightPx) else Screen.sizePx(this)
     }
 
     // ------------------------------------------------------------ mirrors
@@ -217,7 +310,7 @@ class InputService : AccessibilityService() {
     }
 
     /** The lined-up mirror under the pointer, if any. */
-    private fun tuningAt(p: PointF): Pair<String, List<Double>>? = tuning.entries.firstOrNull { (_, r) ->
+    private fun tuningAt(p: PointF): Pair<String, List<Double>>? = if (onDex) null else tuning.entries.firstOrNull { (_, r) ->
         p.x >= r[0] && p.y >= r[1] && p.x <= r[0] + r[2] && p.y <= r[1] + r[3]
     }?.toPair()
 
@@ -310,7 +403,20 @@ class InputService : AccessibilityService() {
     fun enter(x: Double, y: Double, effect: String) = main.post {
         active = true
         ensureOverlay()
-        pointer = toPx(x, y)
+        pointer = locate(x, y)
+        if (onDex) {
+            here?.apply {
+                moveTo(pointer.x, pointer.y)
+                shown = true
+                when (effect) {
+                    "pop" -> pop()
+                    "blink" -> blink()
+                }
+            }
+            touched()
+            queueShape()
+            return@post
+        }
         view?.let { v ->
             val draws = v.draws
             main.postDelayed({
@@ -335,12 +441,22 @@ class InputService : AccessibilityService() {
     /** A file dragged here from a computer: its card next to the pointer (null: take it down). See Drops. */
     fun dragCard(title: String?, line: String = "") = main.post {
         if (title != null) ensureOverlay()
-        view?.showCard(title, line)
+        here?.showCard(title, line)
     }
 
     /** The edge indicator (see EdgeGlow): drawn even while the pointer is elsewhere, for the "heading here" bar. */
     fun edge(cmd: io.github.orimovo.curslink.core.EdgeCommand) = main.post {
-        if (!cmd.hide && !cmd.flash) ensureOverlay()
+        if (cmd.hide || cmd.flash) {
+            view?.edgeGlow(cmd)
+            dexView?.edgeGlow(cmd)
+            return@post
+        }
+        // The edge of the screen it's about: DeX's lies past the phone's.
+        if (cmd.rect.isNotEmpty() && cmd.rect[0] >= phoneWidth() && Dex.current(this) != null) {
+            ensureDexOverlay()?.edgeGlow(cmd)
+            return@post
+        }
+        ensureOverlay()
         view?.edgeGlow(cmd)
     }
 
@@ -351,17 +467,16 @@ class InputService : AccessibilityService() {
         if (gestures.down) gestures.release(pointer)
         finger = null
         mods.clear()
-        view?.apply {
-            if (effect == "pop") pop()
-            shown = false
-        }
+        here?.apply { if (effect == "pop") pop() }
+        view?.shown = false
+        dexView?.shown = false
         keepScreenOn(false)
     }
 
     fun move(x: Double, y: Double) = main.post {
         if (!active) return@post
-        pointer = toPx(x, y)
-        view?.moveTo(pointer.x, pointer.y)
+        pointer = locate(x, y)
+        here?.moveTo(pointer.x, pointer.y)
         val t = tuner
         val tid = tuningId
         if (t != null && tid != null && t.dragging) {
@@ -374,7 +489,7 @@ class InputService : AccessibilityService() {
     fun button(name: String, pressed: Boolean) = main.post {
         if (!active) return@post
         touched()
-        if (pressed) wakeIfDark()
+        if (pressed && !onDex) wakeIfDark()
         when (name) {
             "left" -> {
                 val t = tuner
@@ -413,7 +528,7 @@ class InputService : AccessibilityService() {
         // Wheel up shows what's above: the finger slides down the page.
         val ddx = (-dx * vc.scaledHorizontalScrollFactor).toFloat()
         val ddy = (dy * vc.scaledVerticalScrollFactor).toFloat()
-        val size = Screen.sizePx(this)
+        val size = hereSizePx()
         var f = finger
         if (f == null || !gestures.down) {
             pendingScroll.offset(ddx, ddy)
@@ -447,7 +562,7 @@ class InputService : AccessibilityService() {
             return@post
         }
         if (!pressed) return@post  // a held key repeats as presses
-        wakeIfDark()
+        if (!onDex) wakeIfDark()
         if (name == "esc") {
             performGlobalAction(GLOBAL_ACTION_BACK)
             return@post
@@ -518,14 +633,17 @@ class InputService : AccessibilityService() {
         shapeHandler.postDelayed({
             shapeQueued = false
             val p = PointF(pointer.x, pointer.y)
-            val shape = runCatching { shapeAt(p.x.toInt(), p.y.toInt()) }.getOrDefault(PointerView.Shape.ARROW)
-            main.post { view?.shape = shape }
+            val display = if (onDex) dexDisplay else android.view.Display.DEFAULT_DISPLAY
+            val shape = runCatching { shapeAt(p.x.toInt(), p.y.toInt(), display) }.getOrDefault(PointerView.Shape.ARROW)
+            main.post { here?.shape = shape }
         }, SHAPE_EVERY_MS)
     }
 
-    private fun shapeAt(x: Int, y: Int): PointerView.Shape {
+    private fun shapeAt(x: Int, y: Int, display: Int): PointerView.Shape {
         val r = Rect()
-        val ws = windows
+        val ws = if (display != android.view.Display.DEFAULT_DISPLAY && Build.VERSION.SDK_INT >= 30)
+            windowsOnAllDisplays.get(display) ?: return PointerView.Shape.ARROW
+        else windows
         for (w in ws) {
             if (w.type == AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY) continue
             w.getBoundsInScreen(r)

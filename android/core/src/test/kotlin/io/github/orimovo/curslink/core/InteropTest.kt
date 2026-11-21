@@ -133,6 +133,26 @@ class InteropTest {
             }
             assertEquals("pixel-test false", next("GONE"))
 
+            // Samsung DeX comes on while linked: the host hears of its screen
+            // without the phone reconnecting.
+            var withDex = screens
+            val dexing = AgentLink(handler, { pairing }, { Hello("Test Pixel", "Android 15", withDex) }, log = { println("link: $it") })
+            dexing.start()
+            try {
+                next("CONNECTED")
+                while (!dexing.hostScreens) Thread.sleep(20)
+                withDex = screens + mapOf("id" to "dex", "name" to "Samsung DeX", "x" to 411, "y" to 0, "width" to 1920, "height" to 1080)
+                dexing.screensChanged()
+                val got = next("SCREENS")
+                assertTrue(got.startsWith("pixel-test ") && "\"dex\"" in got && "\"width\": 1920" in got, got)
+                dexing.screensChanged()  // nothing new: nothing sent
+                Thread.sleep(300)
+                assertTrue(lines.none { it.startsWith("SCREENS ") }, "sent the same screens again")
+            } finally {
+                dexing.stop()
+            }
+            next("GONE")
+
             // Known by key but not in the host's devices: the phone is told why, not just cut off.
             val why = LinkedBlockingQueue<String>()
             val stranger = AgentLink(handler, { pairing.copy(myId = "pixel-stranger", key = ByteArray(32) { 's'.code.toByte() }, relay = "") },
