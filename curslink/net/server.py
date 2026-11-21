@@ -100,6 +100,8 @@ class HostServer:
         self.on_screens: Callable[[AgentConnection], None] = lambda conn: None
         # (device_id, facing): an agent's own camera sees the user facing it or not.
         self.on_facing: Callable[[str, bool], None] = lambda device_id, facing: None
+        # (device_id, yaw, pitch): where an agent's own camera sees the head turned.
+        self.on_pose: Callable[[str, float, float], None] = lambda device_id, yaw, pitch: None
         # (device_id, file_result frame data): an agent saved dropped files, or couldn't.
         self.on_file_result: Callable[[str, dict], None] = lambda device_id, data: None
         # (device_id, drag_out frame data): what a drag leaving that agent carries.
@@ -404,6 +406,8 @@ class HostServer:
         elif msg.t == "facing":
             conn.facing = msg.data["facing"]
             self.on_facing(conn.device_id, conn.facing)
+        elif msg.t == "pose":
+            self.on_pose(conn.device_id, float(msg.data["yaw"]), float(msg.data["pitch"]))
         elif msg.t == "file_result":
             self.on_file_result(conn.device_id, dict(msg.data))
         elif msg.t == "drag_out":
@@ -479,6 +483,17 @@ class HostServer:
             await asyncio.sleep(TUNE_EVERY_S)
             self.retune(conn)
 
+    def _our_end(self, conn: AgentConnection) -> dict | None:
+        """Our interface on this connection, briefly (``{kind, name, cable?}``)."""
+        if conn.relay:
+            return None
+        from curslink.net.check import brief, interface_for
+
+        try:
+            return brief(interface_for(_sockname(conn.writer), _iface_cache().get()))
+        except Exception:  # noqa: BLE001 - it's only for the Network page
+            return None
+
     async def _ping(self, conn: AgentConnection) -> None:
         loop = asyncio.get_running_loop()
         n = 0
@@ -496,7 +511,22 @@ class HostServer:
                 stats = conn.rtt.stats()
                 extra = {"rtt_ms": stats["p50_ms"], "p95_ms": stats["p95_ms"], "jitter_ms": stats["jitter_ms"],
                          "tuning": conn.tuning.reason}
+                iface = self._our_end(conn)
+                if iface:
+                    extra["iface"] = iface  # so the agent can say how the two are linked
             self.send(conn.device_id, "ping", n=n, ts=round(time.monotonic() * 1000.0, 2), **extra)
+
+
+_IFACES = None
+
+
+def _iface_cache():
+    global _IFACES
+    if _IFACES is None:
+        from curslink.net.check import InterfaceCache
+
+        _IFACES = InterfaceCache()
+    return _IFACES
 
 
 def _ping_interval(value) -> float:

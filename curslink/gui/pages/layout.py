@@ -9,10 +9,11 @@ screen behind when it is, since that part of it is blocked out.
 from __future__ import annotations
 
 import json
+import logging
 import sys
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QBrush, QColor, QFont, QFontMetricsF, QGuiApplication, QPainter, QPen
+from PySide6.QtGui import QBrush, QColor, QFont, QFontMetricsF, QGuiApplication, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import (
     QApplication,
     QBoxLayout,
@@ -32,6 +33,8 @@ from PySide6.QtWidgets import (
 from curslink.configedit import snap, touching_edges
 from curslink.gui import theme
 from curslink.gui.widgets import Card, Page, Toggle, button, label
+
+log = logging.getLogger(__name__)
 
 SCALE = 0.1  # scene units per layout pixel
 CLICK_SLOP_PX = 3  # a press and release this close on screen is a click, not a drag
@@ -60,9 +63,17 @@ def push_apart(rect: tuple[int, int, int, int], others: list[tuple[int, int, int
     return x, y
 
 
-def _colours(home: bool, selected: bool) -> tuple[QColor, QPen, QColor]:
-    """Fill, border and text for a screen, from the theme (spec 4.3)."""
+def _colours(home: bool, selected: bool, off: bool = False) -> tuple[QColor, QPen, QColor]:
+    """Fill, border and text for a screen, from the theme (spec 4.3). A
+    device turned off is drawn faint, with a dashed border."""
     t = theme.current().tokens
+    if off:
+        fill = theme.qcolor(t["ink3"])
+        fill.setAlphaF(0.08)
+        border = theme.qcolor(t["ink3"])
+        pen = QPen(theme.qcolor(t["accent"]), 3) if selected else QPen(border, 1.2)
+        pen.setStyle(Qt.PenStyle.DashLine)
+        return fill, pen, theme.qcolor(t["ink3"])
     if home:
         fill = theme.over(t["accent_soft"], t["card"])
         border = QColor(t["ink3"])
@@ -73,6 +84,29 @@ def _colours(home: bool, selected: bool) -> tuple[QColor, QPen, QColor]:
         border.setAlphaF(0.7)
     pen = QPen(theme.qcolor(t["accent"]), 3) if selected else QPen(border, 1.2)
     return fill, pen, theme.qcolor(t["ink"])
+
+
+def lean_corners(fit: dict, width: int, height: int) -> list[tuple[float, float]] | None:
+    """How a screen in front leans, from its fit (``quad``, see
+    curslink.layout.Fit): its four corners (top left, top right, bottom
+    right, bottom left) as shares of its own rectangle on the canvas, (0, 0)
+    to (1, 1) when it stands square on. None when the fit has no lean (or
+    it's too slight to see: under half a percent everywhere)."""
+    quad = fit.get("quad")
+    try:
+        x, y, k = float(fit["x"]), float(fit["y"]), float(fit["scale"])
+        if not quad or len(quad) != 8 or k <= 0 or width <= 0 or height <= 0:
+            return None
+        w, h = k * width, k * height
+        corners = [((float(quad[2 * i]) - x) / w, (float(quad[2 * i + 1]) - y) / h) for i in range(4)]
+    except (KeyError, TypeError, ValueError):
+        return None
+    square = ((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0))
+    if all(abs(u - su) < 0.005 and abs(v - sv) < 0.005 for (u, v), (su, sv) in zip(corners, square)):
+        return None
+    if any(abs(c) > 3 for corner in corners for c in corner):
+        return None  # nonsense: keep the plain rectangle
+    return corners
 
 
 IDENTIFY_S = 4  # how long "Detect my screens" shows which monitor is which
@@ -126,6 +160,47 @@ def detect_screens() -> list[dict]:
     return out
 
 
+def lineup_passed(check: dict | None) -> bool:
+    """Did a line-up pass its checks at the end (curslink.lineup.Live.check_summary):
+    every join the lines were drawn across agreed, and every overlap's
+    pattern joined up? Not if neither was there to check by."""
+    if not check:
+        return False
+    seam = check.get("seam")
+    if check.get("state") not in ("checked", "none") or (seam and seam.get("state") != "joined"):
+        return False
+    return check.get("state") == "checked" or bool(seam)
+
+
+def cfg_follows(page) -> bool:
+    """Is this computer's camera kept on to follow where you sit or your head?"""
+    try:
+        cfg = page.app.config()
+        return bool(cfg.get("layout", "mirror", False)) and bool(
+            cfg.get("layout", "follow_seat", False) or cfg.get("layout", "follow_head", False))
+    except Exception:
+        return False
+
+
+def seat_note(result, follows: bool = False) -> str:
+    """A sentence on the line-up's last step: where the eyes were found (curslink.seat)."""
+    from curslink import seat
+
+    desk = getattr(result, "desk", None)
+    if desk is None or desk.get("how") != "phone":
+        return ""
+    mm = seat.mm_of(desk)
+    text = " Your overlapping screens are aimed at where you sit"
+    if mm is not None:
+        text += f", {seat.distance(desk, seat.main_screen(desk, result.fits)) * mm / 10:.0f} cm back"
+        if (desk.get("moved_mm") or 0.0) >= 5:
+            text += f" (that moved the overlap {desk['moved_mm'] / 10:.1f} cm)"
+    text += "."
+    if follows:
+        text += " Put the phone down and look at your main screen for a moment, so the camera learns your face from there."
+    return text
+
+
 def check_note(check: dict | None) -> str:
     """A sentence on how a line-up's check at the end went (curslink.lineup.Live.check_summary)."""
     if not check:
@@ -175,6 +250,10 @@ class ScreenItem(QGraphicsRectItem):
                       | QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges)
         self.setCursor(Qt.CursorShape.OpenHandCursor)
         self.number = 0  # as "Detect my screens" shows it on the monitor (number_screens)
+        # Its device is turned off: the pointer doesn't go there (Use this device).
+        self.off = False
+        # How it really leans, from its line-up (lean_corners), or None: square on.
+        self.lean: list[tuple[float, float]] | None = None
         self.text = QGraphicsSimpleTextItem(self)
         # Constant on-screen size, however the view is zoomed.
         self.text.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations)
@@ -194,20 +273,52 @@ class ScreenItem(QGraphicsRectItem):
 
     def refresh(self) -> None:
         w, h = self.screen["width"] * SCALE, self.screen["height"] * SCALE
+        self.prepareGeometryChange()
         self.setRect(0, 0, w, h)
-        fill, pen, ink = _colours(self.home, self.isSelected())
+        fill, pen, ink = _colours(self.home, self.isSelected(), self.off)
         self.setBrush(QBrush(fill))
         self.setPen(pen)
-        self.text.setText(f"{self.device_name}\n{self.screen['id']} · {self.screen['width']}×{self.screen['height']}")
+        off = " · turned off" if self.off else ""
+        self.text.setText(f"{self.device_name}{off}\n{self.screen['id']} · "
+                          f"{self.screen['width']}×{self.screen['height']}")
         self.text.setBrush(ink)
         self.text.setPos(w * 0.05, h * 0.08)
+
+    def lean_polygon(self) -> QPolygonF | None:
+        """Its outline as it really leans (item coordinates), or None."""
+        if not self.lean:
+            return None
+        r = self.rect()
+        return QPolygonF([QPointF(r.x() + u * r.width(), r.y() + v * r.height()) for u, v in self.lean])
+
+    def boundingRect(self) -> QRectF:  # noqa: N802
+        rect = super().boundingRect()
+        shape = self.lean_polygon()
+        return rect if shape is None else rect.united(shape.boundingRect().adjusted(-2, -2, 2, 2))
 
     def paint(self, painter, option, widget=None) -> None:
         # Our own border shows the selection; skip Qt's dotted one.
         from PySide6.QtWidgets import QStyle
 
         option.state &= ~QStyle.StateFlag.State_Selected
-        super().paint(painter, option, widget)
+        shape = self.lean_polygon()
+        if shape is None:
+            super().paint(painter, option, widget)
+        else:
+            # Measured leaning (turned in, tipped back): drawn the shape it
+            # really is against the screen behind. The rectangle the pointer
+            # uses stays as a faint dotted outline, which is what's dragged.
+            painter.save()
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(self.brush())
+            painter.drawPolygon(shape)
+            guide = QPen(self.pen().color(), 0, Qt.PenStyle.DotLine)
+            painter.setPen(guide)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(self.rect())
+            painter.setPen(self.pen())
+            painter.drawPolygon(shape)
+            painter.restore()
         if self.number:
             # The number "Detect my screens" puts on the real monitor, big
             # and faint in the middle, like Windows' display settings.
@@ -380,6 +491,7 @@ class LayoutPage(Page):
         super().__init__("Layout", "Arrange the screens like your real desk. The pointer crosses where two screens touch.")
         self.app = app
         self.items: list[ScreenItem] = []
+        self.saved_fits: dict[tuple[str, str], dict] = {}  # (behind, front) -> [[layout.fit]], as loaded
         self.dirty = False
         self.allow_overlap = False
         self.calibration = None  # EdgeCalibration, while calibrating an edge
@@ -388,6 +500,7 @@ class LayoutPage(Page):
         # overlaps), saved with the layout if the screens are still where it put them.
         self.lineup_result = None
         self.lineup_placed: dict[str, tuple[int, int]] = {}
+        self.previewed: set[tuple[str, str]] = set()  # overlaps the service was shown before saving
         # Overlaps to line up once the layout is saved and the service is back:
         # [(behind key, front key)], see save().
         self.pending_lineups: list[tuple[str, str]] = []
@@ -470,6 +583,24 @@ class LayoutPage(Page):
         self.inspector.body.addLayout(fields)
         self.reported = button("Use the size it reports", None, self.use_reported)
         self.inspector.body.addWidget(self.reported)
+        # Turn another device off: it stays paired and on the canvas, but
+        # the pointer and keyboard don't go there (a phone that's linked but
+        # not in use). Takes effect at once, without Save layout.
+        self.use_row = QWidget()
+        urow = QHBoxLayout(self.use_row)
+        urow.setContentsMargins(0, 0, 0, 0)
+        urow.setSpacing(8)
+        self.use_toggle = Toggle("Use this device")
+        self.use_toggle.toggled.connect(self.use_toggled)
+        urow.addWidget(self.use_toggle)
+        self.use_label = QLabel("Use this device")
+        self.use_label.setBuddy(self.use_toggle)
+        urow.addWidget(self.use_label, 1)
+        self.inspector.body.addWidget(self.use_row)
+        self.use_note = label("", "small", wrap=True)
+        self.inspector.body.addWidget(self.use_note)
+        self.use_row.hide()
+        self.use_note.hide()
         self.inspector.body.addWidget(label("Drag screens on the canvas; they snap to each other's edges "
                                             "(hold Alt or Option to place freely).", "small",
                                             wrap=True))
@@ -481,6 +612,15 @@ class LayoutPage(Page):
         self.edges_card.body.addStretch(1)
         grid.addWidget(self.edges_card, 2)
         self.add(bottom)
+
+        # Where you sit (curslink.seat): the eye point the overlaps are aimed at.
+        from curslink.gui.seatcard import SeatCard
+
+        self.seat_card = SeatCard()
+        self.seat_card.measure.connect(self.start_lineup)
+        self.seat_card.find.connect(self.find_seat)
+        self.seat_card.reset.connect(self.reset_seat)
+        self.add(self.seat_card)
 
         app.config_changed.connect(self.load_if_clean)
         self.load()
@@ -523,6 +663,8 @@ class LayoutPage(Page):
         # them, and selection_changed then mustn't reach the deleted tag.
         self.items = []
         self.tag = None
+        if self.lineup_result is not None:
+            self.unpreview_fits()  # (dropped without saving)
         self.lineup_result = None
         self.scene.clear()
         if not self.app.has_config():
@@ -543,6 +685,7 @@ class LayoutPage(Page):
             return
         cfg = self.app.config()
         me = cfg.get("host", "device_id")
+        self.saved_fits = {(t.get("behind"), t.get("front")): t for t in cfg.fits()}
         self.allow_overlap = bool(cfg.get("layout", "allow_overlap", False))
         self.overlap_toggle.blockSignals(True)
         self.overlap_toggle.setChecked(self.allow_overlap)
@@ -553,6 +696,8 @@ class LayoutPage(Page):
                           "width": int(s.get("width", 1920)), "height": int(s.get("height", 1080)),
                           "z": int(s.get("z", 0)), "os_x": int(s.get("os_x", 0)), "os_y": int(s.get("os_y", 0))}
                 item = ScreenItem(self, d.get("id"), d.get("name", d.get("id")), screen, d.get("id") == me)
+                item.off = d.get("id") != me and d.get("enabled", True) is False
+                item.refresh()
                 self.scene.addItem(item)
                 self.items.append(item)
         number_screens(self.items)
@@ -565,6 +710,57 @@ class LayoutPage(Page):
         self.view.fit()
         self.refresh_edges()
         self.overlaps_changed()
+        self.refresh_seat()
+
+    # -- where you sit ---------------------------------------------------------
+    def seat_names(self) -> dict[str, str]:
+        many = {d for d in {i.device_id for i in self.items} if sum(1 for i in self.items if i.device_id == d) > 1}
+        return {i.key: f"{i.device_name} ({i.screen['id']})" if i.device_id in many else str(i.device_name)
+                for i in self.items}
+
+    def refresh_seat(self) -> None:
+        """The card under the layout: the saved desk and where its overlaps are aimed from."""
+        from curslink import seat
+
+        desk = None
+        if self.app.has_config() and self.app.role == "host" and self.items:
+            desk = seat.load()
+            if desk is not None and not set(desk["screens"]) <= {i.key for i in self.items}:
+                desk = None  # (a desk with screens that have since gone)
+        try:
+            cfg = self.app.config()
+            self.seat_card.show_desk(desk, seat.config_fits(cfg) if desk is not None else [], self.seat_names(),
+                                     tips=bool(cfg.get("layout", "seat_tips", True)))
+        except Exception:
+            log.warning("couldn't show where you sit", exc_info=True)
+            self.seat_card.hide()
+
+    def aim_seat(self, eye, how: str) -> bool:
+        """Aim the saved overlaps from ``eye`` (the desk's world) and save."""
+        from curslink import seat
+
+        desk = seat.load()
+        if desk is None or self.dirty:
+            return False
+        cfg = self.app.config()
+        seat.apply(cfg, desk, eye, how)
+        self.app.config_saved()
+        self.refresh_seat()
+        return True
+
+    def reset_seat(self) -> None:
+        from curslink import seat
+
+        desk = seat.load()
+        if desk is not None and isinstance(desk.get("scan_eye"), list) and self.aim_seat(desk["scan_eye"], "scan"):
+            self._say_lineup("The overlaps are aimed from where the phone was held for the scan again.")
+
+    def find_seat(self) -> None:
+        """No phone: the Calibrate page's look-at-each-screen pass, which finds the seat too."""
+        self.app.show_window("calibrate")
+        page = self.app.window.pages.get("calibrate") if self.app.window is not None else None
+        if page is not None and getattr(page, "state", None) in ("idle", "done", "error"):
+            page.begin(seat_only=True)
 
     def current_devices(self) -> list[dict]:
         devices: dict[str, dict] = {}
@@ -708,11 +904,31 @@ class LayoutPage(Page):
         self.overlaps_changed()
         self.refresh_edges()
 
+    def update_leans(self, pairs=None) -> None:
+        """Draw each screen in front the shape its line-up measured it at
+        (turned in, tipped back), from the line-up just run (unsaved) or the
+        saved fits, for the pairs that still overlap that way round."""
+        measured = self.lineup_fits()
+        leans: dict[str, list] = {}
+        for behind, front, _shared in (self.overlap_pairs() if pairs is None else pairs):
+            fit = measured.get((behind.key, front.key)) or self.saved_fits.get((behind.key, front.key))
+            if fit is not None:
+                lean = lean_corners(fit, int(front.screen["width"]), int(front.screen["height"]))
+                if lean is not None:
+                    leans[front.key] = lean
+        for item in self.items:
+            lean = leans.get(item.key)
+            if lean != item.lean:
+                item.prepareGeometryChange()
+                item.lean = lean
+                item.update()
+
     def overlaps_changed(self, dragging: ScreenItem | None = None) -> None:
         """Restripe and re-explain the overlaps (live while dragging)."""
+        pairs = self.overlap_pairs()
+        self.update_leans(pairs)
         for item in self.items:
             item.update()
-        pairs = self.overlap_pairs()
         if self.tag is not None:
             mine = [p for p in pairs if dragging in (p[0], p[1])] if dragging else []
             if mine:
@@ -760,8 +976,26 @@ class LayoutPage(Page):
         pairs = self.overlap_pairs() if pairs is None else pairs
         out: dict[str, dict] = {}
         entries: dict[str, dict] = {}
+        measured = self.lineup_fits()
         for behind, front, (x, y, w, h) in pairs:
             bx, by, bw, bh = behind.layout_rect()
+            # Just lined up with the camera: where the screen in front was
+            # measured to stand (a leaning shape, for one that's turned or
+            # tipped), not the layout's rectangles, which are each screen's
+            # own pixels and so only roughly right.
+            fit = measured.get((behind.key, front.key))
+            quad = None
+            if fit is not None:
+                _fx, _fy, fw, fh = front.layout_rect()
+                quad = [float(v) for v in fit["quad"]] if fit.get("quad") else [
+                    fit["x"], fit["y"], fit["x"] + fit["scale"] * fw, fit["y"],
+                    fit["x"] + fit["scale"] * fw, fit["y"] + fit["scale"] * fh, fit["x"], fit["y"] + fit["scale"] * fh]
+                x0, y0 = max(0.0, min(quad[0::2])), max(0.0, min(quad[1::2]))
+                x1, y1 = min(float(bw), max(quad[0::2])), min(float(bh), max(quad[1::2]))
+                if x1 - x0 < 1 or y1 - y0 < 1:
+                    quad = None
+                else:
+                    x, y, w, h = round(bx + x0), round(by + y0), round(x1 - x0), round(y1 - y0)
             s = behind.screen
             entry = entries.get(behind.key)
             if entry is None:
@@ -772,7 +1006,60 @@ class LayoutPage(Page):
             label = (f"{front.device_name} stands here" if self.allow_overlap
                      else f"Overlaps {front.device_name}: drag apart or allow overlap")
             entry["regions"].append({"rect": [x - bx, y - by, w, h], "label": label, "bad": not self.allow_overlap})
+            if quad is not None:
+                entry["regions"][-1]["quad"] = [round(v, 1) for v in quad]
         return out
+
+    def lineup_fits(self) -> dict[tuple[str, str], dict]:
+        """The overlaps the last line-up measured and that aren't saved yet,
+        for the screens still exactly where it put them: (behind, front) -> fit."""
+        result = self.lineup_result
+        if result is None:
+            return {}
+        items = {i.key: i for i in self.items}
+
+        def unmoved(key: str) -> bool:
+            item = items.get(key)
+            return item is not None and tuple(item.layout_rect()[:2]) == self.lineup_placed.get(key)
+
+        return {(f["behind"], f["front"]): f for f in result.fits if unmoved(f["behind"]) and unmoved(f["front"])}
+
+    def preview_fits(self) -> None:
+        """Show the running service the overlaps just measured, before they're
+        saved: mirror mode and the pointer go by them at once, so what's on
+        the screens while "Check it and press Save layout" is up is the
+        line-up's result and not the overlap as it was saved before."""
+        if not self.app.service.is_alive():
+            return
+        for (behind, front), fit in self.lineup_fits().items():
+            cmd = {"behind": behind, "front": front, "x": fit["x"], "y": fit["y"], "scale": fit["scale"]}
+            for k in ("quad", "eye", "depth", "mm", "bezel"):
+                if fit.get(k) is not None:
+                    cmd[k] = fit[k]
+            self.app.service.send("fit " + json.dumps(cmd, separators=(",", ":")))
+            self.previewed.add((behind, front))
+
+    def unpreview_fits(self) -> None:
+        """A line-up that's dropped unsaved: the service goes back to the overlaps as saved."""
+        if not self.previewed or not self.app.service.is_alive():
+            self.previewed = set()
+            return
+        saved = {(t.get("behind"), t.get("front")): t for t in self.app.config().fits()} if self.app.has_config() else {}
+        for behind, front in self.previewed:
+            t = saved.get((behind, front))
+            cmd: dict = {"behind": behind, "front": front}
+            try:
+                if t is None:
+                    raise KeyError
+                cmd.update(x=float(t["x"]), y=float(t["y"]), scale=float(t["scale"]))
+                for k in ("quad", "eye", "depth", "mm", "bezel"):
+                    if k in t:
+                        cmd[k] = [float(v) for v in t[k]] if k != "mm" else float(t[k])
+                cmd.setdefault("bezel", [0, 0, 0, 0])
+            except (KeyError, TypeError, ValueError):
+                cmd = {"behind": behind, "front": front, "reset": True}
+            self.app.service.send("fit " + json.dumps(cmd, separators=(",", ":")))
+        self.previewed = set()
 
     def update_hint(self, pairs=None) -> None:
         payload = self.hint_payload(pairs)
@@ -887,7 +1174,7 @@ class LayoutPage(Page):
             return
         if isinstance(fit, dict):
             # Placed by one click: straight on to lining it up on the mirror, from there.
-            self._say_edge("Now line up the coloured lines on the mirror: drag it, pinch or scroll to size it.")
+            self._say_edge("Now sit back and close the rings: the arrow keys nudge the mirror.")
             self.tune_fit(behind, front, start=fit)
             if self.calibration is not None:
                 self.calibration.finished.connect(lambda _code: self.next_lineup())
@@ -900,29 +1187,28 @@ class LayoutPage(Page):
         if cfg.get("layout", "mirror", False):
             # Clicks get close; the guides on the mirror itself get it right.
             self.pending_tune = (behind, front)
-            self._say_edge("Overlap lined up. Next, line up the coloured lines on the mirror…")
+            self._say_edge("Overlap placed. Next, line it up from your seat…")
             if not self.app.service.is_alive():
                 self.pending_tune = None
-                self._say_edge("Overlap lined up. Start linking, then use \u201cFine-tune\u2026\u201d to check it on the mirror.")
+                self._say_edge("Overlap placed. Start linking, then use \u201cLine up from your seat\u2026\u201d to join it by eye.")
             return
         self._say_edge("Overlap lined up. Mirror mode now shows exactly what the screen in front covers.")
 
     def tune_fit(self, behind: str, front: str, start: dict | None = None) -> None:
-        """Nudge the mirror by eye while it's showing (see curslink.gui.fittune)."""
-        from curslink.gui.fittune import FitTuneDialog
+        """Join the overlap by eye from the seat while its mirror is showing (curslink.gui.seatalign)."""
         from curslink.gui.service import RUNNING
 
         if self.calibration is not None:
             return
         if self.dirty:
-            self._say_edge("Save the layout first, then fine-tune the overlap.")
+            self._say_edge("Save the layout first, then line up the overlap.")
             return
         cfg = self.app.config()
         if not cfg.get("layout", "mirror", False):
-            self._say_edge("Turn on mirror mode first (Settings › Overlapping screens), then fine-tune it here.")
+            self._say_edge("Turn on mirror mode first (Settings › Overlapping screens), then line it up here.")
             return
         if self.app.service.state != RUNNING:
-            self._say_edge("Start linking first: you fine-tune the mirror while it's showing.")
+            self._say_edge("Start linking first: you line up the mirror while it's showing.")
             return
         items = {i.key: i for i in self.items}
         b, f = items.get(behind), items.get(front)
@@ -939,15 +1225,54 @@ class LayoutPage(Page):
             # A line-up nowhere near where the layout puts it (an old one gone
             # wrong): start from the layout's spot, at its real size.
             start = {"reset": True}
-        dialog = FitTuneDialog({"key": behind, "name": b.device_name}, {"key": front, "name": f.device_name},
-                               saved, self.app.service.send, self, start=start)
-        dialog.saved.connect(lambda fit, b=behind, f=front: self.fit_tuned(b, f, fit))
+        if start is not None:
+            # Just placed by a click (or put back where the layout has it): the
+            # mirror goes there, and the seat step starts from where that is.
+            self.app.service.send("fit " + json.dumps({"behind": behind, "front": front, **start},
+                                                      separators=(",", ":")))
+            saved = None
+        from curslink import seat
+        from curslink.gui.seatalign import SeatAlignDialog
+
+        whole = None
+        if saved is not None:
+            whole = next((dict(t) for t in seat._config_fits_full(cfg) if (t["behind"], t["front"]) == (behind, front)),
+                         None)
+        dialog = SeatAlignDialog({"key": behind, "name": b.device_name, "size": b.layout_rect()[2:]},
+                                 {"key": front, "name": f.device_name, "size": f.layout_rect()[2:]},
+                                 whole, self.app.service.send, self, desk=seat.load())
+        dialog.saved.connect(lambda fit, joins, b=behind, f=front: self.seat_aligned(b, f, fit, joins))
         self.calibration = dialog
         dialog.finished.connect(lambda _code: setattr(self, "calibration", None))
         dialog.show()
         from curslink.gui.native import bring_to_front
 
         bring_to_front(dialog)
+
+    def seat_aligned(self, behind: str, front: str, fit: dict, joins) -> None:
+        """An overlap was joined by eye from the seat: keep it, and what it says of where the eyes are."""
+        from curslink import seat
+
+        cfg = self.app.config()
+        try:
+            out = seat.apply_joined(cfg, behind, front, fit, joins, desk=seat.load())
+        except Exception:  # noqa: BLE001 - the fit itself must be kept whatever the desk makes of it
+            log.exception("line up from your seat: couldn't work out the eye point")
+            cfg = self.app.config()
+            cfg.set_fit(behind, front, float(fit["x"]), float(fit["y"]), float(fit["scale"]), quad=fit.get("quad"))
+            cfg.save()
+            out = {"eye": None, "others": 0}
+        # This overlap the service already has (the fit command); others it aimed again need a restart.
+        self.app.config_saved(restart=bool(out.get("others")))
+        if out.get("eye") is not None:
+            self.app.service.send("head home")  # head tracking: this is where you sit
+        self.refresh_edges()
+        self.refresh_seat()
+        text = "Lined up from your seat and saved."
+        if out.get("eye") is not None:
+            text += " Curslink now knows where your eyes are"
+            text += f", and re-aimed {out['others']} other overlap{'s' if out['others'] != 1 else ''}." if out.get("others") else "."
+        self._say_edge(text)
 
     def fit_tuned(self, behind: str, front: str, fit) -> None:
         cfg = self.app.config()
@@ -1032,7 +1357,10 @@ class LayoutPage(Page):
         if item is None:
             self.sel_title.setText("Pick a screen")
             self.reported.hide()
+            self.use_row.hide()
+            self.use_note.hide()
             return
+        self.show_use(item)
         self.sel_title.setText(f"{item.device_name} / {item.screen['id']}")
         x, y, w, h = item.layout_rect()
         for key, value in (("x", x), ("y", y), ("width", w), ("height", h)):
@@ -1043,6 +1371,53 @@ class LayoutPage(Page):
         self.reported.setVisible(bool(self.reported_screens(item)))
         if self.overlap_row.isVisible():
             self.overlaps_changed()
+
+    def show_use(self, item: ScreenItem) -> None:
+        """The "Use this device" switch, for a screen of another device."""
+        self.use_row.setVisible(not item.home)
+        self.use_note.setVisible(not item.home)
+        if item.home:
+            return
+        self.use_toggle.blockSignals(True)
+        self.use_toggle.setChecked(not item.off)
+        self.use_toggle.blockSignals(False)
+        self.use_label.setText(f"Use {item.device_name}")
+        self.use_toggle.setAccessibleName(f"Use {item.device_name}")
+        self.use_note.setText(
+            f"Off: {item.device_name} stays paired and on the layout, but the pointer and keyboard won't go "
+            "there, by edge or by looking at it." if item.off else
+            f"Turn off to keep the pointer off {item.device_name} while you're not using it.")
+
+    def use_toggled(self, on: bool) -> None:
+        item = self.selected()
+        if item is None or item.home:
+            return
+        self.set_device_enabled(item.device_id, on)
+
+    def set_device_enabled(self, device_id: str, on: bool) -> None:
+        """Save it and tell the running service, which takes it without a
+        restart (``device <id> on|off``)."""
+        cfg = self.app.config()
+        if not cfg.has_device(device_id):
+            return
+        if cfg.device_enabled(device_id) != on:
+            cfg.set_device_enabled(device_id, on)
+            cfg.save()
+            if self.app.service.is_alive():
+                self.app.service.send(f"device {device_id} {'on' if on else 'off'}")
+        for item in self.items:
+            if item.device_id == device_id:
+                item.off = not on
+                item.refresh()
+                item.update()
+        selected = self.selected()
+        if selected is not None:
+            self.show_use(selected)
+        self.refresh_edges()
+        was_dirty = self.dirty
+        self.dirty = True  # don't let config_changed reload the canvas over unsaved moves
+        self.app.config_saved(restart=False)
+        self.dirty = was_dirty
 
     def reported_screens(self, item: ScreenItem) -> list[dict]:
         agent = self.app.status.agents.get(item.device_id)
@@ -1130,7 +1505,10 @@ class LayoutPage(Page):
         self.apply_lineup(result)
 
     def apply_lineup(self, result) -> None:
-        """Put the screens where the photo says (unsaved, to check and save)."""
+        """Put the screens where the photo says: saved straight away if the
+        line-up passed its checks at the end (and nothing else was waiting to
+        be saved), otherwise unsaved, to check and save."""
+        was_dirty = self.dirty
         items = {i.key: i for i in self.items}
         for key, (x, y) in result.positions.items():
             item = items.get(key)
@@ -1146,6 +1524,7 @@ class LayoutPage(Page):
         # Where they really landed (as the page rounds them), for save_lineup.
         self.lineup_placed = {k: tuple(items[k].layout_rect()[:2]) for k in result.positions if k in items}
         self.lineup_result = result
+        self.preview_fits()
         for item in self.items:
             item.refresh()
         number_screens(self.items)
@@ -1175,9 +1554,16 @@ class LayoutPage(Page):
         if how:
             text += " " + how[:1].upper() + how[1:] + "."
         text += check_note(getattr(result, "check", None))
-        text += " Check it and press Save layout."
         phones = {s["key"] for s in self.lineup_screens() if s["phone"]}  # they take the photo
         missing = [k for k in result.missing if k not in phones]
+        if not missing and not was_dirty and lineup_passed(getattr(result, "check", None)) \
+                and not self.blocking_overlap():
+            log.info("line-up passed its checks: saving the layout")
+            self.save()
+            if not self.dirty:
+                self._say_lineup(text + " It passed its checks, so it's saved." + seat_note(result, cfg_follows(self)))
+                return
+        text += seat_note(result) + " Check it and press Save layout."
         if missing:
             text += " Not in the photo, so left as they were: " + ", ".join(names.get(k, k) for k in missing) + "."
         self._say_lineup(text, "warn" if missing else "small")
@@ -1186,8 +1572,13 @@ class LayoutPage(Page):
         """With Save: the edges and overlaps the last line-up measured, for the
         screens still exactly where it put them."""
         result, self.lineup_result = self.lineup_result, None
+        self.previewed = set()  # (saved: the service starts again with them)
         if result is None:
             return
+        if getattr(result, "desk", None) is not None:
+            from curslink import seat
+
+            seat.save(result.desk)  # the desk in 3D and where the overlaps are aimed from
         items = {i.key: i for i in self.items}
 
         def unmoved(key: str) -> bool:
@@ -1201,7 +1592,8 @@ class LayoutPage(Page):
             for fit in result.fits:
                 if unmoved(fit["behind"]) and unmoved(fit["front"]):
                     cfg.set_fit(fit["behind"], fit["front"], fit["x"], fit["y"], fit["scale"], quad=fit.get("quad"),
-                                eye=fit.get("eye"), depth=fit.get("depth"), mm=fit.get("mm"))
+                                eye=fit.get("eye"), depth=fit.get("depth"), mm=fit.get("mm"),
+                                bezel=fit.get("bezel"))
         self._say_lineup("")
 
     def detect(self) -> None:
@@ -1281,7 +1673,7 @@ class LayoutPage(Page):
         from curslink.gui.widgets import clear_layout, pill
 
         clear_layout(self.edges_box)
-        names = {i.device_id: i.device_name for i in self.items}
+        names = {i.device_id: i.device_name + (" (turned off)" if i.off else "") for i in self.items}
         linked = set()
         if self.app.has_config():
             linked = {frozenset((t.get("a"), t.get("b"))) for t in self.app.config().links()}
@@ -1322,7 +1714,7 @@ class LayoutPage(Page):
                 row.addStretch(1)
                 row.addWidget(button("Line up again…" if done else "Line up overlap…", None,
                                      lambda _=False, b=behind.key, f=front.key: self.calibrate_fit(b, f)))
-                row.addWidget(button("Fine-tune…", None,
+                row.addWidget(button("Line up from your seat…", "primary" if not done else None,
                                      lambda _=False, b=behind.key, f=front.key: self.tune_fit(b, f)))
                 if done:
                     row.addWidget(button("Reset", None, lambda _=False, b=behind.key, f=front.key: self.reset_fit(b, f)))

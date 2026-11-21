@@ -363,9 +363,17 @@ def make_drag_source(tid: str, paths: list[str], info: dict):
     from PySide6.QtGui import QColor, QCursor, QDrag, QGuiApplication, QPainter
     from PySide6.QtWidgets import QWidget
 
-    size = 48
     windows = sys.platform == "win32"
     cocoa = sys.platform == "darwin" and QGuiApplication.platformName() == "cocoa"
+    # A Mac's press comes as a real mouse-down at the pointer, which may be
+    # moving fast as the drag arrives (0.4.98: 190 px between showing and
+    # the press, so it landed beside a 48 px window, in the app under it).
+    # Windows likewise: the press is injected at the pointer by another
+    # process a moment after this window was put there, and a fast drag
+    # arriving from another computer can be past a small one by then. The
+    # press then went to the app under the pointer, which dragged the text
+    # selected in it instead of the file (Kyle, 0.4.125, Mac -> PC into Claude).
+    size = MAC_SOURCE_PX if cocoa else WIN_SOURCE_PX if windows else 48
 
     class Source(QWidget):
         def __init__(self):
@@ -375,6 +383,9 @@ def make_drag_source(tid: str, paths: list[str], info: dict):
             self.dragging = False
             self.ended = False
             self.tries = 0
+            self.painted = False
+            self.said_ready = False
+            self.repressed = False
             self.timer = QTimer(self)
             self.timer.timeout.connect(self.follow)
             self.timer.start(8)
@@ -384,12 +395,57 @@ def make_drag_source(tid: str, paths: list[str], info: dict):
             pos = QCursor.pos()
             self.move(pos.x() - size // 2, pos.y() - size // 2)
             if windows and not self.dragging and _win_left_down():
-                QTimer.singleShot(0, self.start_drag)
+                QTimer.singleShot(0, self.start_held)
 
         def paintEvent(self, _e) -> None:  # noqa: N802
             p = QPainter(self)
             p.fillRect(self.rect(), QColor(0, 0, 0, 2))
             p.end()
+            if cocoa and not self.painted:
+                self.painted = True
+                # Shown and drawn: give the window server a moment to have it
+                # before the press comes, or the press goes to the app under it.
+                QTimer.singleShot(MAC_SHOWN_MS, self.ready)
+
+        def ready(self) -> None:
+            """Ask for the press (on a Mac, once the window is on screen:
+            0.4.100/0.4.101 pressed as it was still appearing, and the press
+            fell through to the desktop, which rubber-band selected)."""
+            if self.said_ready or self.dragging or self.ended:
+                return
+            self.said_ready = True
+            self.follow()
+            _say(f"nativedrag-ready {tid}")
+            if cocoa:
+                QTimer.singleShot(MAC_PRESS_WAIT_MS, self.missed)
+
+        def missed(self) -> None:
+            """macOS: no press came to this window in time. It went to the
+            app under the pointer, which is now rubber-band selecting or
+            dragging what's under it: let go there and press again, here
+            this time. Then start without a press if that misses too."""
+            if self.dragging or self.ended or not self.isVisible():
+                return
+            if not self.repressed:
+                self.repressed = True
+                self.follow()
+                self.raise_()
+                if mac_repress():
+                    _say("log the press missed the drag source; letting go and pressing again")
+                    QTimer.singleShot(MAC_REPRESS_WAIT_MS, self.start_appkit)
+                    return
+            self.start_appkit()
+
+        def abort(self) -> None:
+            """macOS: the drop was called off: put this window back under
+            the pointer, taking the drop itself, so the drag ends on nothing
+            (letting go elsewhere would drop the file there)."""
+            if not cocoa or self.ended:
+                return
+            pos = QCursor.pos()
+            self.move(pos.x() - size // 2, pos.y() - size // 2)
+            self.raise_()
+            mac_take_clicks(self, True)
 
         def mousePressEvent(self, e) -> None:  # noqa: N802
             if e.button() == Qt.MouseButton.LeftButton:
@@ -397,11 +453,23 @@ def make_drag_source(tid: str, paths: list[str], info: dict):
                 # AppKit's own drag does, now with the press behind it.
                 self.start_appkit(True) if cocoa else self.start_drag()
 
+        def start_held(self) -> None:
+            """Windows: the button is down, but the press didn't come here."""
+            if self.dragging:
+                return
+            if not self.geometry().contains(QCursor.pos()):
+                _say("log the press landed beside the drag source; starting the drag anyway")
+            self.start_drag()
+
         def start_drag(self) -> None:
             if self.dragging:
                 return
             self.dragging = True
             self.timer.stop()
+            if windows:
+                # Now it's under the pointer it mustn't be the first window the
+                # drag goes over (it takes no drops), or catch the drop.
+                win_click_through(self)
             mime = QMimeData()
             mime.setUrls([QUrl.fromLocalFile(p) for p in paths])
             drag = QDrag(self)
@@ -441,6 +509,9 @@ def make_drag_source(tid: str, paths: list[str], info: dict):
                 _say(f"log the Mac drag didn't start: {type(exc).__name__}: {exc}")
                 started = False
             if started:
+                if cocoa:
+                    # Now the drag has begun, it mustn't catch the drop itself.
+                    mac_take_clicks(self, False)
                 _say(f"nativedrag-started {tid} card")  # keep the card up
                 return
             self.dragging = False
@@ -465,30 +536,85 @@ def make_drag_source(tid: str, paths: list[str], info: dict):
         # drag started without it (Kyle, 0.4.81, PC -> Mac agent). Told not
         # to ignore mouse events, the window takes them all.
         mac_take_clicks(w)
-    _say(f"nativedrag-ready {tid}")
-    if cocoa:
-        QTimer.singleShot(MAC_PRESS_WAIT_MS, w.start_appkit)
+        # Ready once drawn (paintEvent), or after this if it never is.
+        QTimer.singleShot(MAC_READY_MAX_MS, w.ready)
+    else:
+        w.ready()
     return w
 
 
 MAC_PRESS_WAIT_MS = 400
+MAC_SHOWN_MS = 30         # after the first paint, before asking for the press
+MAC_READY_MAX_MS = 150    # ask for it anyway if no paint came by then
+MAC_REPRESS_WAIT_MS = 250  # after pressing again, before starting without a press
+MAC_SOURCE_PX = 480
+WIN_SOURCE_PX = 480
 MAC_START_TRIES = 4
 MAC_RETRY_MS = 150
 
 
-def mac_take_clicks(widget) -> bool:
+def mac_take_clicks(widget, take: bool = True) -> bool:
     """macOS: have ``widget``'s window take clicks on its transparent
-    pixels too (the window server passes those through by default)."""
+    pixels too (the window server passes those through by default), or
+    (``take`` False) let every click and drop through it."""
     try:
         import objc
 
         window = objc.objc_object(c_void_p=int(widget.winId())).window()
         if window is None:
             return False
-        window.setIgnoresMouseEvents_(False)
+        window.setIgnoresMouseEvents_(not take)
         return True
     except Exception as exc:  # pragma: no cover - macOS only
         _say(f"log couldn't make the drag source take clicks: {type(exc).__name__}: {exc}")
+        return False
+
+
+def mac_repress() -> bool:
+    """macOS: a left button-up then button-down at the pointer, for every
+    app (the up ends whatever the missed press started). False if it
+    couldn't."""
+    if sys.platform != "darwin":
+        return False
+    try:
+        import Quartz
+
+        at = Quartz.CGEventGetLocation(Quartz.CGEventCreate(None))
+        for kind in (Quartz.kCGEventLeftMouseUp, Quartz.kCGEventLeftMouseDown):
+            ev = Quartz.CGEventCreateMouseEvent(None, kind, at, Quartz.kCGMouseButtonLeft)
+            Quartz.CGEventSetIntegerValueField(ev, 1, 1)  # kCGMouseEventClickState: a single press
+            Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
+        return True
+    except Exception as exc:  # pragma: no cover - macOS only
+        _say(f"log couldn't press again: {type(exc).__name__}: {exc}")
+        return False
+
+
+def win_click_through(widget) -> bool:
+    """Windows: let every click, hover and drop through ``widget``'s window
+    (WS_EX_LAYERED | WS_EX_TRANSPARENT), without re-creating it the way
+    changing its Qt flags would. False if it couldn't."""
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        hwnd = int(widget.winId())
+        get = getattr(user32, "GetWindowLongPtrW", user32.GetWindowLongW)
+        put = getattr(user32, "SetWindowLongPtrW", user32.SetWindowLongW)
+        get.restype = put.restype = ctypes.c_ssize_t
+        get.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        put.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_ssize_t]
+        gwl_exstyle, ws_ex_layered, ws_ex_transparent = -20, 0x80000, 0x20
+        put(hwnd, gwl_exstyle, get(hwnd, gwl_exstyle) | ws_ex_layered | ws_ex_transparent)
+        return True
+    except Exception as exc:  # pragma: no cover - Windows only
+        _say(f"log couldn't let clicks through the drag source: {type(exc).__name__}: {exc}")
+        try:
+            widget.move(-30000, -30000)  # out of the way, then
+        except Exception:
+            pass
         return False
 
 
@@ -599,6 +725,72 @@ def mac_end_drags() -> int:
     return len(_MAC_DONE)
 
 
+class WinDragImage:
+    """Windows: the picture of what's being dragged (a "SysDragImage" window
+    that follows the pointer) hidden while the shield is up, which is while
+    the drag is carried on another computer. Otherwise it stayed on the PC
+    at the parked pointer, as if the drag were stuck there (Kyle, 0.4.98).
+    Shown again when the shield comes down. Does nothing elsewhere."""
+
+    CLASS = "SysDragImage"
+    EVERY_MS = 50  # the drag can show it again: keep it hidden
+
+    def __init__(self, user32=None):
+        self.user32 = user32
+        self.hidden: set[int] = set()
+        self.timer = None
+
+    def _u32(self):
+        if self.user32 is None and sys.platform == "win32":
+            import ctypes
+
+            self.user32 = ctypes.windll.user32
+        return self.user32
+
+    def windows(self) -> list[int]:
+        u = self._u32()
+        if u is None:
+            return []
+        out, hwnd = [], 0
+        for _ in range(64):
+            hwnd = u.FindWindowExW(None, hwnd, self.CLASS, None)
+            if not hwnd:
+                break
+            out.append(int(hwnd))
+        return out
+
+    def hide(self) -> None:
+        if self._u32() is None:
+            return
+        self._hide_now()
+        if self.timer is None:
+            try:
+                from PySide6.QtCore import QTimer
+
+                self.timer = QTimer()
+                self.timer.timeout.connect(self._hide_now)
+                self.timer.start(self.EVERY_MS)
+            except Exception:  # no Qt (tests)
+                self.timer = None
+
+    def _hide_now(self) -> None:
+        u = self._u32()
+        for hwnd in self.windows():
+            if u.IsWindowVisible(hwnd):
+                u.ShowWindow(hwnd, 0)  # SW_HIDE
+                self.hidden.add(hwnd)
+
+    def show(self) -> None:
+        if self.timer is not None:
+            self.timer.stop()
+            self.timer = None
+        u = self._u32()
+        for hwnd in self.hidden:
+            if u is not None and u.IsWindow(hwnd):
+                u.ShowWindow(hwnd, 4)  # SW_SHOWNOACTIVATE
+        self.hidden.clear()
+
+
 class FilesOverlay:
     """Handles the helper's file commands; keeps its windows alive."""
 
@@ -611,6 +803,7 @@ class FilesOverlay:
         self.toast = None
         self.source = None
         self.running: list = []  # drag sources whose drag hasn't ended yet
+        self.drag_image = WinDragImage()
 
     def handle(self, line: str) -> bool:
         word, _, rest = line.strip().partition(" ")
@@ -644,6 +837,7 @@ class FilesOverlay:
                 from PySide6.QtGui import QGuiApplication
 
                 self.shield = [make_catcher(sc.geometry()) for sc in QGuiApplication.screens()]
+            self.drag_image.hide() if rest == "on" else self.drag_image.show()
         elif word == "card":
             if self.card is not None:
                 self.card.close()
@@ -653,6 +847,15 @@ class FilesOverlay:
                 if info is not None:
                     self.card = make_card(info)
         elif word == "nativedrag":
+            if rest == "abort":
+                # Called off: each drag still going ends on its own window.
+                for w in [self.source, *self.running]:
+                    if w is not None and getattr(w, "dragging", False) and not w.ended:
+                        w.abort()
+                n = mac_end_drags()
+                if n:
+                    _say(f"log calling off {n} Mac drag(s)")
+                return True
             if rest == "end":
                 n = mac_end_drags()
                 if n:

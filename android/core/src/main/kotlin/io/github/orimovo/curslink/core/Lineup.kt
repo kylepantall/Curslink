@@ -15,6 +15,8 @@ const val LINEUP_HOST_FEATURE = "lineup"
  * How a live line-up is going, from the host (`lineup_live`): [seq] is the
  * frame it just read (send the next), [screens] each screen's number and
  * state ("unseen", "seen", "placing" or "locked"), [done] that it's lined up.
+ * [buzz]: shake the phone (it's held against a face for the last step, "where
+ * you sit", so its screen can't be seen: the buzz says it's been found).
  */
 data class LineupStatus(
     val id: String,
@@ -23,6 +25,7 @@ data class LineupStatus(
     val hint: String,
     val screens: List<Pair<Int, String>>,
     val done: Boolean,
+    val buzz: Boolean = false,
 )
 
 /**
@@ -78,7 +81,7 @@ class LineupSession(
                 val done = f.bool("done") == true
                 if (done && waiting == id) waiting = null
                 onStatus(LineupStatus(id, f.num("seq")?.toInt(), (f.num("progress") ?: 0.0).coerceIn(0.0, 1.0),
-                    f.str("hint") ?: "", screens, done))
+                    f.str("hint") ?: "", screens, done, f.bool("buzz") == true))
             }
         }
     }

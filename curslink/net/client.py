@@ -15,7 +15,7 @@ from curslink.net import quality
 from curslink.net.framing import STREAM_LIMIT, read_message
 from curslink.net.relay import RelayError, RelayTarget, agent_connect
 from curslink.net.udp import AgentUdp
-from curslink.protocol import (AGENT_FEATURES, APP_MIRROR_FEATURE, CLIPBOARD_FEATURE, EDGE_FEATURE, FILES_FEATURE, FILES_OUT_FEATURE, DROP_FEATURE, FILE_ACK_FEATURE, MIRROR_CURSOR_FEATURE, MIRROR_FEATURE, MIRROR_TILES_FEATURE, NETSTATS_FEATURE, POPUPS_FEATURE, PREPARE_FEATURE, PROTOCOL_VERSION, SCREENS_FEATURE, UDP_FEATURE, Message, ProtocolError,
+from curslink.protocol import (AGENT_FEATURES, APP_MIRROR_FEATURE, APP_NATIVE_FEATURE, CLIPBOARD_FEATURE, EDGE_FEATURE, FILES_FEATURE, FILES_OUT_FEATURE, DROP_FEATURE, FILE_ACK_FEATURE, PREFETCH_FEATURE, MIRROR_CURSOR_FEATURE, MIRROR_FEATURE, MIRROR_TILES_FEATURE, NETSTATS_FEATURE, POPUPS_FEATURE, PREPARE_FEATURE, PROTOCOL_VERSION, SCREENS_FEATURE, UDP_FEATURE, Message, ProtocolError,
                                encode)
 from curslink.security import channel_binding, hello_auth
 from curslink.tally import Tally
@@ -31,12 +31,17 @@ LAN_ONLY_TIMEOUT_S = 6.0
 # Resend our camera's facing state this often, so the host can tell a
 # fresh report from a stale one.
 FACING_REFRESH_S = 1.0
+# Head angles from our camera go to the host this often at most (see report_pose).
+POSE_HZ = 12.0
 # Input from the host that means it's here, so the radio should stay awake
 # (see curslink.net.udp.PROBE_WARM_S).
 WARM_ON = frozenset({"enter", "leave", "move", "button", "scroll", "key", "drag"})
 # Tell the host how the link looks from here this often (netstats).
 NETSTATS_EVERY_S = 5.0
 
+
+def _is_xy(data: dict) -> bool:
+    return all(isinstance(data.get(k), (int, float)) and not isinstance(data.get(k), bool) for k in ("x", "y"))
 
 class AgentSession:
     """Applies host messages to the local OS. Pure logic, no networking."""
@@ -127,7 +132,7 @@ class AgentSession:
         t = msg.t
         if t == "ping":
             if "rtt_ms" in msg.data:
-                self.host_link = {k: msg.data.get(k) for k in ("rtt_ms", "p95_ms", "jitter_ms", "tuning")}
+                self.host_link = {k: msg.data.get(k) for k in ("rtt_ms", "p95_ms", "jitter_ms", "tuning", "iface")}
             reply = {"n": msg.get("n")}
             if "ts" in msg.data:
                 reply["ts"] = msg.data["ts"]  # lets the host time the round trip
@@ -143,6 +148,11 @@ class AgentSession:
             else:
                 self.sink.move_to(int(msg.data["x"]), int(msg.data["y"]))
             return None
+        if t == "button" and self.active and _is_xy(msg.data):
+            # Where the host's pointer was as the button went: first, as a move
+            # (the moves before it come by UDP, and this one by TCP can get here
+            # ahead of them; older moves arriving after it are then dropped).
+            self.handle(Message("move", {"x": msg.data["x"], "y": msg.data["y"], "ts": msg.data.get("ts")}))
         if self.smoother is not None and t in ("button", "scroll", "key"):
             self.smoother.snap()  # these happen where the pointer is now, not where playback is
         if t == "enter":
@@ -195,7 +205,7 @@ class AgentSession:
         elif t in ("popup_in", "popup_close", "popup_prepare", "popup_unprepare"):
             if self.popups is not None:
                 self.popups.handle(t, dict(msg.data))
-        elif t in ("mirror", "mirror_frame", "mirror_pointer", "mirror_ack"):
+        elif t in ("mirror", "mirror_frame", "mirror_pointer", "mirror_ack", "app_icon"):
             if self.mirror is not None:
                 self.mirror.handle(t, dict(msg.data))
         elif t == "app_do":
@@ -217,7 +227,17 @@ class AgentSession:
             if not pressed and name not in self.buttons:
                 return None
             (self.buttons.add if pressed else self.buttons.discard)(name)
-            self.sink.button(name, pressed)
+            # A mirrored app's own full screen button (or a double click on
+            # its title bar) fills the screen showing it instead: the press
+            # never reaches the app (see curslink.appmirror).
+            if self.app_mirror is not None and self.app_mirror.intercept(name, pressed):
+                return None
+            ts = msg.data.get("ts")
+            button_at = getattr(self.sink, "button_at", None)
+            if button_at is not None and isinstance(ts, (int, float)) and not isinstance(ts, bool):
+                button_at(name, pressed, ts / 1000.0)  # double clicks timed by the host's clock
+            else:
+                self.sink.button(name, pressed)
             if self.app_mirror is not None:
                 self.app_mirror.on_button(name, pressed)
             if self.drag_out is not None:
@@ -338,6 +358,7 @@ class AgentClient:
         self.facing_source: Callable[[], bool] | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._host_takes_facing = False
+        self._pose_sent = 0.0
         self._screens_sent: list[dict] = []  # what the host was last told (hello or screens)
         self.host_features: frozenset[str] = frozenset()
 
@@ -347,6 +368,17 @@ class AgentClient:
         if writer is None or not self._host_takes_facing or writer.transport.is_closing():
             return
         writer.write(encode("facing", facing=bool(facing)))
+
+    def report_pose(self, t: float, yaw: float, pitch: float) -> None:
+        """Where our camera sees the head turned, for a host that reads it
+        against this camera's own calibration: at most POSE_HZ a second."""
+        writer = self._writer
+        if writer is None or "pose" not in self.host_features or writer.transport.is_closing():
+            return
+        if t - self._pose_sent < 1.0 / POSE_HZ:
+            return
+        self._pose_sent = t
+        writer.write(encode("pose", yaw=round(yaw, 2), pitch=round(pitch, 2)))
 
     def send(self, t: str, **data) -> None:
         """A frame to the host now, if connected (dropped otherwise)."""
@@ -407,6 +439,7 @@ class AgentClient:
             "optimise": self.optimise,
             "tuning": {"reason": host.get("tuning") or ""},
             "local": local,
+            "peer_interface": host.get("iface") if isinstance(host.get("iface"), dict) else None,
         }
 
     async def _report_netstats(self) -> None:
@@ -416,8 +449,28 @@ class AgentClient:
             if udp is None:
                 continue
             rtt = udp.rtt.stats()
+            extra = {}
+            iface = self._our_end()
+            if iface:
+                extra["iface"] = iface  # so the host can say how the two are linked
             self.send("netstats", udp=udp.heard_lately(), loss_pct=udp.loss.stats()["loss_pct"],
-                      rtt_ms=rtt["p50_ms"], jitter_ms=rtt["jitter_ms"])
+                      rtt_ms=rtt["p50_ms"], jitter_ms=rtt["jitter_ms"], **extra)
+
+    def _our_end(self) -> dict | None:
+        """Our interface on the link to the host, briefly (``{kind, name, cable?}``)."""
+        writer = self._writer
+        if writer is None or not self._direct:
+            return None
+        from curslink.net.check import InterfaceCache, brief, interface_for
+
+        if getattr(self, "_ifaces", None) is None:
+            self._ifaces = InterfaceCache()
+        try:
+            name = writer.get_extra_info("sockname")
+            local = str(name[0]) if isinstance(name, tuple) and name else ""
+            return brief(interface_for(local, self._ifaces.get()))
+        except Exception:  # noqa: BLE001 - it's only for the Network page
+            return None
 
     async def _watch_screens(self) -> None:
         """Tell the host when this device's monitors change (one plugged in,
@@ -484,7 +537,7 @@ class AgentClient:
         if self.optimise:
             quality.mark_low_latency(quality.transport_socket(writer))
         try:
-            features = list(AGENT_FEATURES) + ([FILES_FEATURE, DROP_FEATURE, FILE_ACK_FEATURE] if self.session.files is not None else [])
+            features = list(AGENT_FEATURES) + ([FILES_FEATURE, DROP_FEATURE, FILE_ACK_FEATURE, PREFETCH_FEATURE] if self.session.files is not None else [])
             if self.session.drag_out is not None:
                 features.append(FILES_OUT_FEATURE)
             if self.session.popups is not None:
@@ -497,6 +550,8 @@ class AgentClient:
                 features += [MIRROR_FEATURE, MIRROR_CURSOR_FEATURE, MIRROR_TILES_FEATURE]
             if self.session.app_mirror is not None and self.session.mirror is not None:
                 features.append(APP_MIRROR_FEATURE)
+            if self.session.mirror is not None:
+                features.append(APP_NATIVE_FEATURE)
             features.append(NETSTATS_FEATURE)
             if self.session.clipboard is not None:
                 features.append(CLIPBOARD_FEATURE)

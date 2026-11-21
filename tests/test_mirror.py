@@ -2131,3 +2131,214 @@ def test_leaning_fits_are_read_from_and_written_to_the_config(tmp_path):
     # Lined up afresh by clicking corners: a plain rectangle.
     cfg.set_fit("mac/screen2", "pc/main", f.x, f.y, f.scale)
     assert "quad" not in cfg.fits()[0] and "eye" not in cfg.fits()[0]
+
+
+def test_bezels_on_the_front_screen_stands_for_all_it_and_its_frame_hide():
+    """``[layout] bezels``: the frame round a screen in front hides more of
+    the one behind than its glass does. Counted in, the front screen shows
+    (and the pointer crosses into it over) everything it and its frame
+    hide, so no line of text runs under the frame."""
+    from dataclasses import replace
+
+    from curslink.layout import DEFAULT_BEZEL_MM, Fit
+
+    # One PC pixel is 0.5 Mac pixels; a frame of 20 PC pixels left, top and right, 60 below.
+    fit = Fit(("mac", "screen2"), ("pc", "main"), 1200, 600, 0.5, bezel=(20.0, 20.0, 20.0, 60.0))
+    lay = _fit_layout([fit])
+    mac, pc = lay.screen("mac", "screen2"), lay.screen("pc", "main")
+    (_front, behind, there), = lay.covered_parts(mac)
+    assert behind == (1200, 600, 1440, 768) and there == (1000, 1200, 2880, 1536)  # off: just the glass
+    assert lay.seen_fit(mac, pc) == replace(fit, bezel=None)
+    lay.bezels = True
+    (_front, behind, there), = lay.covered_parts(mac)
+    # 10 Mac pixels more to the left, top and right, 30 below: all shown on the whole of the PC's screen.
+    assert behind == (1190, 590, 1460, 808) and there == (1000, 1200, 2880, 1536)
+    grown = lay.seen_fit(mac, pc)
+    assert grown.quad == pytest.approx((1190, 590, 2650, 590, 2650, 1398, 1190, 1398)) and grown.bezel is None
+    assert (grown.x, grown.y) == (1190, 590) and 0.5 < grown.scale < 0.53
+    assert lay.fits == (fit,)  # (the fit itself stays as measured: what's adjusted by hand and saved)
+    # The pointer goes by it too: the frame's outer corner on the Mac is the PC's own corner.
+    assert lay.map_point(mac, pc, 1190, 590) == pytest.approx((1000, 1200))
+    assert lay.map_point(pc, mac, 1000 + 2880, 1200 + 1536) == pytest.approx((2650, 1398))
+    # The picture is drawn over the whole front screen (mirror streams carry its shape).
+    assert lay.picture_quad(mac, pc, behind) == pytest.approx(
+        (1000, 1200, 3880, 1200, 3880, 2736, 1000, 2736))
+    # A leaning fit grows along its own lean.
+    lean = replace(fit, quad=(1200.0, 600.0, 2640.0, 560.0, 2660.0, 1368.0, 1190.0, 1380.0))
+    lay.fits = (lean,)
+    q = lay.seen_fit(mac, pc).quad
+    assert q[0] < 1200 and q[1] < 600 and q[2] > 2640 and q[3] < 560 and q[5] > 1368 and q[7] > 1380
+    # Not measured yet: 6 mm all round, where a pixel's size is known.
+    lay.fits = (Fit(("mac", "screen2"), ("pc", "main"), 1200, 600, 0.5, mm=0.25),)
+    g = lay.seen_fit(mac, pc)
+    assert 1200 - g.x == pytest.approx(DEFAULT_BEZEL_MM / 0.25) and 600 - g.y == pytest.approx(DEFAULT_BEZEL_MM / 0.25)
+    lay.fits = (Fit(("mac", "screen2"), ("pc", "main"), 1200, 600, 0.5),)
+    assert lay.seen_fit(mac, pc) == lay.fits[0]  # ...and nothing where it isn't
+    lay.physical[("mac", "screen2")] = (860.0, 360.0)
+    assert lay.seen_fit(mac, pc).x == pytest.approx(1200 - DEFAULT_BEZEL_MM / 0.25)
+
+
+def test_the_bezel_is_kept_with_its_fit_in_the_config_and_through_changes(tmp_path):
+    from curslink.config import ConfigError, parse_fits, parse_layout
+    from curslink.configedit import ConfigFile
+    from curslink.layout import Fit
+    from curslink.mirror import apply_fit
+
+    devices = list(_fit_layout().devices.values())
+    table = {"behind": "mac/screen2", "front": "pc/main", "x": 1200, "y": 600, "scale": 0.5,
+             "bezel": [20, 20.5, 20, 60]}
+    assert parse_fits([table], devices)[0].bezel == (20.0, 20.5, 20.0, 60.0)
+    with pytest.raises(ConfigError):
+        parse_fits([{**table, "bezel": [1, 2, 3]}], devices)
+    raw = {"devices": [{"id": d.id, "screens": [{"id": s.id, "x": s.x, "y": s.y, "width": s.width,
+                                                  "height": s.height, **({"z": s.z} if s.z else {})}
+                                                 for s in d.screens]} for d in devices],
+           "layout": {"allow_overlap": True, "mirror": True, "bezels": True, "fit": [table]}}
+    assert parse_layout(raw).bezels and not parse_layout({**raw, "layout": {**raw["layout"], "bezels": False}}).bezels
+    with pytest.raises(ConfigError):
+        parse_layout({**raw, "layout": {**raw["layout"], "bezels": "yes"}})
+    # Saved by a line-up, kept when the overlap is dragged into place or lined up again without one.
+    path = tmp_path / "curslink.toml"
+    path.write_text('[host]\ndevice_id = "mac"\n')
+    cfg = ConfigFile(path)
+    cfg.set_fit("mac/screen2", "pc/main", 1200, 600, 0.5, bezel=[20, 20.5, 20, 60])
+    assert list(cfg.fits()[0]["bezel"]) == [20, 20.5, 20, 60]
+    cfg.set_fit("mac/screen2", "pc/main", 1210, 600, 0.5, keep_lean=True)
+    assert list(cfg.fits()[0]["bezel"]) == [20, 20.5, 20, 60] and cfg.fits()[0]["x"] == 1210
+    cfg.set_fit("mac/screen2", "pc/main", 1210, 600, 0.5, bezel=[0, 0, 0, 0])
+    assert "bezel" not in cfg.fits()[0]
+    # The running service: sent with a fit, kept when that fit is nudged or sent again without one.
+    lay = _fit_layout()
+    cmd = {"behind": "mac/screen2", "front": "pc/main", "x": 1200, "y": 600, "scale": 0.5}
+    apply_fit(lay, {**cmd, "bezel": [20, 20, 20, 60]})
+    assert lay.fits[0].bezel == (20.0, 20.0, 20.0, 60.0)
+    apply_fit(lay, {"behind": "mac/screen2", "front": "pc/main", "dx": 5, "dy": 0})
+    assert lay.fits[0].bezel == (20.0, 20.0, 20.0, 60.0) and lay.fits[0].x == 1195
+    apply_fit(lay, cmd)
+    assert lay.fits[0].bezel == (20.0, 20.0, 20.0, 60.0) and lay.fits[0].x == 1200
+    apply_fit(lay, {**cmd, "bezel": [0, 0, 0, 0]})
+    assert lay.fits[0] == Fit(("mac", "screen2"), ("pc", "main"), 1200, 600, 0.5, bezel=(0.0, 0.0, 0.0, 0.0))
+
+
+# -- lining up from the seat: rings at the spots being joined (curslink.seatalign) -----------
+def test_joining_from_the_seat_puts_rings_on_both_screens_and_keeps_the_lines_put():
+    transport = Transport({"lap"}, {"lap"})
+    host, router, local = make_host(desk(), transport, [])
+    host.fit({"behind": "pc/main", "front": "lap/main", "hold": True, "tune": True})
+    show, = transport.of("mirror", "lap")[-1]["shows"]
+    start = list(show["guides"])
+    assert "rings" not in show
+    x, y, k = show["src"][0], show["src"][1], 1.0
+    host.fit({"behind": "pc/main", "front": "lap/main", "x": 810, "y": 395, "scale": 1.0, "keep": True,
+              "quad": [810, 395, 1210, 395, 1210, 695, 810, 695], "rings": [[810, 395, 40, 1], [1210, 395, 40, 0], "junk"]})
+    show, = transport.of("mirror", "lap")[-1]["shows"]
+    assert show["guides"] == start  # "keep": the lines behind stay where they were
+    pc = router.layout.screen("pc", "main")
+    ox, oy = pc.to_os(pc.x + 810, pc.y + 395)
+    assert show["rings"] == [[ox, oy, 40, 1], [ox + 400, oy, 40, 0]]
+    capture, = local.states[-1]["captures"] if hasattr(local, "states") else [show]
+    assert capture["rings"] == show["rings"]
+    # done: the rings go with the tuning
+    host.fit({"behind": "pc/main", "front": "lap/main", "dx": 0, "hold": False})
+    assert host.rings is None and all("rings" not in s for s in transport.of("mirror", "lap")[-1]["shows"])
+
+
+def test_rings_are_drawn_on_the_screen_behind_and_on_the_mirror(qapp):
+    from PySide6.QtCore import QRectF
+
+    from curslink.mirror.helper import GuideOverlay, MirrorHelper, spec_rings
+
+    assert spec_rings({"rings": [[1, 2, 3, 1], "x", [4, 5, 6]]}) == [(1.0, 2.0, 3.0, True), (4.0, 5.0, 6.0, False)]
+    assert spec_rings({"rings": []}) is None and spec_rings({}) is None
+    helper = MirrorHelper(lambda line: None)
+    spec = {"id": "s", "screen": "main", "os": [200, 150, 200, 100], "label": "PC", "edges": [], "tune": True,
+            "src": [1000, 500, 400, 200], "guides": [1000, 500, 400, 200], "rings": [[1000, 500, 40, 1]]}
+    helper.handle("mirror " + json.dumps({"captures": [], "shows": [spec]}))
+    window = helper.windows["s"]
+    # the ring's box on the mirror: centred on the picture's top left corner, half the size (the picture is)
+    box = window.guide_rect(QRectF(0, 0, 200, 100), (960, 460, 80, 80))
+    assert box.center().x() == 0 and box.center().y() == 0 and box.width() == 40
+    window.grab()
+    from PySide6.QtCore import QPointF
+    from PySide6.QtGui import QImage, QPainter
+
+    from curslink.mirror.helper import RING_ON, paint_guides
+
+    image = QImage(200, 100, QImage.Format.Format_ARGB32)
+    image.fill(0)
+    p = QPainter(image)
+    paint_guides(p, QRectF(0, 0, 200, 100), rings=[(QPointF(100, 50), 30, True)])
+    p.end()
+    assert image.pixelColor(130, 50) == RING_ON or image.pixelColor(129, 50).red() > 200  # the ring, 30 out
+    assert image.pixelColor(115, 5).alpha() > 0 and image.pixelColor(100, 5).alpha() == 0  # lines either side of it, none through it
+    g = QGuiApplication_screen_os()
+    overlay = GuideOverlay({"id": "s", "screen": "main", "os": [10, 10, 50, 40], "screen_os": g, "fps": 1,
+                            "tune": True, "guides": [20, 20, 50, 40], "rings": [[g[0] + 200, g[1] + 200, 30, 1]]})
+    assert overlay.ok and len(overlay.rings) == 1 and overlay.rings[0][2] is True
+    overlay.grab()
+    helper.handle('mirror {"captures": [], "shows": []}')
+    overlay.deleteLater()
+    qapp.processEvents()
+
+
+def test_seat_align_dialog_walks_the_spots_and_saves_what_was_joined(qapp):
+    from PySide6.QtCore import QEvent, Qt
+    from PySide6.QtGui import QKeyEvent
+
+    from curslink.gui.seatalign import SeatAlignDialog
+
+    def press(d, key, mod=Qt.KeyboardModifier.NoModifier):
+        d.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, key, mod))
+
+    sent, saved = [], []
+    b = {"key": "pc/main", "name": "PC", "size": (3440, 1440)}
+    f = {"key": "lap/main", "name": "Laptop", "size": (1512, 982)}
+    last = lambda: json.loads(sent[-1][4:])  # noqa: E731
+    # Never lined up: it asks where the picture is, and starts from the answer.
+    d = SeatAlignDialog(b, f, None, sent.append)
+    d.saved.connect(lambda fit, joins: saved.append((fit, joins)))
+    assert last() == {"behind": "pc/main", "front": "lap/main", "hold": True, "tune": True}
+    press(d, Qt.Key.Key_Right)  # nothing to nudge yet
+    assert len(sent) == 1 and not d.next_button.isEnabled()
+    d.on_event({"event": "fit", "behind": "pc/main", "front": "lap/main", "x": 400, "y": 1000, "scale": 0.9})
+    assert last()["keep"] is True and [r[3] for r in last()["rings"]] == [1, 0, 0] and len(last()["quad"]) == 8
+    assert "First corner" in d.title.text() and d.next_button.text() == "The ring closes"
+    press(d, Qt.Key.Key_Right)
+    press(d, Qt.Key.Key_Up, Qt.KeyboardModifier.ShiftModifier)
+    assert last()["quad"][:2] == [401, 992] and last()["rings"][0][:2] == [401, 992]
+    # its own echo is no news; a drag of the mirror by hand is
+    n = len(sent)
+    d.on_event({"event": "fit", "behind": "pc/main", "front": "lap/main", "x": last()["x"], "y": last()["y"],
+                "scale": last()["scale"]})
+    assert len(sent) == n
+    d.on_event({"event": "fit", "behind": "pc/main", "front": "lap/main", "x": last()["x"] + 9, "y": last()["y"],
+                "scale": last()["scale"]})
+    assert len(sent) == n + 1 and last()["quad"][0] == 410
+    press(d, Qt.Key.Key_Return)
+    assert "Second corner" in d.title.text() and [r[3] for r in last()["rings"]] == [0, 1, 0]
+    press(d, Qt.Key.Key_Down)
+    assert last()["quad"][:2] == [410, 992]  # the first corner stays put
+    press(d, Qt.Key.Key_Return)
+    assert "Halfway" in d.title.text() and d.next_button.text() == "Save"
+    press(d, Qt.Key.Key_Backspace)
+    assert "Second corner" in d.title.text()
+    press(d, Qt.Key.Key_Return)
+    press(d, Qt.Key.Key_Return)
+    assert last()["hold"] is False and "rings" not in last() and len(saved) == 1
+    fit, joins = saved[0]
+    assert fit["quad"] == last()["quad"] and len(joins) == 3
+    # Cancel puts back what was saved, lean and all.
+    start = {"x": 400.0, "y": 1000.0, "scale": 0.9, "quad": [400, 1000, 1760, 1010, 1750, 1880, 410, 1870],
+             "eye": [1700.0, 700.0, 2600.0], "depth": [900.0, 900.0, 1000.0, 1000.0], "mm": 0.2325}
+    d2 = SeatAlignDialog(b, f, start, sent.append)
+    assert last()["hold"] is True and last()["quad"] == start["quad"]
+    press(d2, Qt.Key.Key_Left)
+    d2.reject()
+    assert last() == {"behind": "pc/main", "front": "lap/main", "hold": False, **start}
+    d3 = SeatAlignDialog(b, f, None, sent.append)
+    d3.reject()
+    assert last() == {"behind": "pc/main", "front": "lap/main", "hold": False, "reset": True}
+    import shiboken6
+
+    for dialog in (d, d2, d3):
+        shiboken6.delete(dialog)

@@ -8,11 +8,11 @@ import pytest
 
 from conftest import FakeCapture, FakeOverlay, FakeSink, FakeTransport
 from curslink.files import meta
-from curslink.files.handoff import DragHandoff, edge_strips
+from curslink.files.handoff import CARRIED_WINDOW, DragHandoff, edge_strips
 from curslink.files.transfer import FileReceiver, Outgoing, TransferError, safe_parts, send_files, unique
 from curslink.net.client import AgentClient, AgentSession
 from curslink.net.server import HostServer
-from curslink.protocol import FILES_FEATURE, decode, encode
+from curslink.protocol import FILE_ACK_FEATURE, FILES_FEATURE, PREFETCH_FEATURE, decode, encode
 from curslink.router import Router, RouterSettings
 from curslink.security import client_context, server_context
 
@@ -715,6 +715,43 @@ async def test_cancel_ends_the_drag_without_dropping(tmp_path):
     assert calls[-1] == "cancel" and not (tmp_path / "drops" / "d5").exists()
 
 
+async def test_a_cancelled_mac_drag_is_ended_by_the_helper_too(tmp_path):
+    """0.4.98: a Mac agent's AppKit drag outlived the Escape and button-up
+    when the drag went back to the PC, so the next one had to end it first."""
+    drop, receiver, helper, calls = native(tmp_path, end_watch=True)
+    drop.begin("d6", CARD)
+    drop.on_helper("nativedrag-started d6 card")
+    drop.cancel()
+    await settle()
+    # Called off on its own window, not let go where the pointer is (0.4.101:
+    # that copied the cancelled file into Finder).
+    assert calls[-1] == "cancel" and "nativedrag abort" in helper and "nativedrag end" not in helper
+    drop2, _r, helper2, _c = native(tmp_path / "win")
+    drop2.begin("d7", CARD)
+    drop2.on_helper("nativedrag-started d7")
+    drop2.cancel()
+    await settle()
+    assert "nativedrag abort" not in helper2 and "nativedrag end" not in helper2
+
+
+def test_the_helper_calls_off_running_mac_drags_on_their_own_windows():
+    from curslink.files.overlay import FilesOverlay
+
+    class Src:
+        def __init__(self, dragging, ended=False):
+            self.dragging, self.ended, self.aborted = dragging, ended, False
+
+        def abort(self):
+            self.aborted = True
+
+    ov = FilesOverlay(lambda x, y: (x, y))
+    going, done, waiting = Src(True), Src(True, ended=True), Src(False)
+    ov.running = [going, done]
+    ov.source = waiting
+    assert ov.handle("nativedrag abort")
+    assert going.aborted and not done.aborted and not waiting.aborted
+
+
 # ------------------------------------------------- the agent handing a drag back
 
 
@@ -1358,3 +1395,155 @@ def test_the_agent_tells_the_drag_out_where_a_held_pointer_is():
     session.handle(Message("button", {"button": "left", "pressed": True}))
     session.handle(Message("move", {"x": 20, "y": 10, "ts": 2.0}))
     assert watch.seen == [(20, 10)]
+
+
+def test_windows_drag_image_is_hidden_while_the_drag_is_carried_elsewhere():
+    """0.4.98: Windows kept showing what was dragged at the parked pointer
+    while the drag was on the Mac."""
+    from curslink.files.overlay import WinDragImage
+
+    class User32:
+        def __init__(self):
+            self.wins = {11: True, 12: False}
+            self.calls = []
+
+        def FindWindowExW(self, parent, after, cls, title):  # noqa: N802
+            assert cls == "SysDragImage"
+            keys = sorted(self.wins)
+            nxt = [k for k in keys if k > after] if after else keys
+            return nxt[0] if nxt else 0
+
+        def IsWindowVisible(self, h):  # noqa: N802
+            return self.wins[h]
+
+        def IsWindow(self, h):  # noqa: N802
+            return h in self.wins
+
+        def ShowWindow(self, h, cmd):  # noqa: N802
+            self.calls.append((h, cmd))
+            self.wins[h] = cmd != 0
+
+    u = User32()
+    image = WinDragImage(u)
+    image.hide()
+    assert u.calls == [(11, 0)] and not u.wins[11]
+    image.show()
+    assert u.calls[-1] == (11, 4) and u.wins[11] and not u.wins[12]
+
+
+# ------------------------------------------------- sending ahead of the drop
+class AckingAgents(NewAgents):
+    def supports(self, device_id, feature):
+        return super().supports(device_id, feature) or (device_id in self.connected and feature in (FILE_ACK_FEATURE, PREFETCH_FEATURE))
+
+
+@pytest.fixture
+def ahead(layout, tmp_path):
+    capture, transport = FakeCapture(), AckingAgents({"laptop"})
+    router = Router(layout, "desktop", capture, FakeSink(), transport, FakeOverlay(),
+                    RouterSettings(gaze_switching=True))
+    helper, injected, events = [], [], []
+    handoff = DragHandoff(router, transport, helper.append, injected.append, "Desktop",
+                          emit=lambda kind, **d: events.append((kind, d)))
+    return handoff, router, transport, injected, events
+
+
+async def _carry(handoff, router, transport, tmp_path, size=100):
+    f = tmp_path / "clip.mov"
+    f.write_bytes(b"x" * size)
+    handoff.on_button("left", True)
+    handoff.on_helper("drag " + json.dumps({"paths": [str(f)]}))
+    await settle()
+    router.on_pointer(3839, 500)
+    await settle()
+    return transport.of_type("drag")[0][2]["id"]
+
+
+async def test_files_start_going_as_soon_as_a_drag_is_carried_over(ahead, tmp_path):
+    """Kyle, 0.4.100: we know a file is coming as soon as it's carried
+    over; start sending then, so the drop doesn't wait for it."""
+    handoff, router, transport, injected, events = ahead
+    tid = await _carry(handoff, router, transport, tmp_path)
+    sent = [(t, d) for _, t, d in transport.bulk]
+    assert sent[0][0] == "file_begin" and sent[0][1]["id"] == tid and sent[0][1]["ack"] is True
+    assert sent[-1][0] == "file_end"
+    assert handoff.outgoing[tid].window == CARRIED_WINDOW
+    assert not [e for e in events if e[1].get("state") == "sending"]  # not dropped yet: quiet
+    handoff.on_result("laptop", {"id": tid, "ok": True})
+    assert not [e for e in events if e[1].get("state") == "sent"]
+    assert handoff.on_button("left", False) is True
+    await settle()
+    assert [t for _, t, _ in transport.bulk].count("file_begin") == 1  # not sent again
+    assert transport.of_type("drag")[-1][2] == {"drop": True, "id": tid}
+    assert [e[1]["state"] for e in events if e[0] == "file"] == ["sending", "sent"]
+
+
+async def test_carried_elsewhere_the_early_send_is_cancelled(ahead, tmp_path):
+    handoff, router, transport, injected, events = ahead
+    gate = asyncio.Event()
+    real = transport.bulk_sender
+
+    def slow(device_id):
+        send = real(device_id)
+
+        async def go(t, **d):
+            if t == "file_data":
+                await gate.wait()
+            await send(t, **d)
+        return go
+
+    transport.bulk_sender = slow
+    tid = await _carry(handoff, router, transport, tmp_path)
+    router.go_home("hotkey")
+    await settle()
+    assert transport.of_type("drag")[-1][2] == {"hide": True, "id": tid}
+    assert transport.bulk[-1][1] == "file_cancel" and tid not in handoff.outgoing
+    assert not [e for e in events if e[0] == "file"]
+
+
+async def test_big_drags_still_wait_for_the_drop(ahead, tmp_path, monkeypatch):
+    from curslink.files import handoff as handoff_mod
+
+    monkeypatch.setattr(handoff_mod, "PREFETCH_MAX", 50)
+    handoff, router, transport, injected, events = ahead
+    await _carry(handoff, router, transport, tmp_path)
+    assert transport.bulk == []
+
+
+async def test_an_agent_throws_away_files_sent_ahead_of_a_drop_that_went_elsewhere(tmp_path):
+    drop, receiver, helper, calls = native(tmp_path)
+    toasts = []
+    drop.popups.helper = toasts.append
+    drop.begin("p1", CARD)
+    receiver.handle(decode(encode("file_begin", id="p1", count=2, total=4, card=CARD, ack=True,
+                                  **{"from": "PC"})))
+    drop.cancel("p1")
+    receiver.handle(decode(encode("file_cancel", id="p1", reason="carried elsewhere")))
+    assert not [t for t in toasts if t.startswith("toast ")]
+    assert "p1" not in receiver.active and not (tmp_path / "drops" / "p1").exists()
+
+
+def test_a_press_lands_where_the_host_pressed():
+    # A press comes by TCP and can overtake the last UDP moves before it: it
+    # moves the pointer to where the host pressed first, and the older moves
+    # that arrive after it are dropped.
+    from curslink.protocol import Message
+
+    sink = FakeSink()
+    session = AgentSession(sink, lambda *a: None)
+    session.handle(Message("enter", {"x": 5, "y": 6}))
+    session.handle(Message("move", {"x": 10, "y": 10, "ts": 1.0}))
+    session.handle(Message("button", {"button": "left", "pressed": True, "x": 14, "y": 30, "ts": 3.0}))
+    session.udp_move(12, 20, 2.0)
+    assert sink.calls[-2:] == [("move", 14, 30), ("button", "left", True)]
+
+
+def test_a_router_press_says_where_and_when(layout):
+    transport = FakeTransport({"laptop"})
+    router = Router(layout, "desktop", FakeCapture(), FakeSink(), transport, FakeOverlay())
+    router.clock = lambda: 12.5
+    router.on_pointer(3839, 500)
+    router.on_button("left", True)
+    sent = transport.of_type("button")[-1][2]
+    assert sent["pressed"] is True and sent["ts"] == 12500.0
+    assert isinstance(sent["x"], int) and isinstance(sent["y"], int)

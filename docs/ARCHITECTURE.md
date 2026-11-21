@@ -134,14 +134,68 @@ the Layout page measures it (`curslink/lineup.py`, `lineup_scene.py`,
   screen's blocks through the same map (`lineup_seam.tiles`), and moves the
   shape as a whole. `x`, `y`, `scale` stay as the nearest rectangle: what
   an older agent, the phone app and the fine-tune dialog go by.
+- **On the Layout page** a screen in front with a leaning fit is drawn the
+  shape it really is (`lean_corners`: the `quad` as shares of its own
+  rectangle, so it follows the screen as it's dragged), with the rectangle
+  the pointer goes by as a dotted outline; from the line-up just run, or
+  the saved fits.
+- **The edge glow along a leaning edge.** In mirror mode the bar on the
+  screen the pointer heads for goes where the edge it leaves really runs
+  across that screen (`edgehint._leaning`, through the fit), and with a
+  leaning fit the `edge` command carries `lean`: how far that edge is off
+  the bar's straight line at each end. The helper shears the bar to match
+  (`Bar.draw`); older agents and the phone draw it straight.
+- **Turning a device off.** `[[devices]] enabled = false` ("Use <name>" on
+  the Layout page): it stays paired, connected and laid out, but
+  `Router.available` is false for it, so no edge, gaze or app mirror takes
+  input there (the edge light goes with it) and `switch_to` refuses it.
+  The page tells the running service (`device <id> on|off`), no restart.
+- **Bezels (`[layout] bezels`).** The pattern step's band is drawn right up
+  to and under the front screen's edge, so how far out from that edge the
+  camera first sees it is the width of the front screen's frame there
+  (`Seam._frame_width`, the median over the frames read; saved as the
+  fit's `bezel`: left, top, right, bottom in the front screen's pixels).
+  With the setting on, `Layout.seen_fit` grows the fit by it
+  (`Fit.grown`), and the pointer and mirror mode go by that: the front
+  screen stands for all that it and its frame hide. The saved fit stays
+  as measured. Unmeasured, 6 mm all round where a pixel's size is known.
+- **A line-up that passed is saved** (`LayoutPage.apply_lineup`,
+  `lineup_passed`): the joins agreed and every overlap's pattern joined,
+  nothing was missing and nothing else was waiting to be saved.
+- **Where you sit (`curslink/seat.py`).** A live line-up's `Result.desk`
+  is the solved desk as plain data (each screen's pose in the reference's
+  pixels, a unit's size in mm, the eye the fits are aimed from), saved as
+  `seat.json` beside the pairing files when the layout is. The scan takes
+  the phone's first place for the eye; the last step (`Live.start_seat`,
+  `seat.PhoneSeat`) leaves the check patterns up and places the phone
+  again (`Check.locate`) once it's been held still somewhere new for a
+  second (or where it was for six), 20 mm behind the lens. `seat.reaim`
+  moves each fit by the *change* in how the desk says its front screen is
+  seen (`_Desk.lean` from the old eye and the new), so what the pattern
+  step corrected stays corrected; without numpy it falls back on
+  `Fit.seen_from` (flat only). `seat.summary` is the Layout page's card
+  (`gui/seatcard.py`): distances and suggestions from placeholder targets
+  (top edge at eye level or a little below, the setup within 35 degrees
+  each side, a curved screen's centre line, what the front screen hides).
+  Without a phone the Calibrate page adds a first step, looking at the
+  camera: `seat.from_looks` places the eye along the camera's line to the
+  face (MediaPipe's distance, from the face's size) by how far the head
+  turns between the camera and each screen, less a fitted share (eyes
+  turn too). The camera is taken to be at the top of this computer's
+  screen unless a phone-found eye point has placed it
+  (`seat.locate_camera`, noted when head tracking first takes home after a
+  line-up). `[layout] follow_seat` is `HeadFollow(slow=True)`: no live
+  following, but 30 s settled somewhere new aims the fits from there once
+  (a `seat` event, the tray says so; `seat back` puts it back).
 - **Head tracking (experimental, `[layout] follow_head`).** The fit also
   records `eye` (where it was seen from, in the screen behind's pixels and
   that far in front of it), `depth` (how far in front each corner is) and
   `mm` (a pixel's size), so each corner is a known point in the room and
   `Fit.seen_from(eye)` gives the shape from anywhere else.
   `curslink/headfollow.py` takes the head's place before this computer's
-  camera from MediaPipe's face matrix (the gaze tracker's, or a tracker of
-  its own when gaze is off), as a move from "home" (where the head first
+  camera from MediaPipe's face matrix (the gaze tracker's, or with gaze off
+  a camera process of its own, `curslink/headcamera.py`: loading OpenCV on
+  a thread of a Windows host held the whole host up), as a move from "home" (where the head first
   sat still; kept in `head-home.json`, "Sit here" takes it again), turns
   it into the screen behind's terms (a laptop's own camera looks out of
   its leaning screen: `screen_axes`), smooths it (1-euro) and rewrites the
@@ -197,6 +251,23 @@ So the agent doesn't need to be calibrated on the host at all. Agents
 without a camera keep the host-only behaviour, and `confirm_with_agents =
 false` in `[gaze]` turns the check off. Agents only send `facing` to a
 host that lists it in `welcome.features`, so mixed versions keep working.
+
+**Every camera from its own angle.** "Facing it" only works for a camera
+you look straight into. A laptop at the side of the desk sees the look at
+its second monitor, or at the host's screen, as a head turned well away,
+and the host's own camera loses the face altogether with a bright window
+behind you. So an agent's camera also sends its head angles (`pose`
+frames, about 12 a second, to a host whose features list `"pose"`). While
+the Calibrate page runs, the host passes them to the app, which records
+each look as every camera saw it: `calibration.json` gains a `cameras`
+map (device id to the same targets-and-samples as the host's own). A look
+counts as recorded when any camera saw it. At run time
+`gaze.zones.JointClassifier` measures each camera against its own centres
+and takes the cameras that see you now together (root mean square of
+their distances), so a screen wins when they agree on it and the others
+carry on when one loses your face. A camera calibrated this way is part
+of that decision: it is no longer asked to confirm, and its `facing`
+reports move nothing by themselves.
 
 ### Any device's camera, on its own
 
@@ -377,6 +448,42 @@ front of it shows the part it covers, live (`curslink.mirror`).
   it) and reports drags, side stretches and wheel zooms as `mirror_tune`
   frames; `MirrorHost.tune` turns them into `fit` changes. Save writes the
   `[[layout.fit]]` without a restart.
+- The set-up guide (`curslink.gui.guide`): set-up as steps in the order
+  they're needed (this computer, devices, your desk, your seat, looking,
+  try it) instead of spread over the pages. `steps(app)` works out where
+  each stands from the config and the files beside it (`seat.json`, the gaze
+  calibration), so nothing is kept twice; only "continued past" and
+  "skipped" are remembered (desktop.json `guide_done`, `guide_skipped`, and
+  `guide`, the step being done). `GuideBar` is the strip across the top of
+  the window while it runs: the step, what to do, the button that does it
+  (`Guide.act`: the phone scan, the seat step, the looking pass, each on its
+  own page) and Continue. A host's first run goes straight into it;
+  `SetupCard` on the Status page lists the steps afterwards, each with a
+  button to do it again. The seat step only shows when screens overlap.
+  An agent has no guide: it waits to be added.
+- One look (`curslink.gui.theme`): the same colours, sizes and style sheet
+  on every platform (`TOKENS`, `SIZES` under `LOOK`), solid surfaces with
+  nothing of the platform's behind the window. `Theme.platform` is only
+  for what a platform needs (room for the Mac's window buttons).
+- Line up from your seat (`curslink.seatalign`, `curslink.gui.seatalign`):
+  what the Layout page's "Line up from your seat…" opens, in place of
+  the free-form fine-tune. `Align` picks up to three spots on the front
+  screen's rim that are seen against the screen behind (two corners where
+  it can, and halfway between them), and the window walks through them:
+  the arrow keys move the whole picture at the first, turn and size it
+  about the first at the second, and draw it out along the edge at the
+  third. Each nudge is a `fit` command with the picture's four corners
+  (`quad`), `"keep": true` (the guides behind stay put) and `rings`
+  (`[x, y, radius, on]` per spot, the screen behind's pixels), which the
+  host passes on in the capture and show specs in OS pixels; both helpers
+  draw them (`paint_guides(rings=...)`), with "Look here" by the one being
+  joined. With a desk a live line-up solved (`seat.json`), two joined spots
+  are two lines back to the eyes: `seatalign.eye_from` finds where they
+  meet, `seat.joined_shape` gives the picture's shape from there for the
+  third spot, and `seat.apply_joined` saves the fit as joined, aims the
+  desk and every other overlap from the eyes, and gives this one the
+  `eye`/`depth` head tracking follows. An older agent or the phone app
+  ignores `rings` and shows the plain guides.
 - Alignment guides while adjusting: the capture and show specs carry
   `guides`, the covered area when adjusting began (in the screen behind's
   OS pixels; it stays put so only the mirror's copy moves), and the show

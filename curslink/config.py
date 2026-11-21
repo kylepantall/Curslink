@@ -92,6 +92,9 @@ class HostConfig:
     # Experimental ([layout] follow_head): this computer's camera watches where your
     # head is and overlaps move to stay lined up from there (curslink.headfollow).
     follow_head: bool = False
+    # [layout] follow_seat: the same camera, slowly: once you've settled somewhere
+    # new for half a minute the overlaps are aimed from there (curslink.seat).
+    follow_seat: bool = False
     # App mirror: drag an app's window off this computer or another onto a
     # third, where it's shown and used ([app_mirror] enabled; see curslink.appmirror).
     app_mirror: bool = True
@@ -301,7 +304,10 @@ def parse_layout(raw: dict[str, Any]) -> Layout:
             )
         if not screens:
             raise ConfigError(f"device {d['id']!r} needs at least one [[devices.screens]]")
-        devices.append(Device(id=d["id"], name=d.get("name", d["id"]), screens=tuple(screens)))
+        enabled = d.get("enabled", True)
+        if not isinstance(enabled, bool):
+            raise ConfigError(f"device {d['id']!r}: `enabled` must be true or false")
+        devices.append(Device(id=d["id"], name=d.get("name", d["id"]), screens=tuple(screens), enabled=enabled))
     if not devices:
         raise ConfigError("no [[devices]] defined")
     allow_overlap = raw.get("layout", {}).get("allow_overlap", False)
@@ -313,11 +319,17 @@ def parse_layout(raw: dict[str, Any]) -> Layout:
     if not isinstance(mirror, bool) or not isinstance(mirror_pointer, bool):
         raise ConfigError("[layout].mirror and mirror_pointer must be true or false")
     mirror = mirror and allow_overlap
+    bezels = raw.get("layout", {}).get("bezels", False)
+    if not isinstance(bezels, bool):
+        raise ConfigError("[layout].bezels must be true or false")
     try:
-        return Layout.from_devices(devices, allow_overlap, links, pointer_through=mirror and mirror_pointer,
-                                   mirror=mirror, fits=parse_fits(raw.get("layout", {}).get("fit", []), devices),
-                                   mirror_joined=parse_mirror_joined(raw.get("layout", {}).get("mirror_joined", {}),
-                                                                     devices))
+        layout = Layout.from_devices(devices, allow_overlap, links, pointer_through=mirror and mirror_pointer,
+                                     mirror=mirror, fits=parse_fits(raw.get("layout", {}).get("fit", []), devices),
+                                     mirror_joined=parse_mirror_joined(raw.get("layout", {}).get("mirror_joined", {}),
+                                                                       devices))
+        # Count the frame round a screen in front as part of it (Layout.seen_fit).
+        layout.bezels = bezels
+        return layout
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
 
@@ -381,10 +393,10 @@ def _mirror_quality(layout: Any) -> str:
     return value
 
 
-def _follow_head(layout: Any) -> bool:
-    value = layout.get("follow_head", False) if isinstance(layout, dict) else False
+def _follow_head(layout: Any, key: str = "follow_head") -> bool:
+    value = layout.get(key, False) if isinstance(layout, dict) else False
     if not isinstance(value, bool):
-        raise ConfigError("[layout].follow_head must be true or false")
+        raise ConfigError(f"[layout].{key} must be true or false")
     return value
 
 
@@ -401,7 +413,8 @@ def parse_fits(value: Any, devices: list[Device]) -> list[Fit]:
 
     A live line-up also writes how the screen in front leans (``quad``: its
     four corners on the screen behind) and where it was seen from (``eye``,
-    ``depth``, ``mm``): see curslink.layout.Fit.
+    ``depth``, ``mm``), and how wide the frame round it is (``bezel``: left,
+    top, right, bottom, in its own pixels): see curslink.layout.Fit.
 
     One naming a screen no longer in the layout is skipped."""
     if not isinstance(value, list):
@@ -421,7 +434,7 @@ def parse_fits(value: Any, devices: list[Device]) -> list[Fit]:
         if not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in nums) or not nums[2] > 0:
             raise ConfigError(f"[[layout.fit]] #{i + 1}: x and y must be numbers and scale more than 0")
         more = {}
-        for k, n in (("quad", 8), ("eye", 3), ("depth", 4)):
+        for k, n in (("quad", 8), ("eye", 3), ("depth", 4), ("bezel", 4)):
             if k in t:
                 v = t[k]
                 if not isinstance(v, list) or len(v) != n \
@@ -574,6 +587,7 @@ def host_config(raw: dict[str, Any], base_dir: Path = Path(".")) -> HostConfig:
         mirror_fps=_mirror_fps(raw.get("layout", {})),
         mirror_quality=_mirror_quality(raw.get("layout", {})),
         follow_head=_follow_head(raw.get("layout", {})),
+        follow_seat=_follow_head(raw.get("layout", {}), "follow_seat"),
         app_mirror=_enabled(raw.get("app_mirror", {}), "[app_mirror]"),
         clipboard=bool(host.get("clipboard", True)),
         clipboard_max_mb=_clipboard_max_mb(host, "[host]"),

@@ -222,3 +222,24 @@ def test_forgetting_and_renaming_a_device_follows_its_references(tmp_path):
     assert cfg.get("gaze", "jump_screens") == ["desk/main"]
     assert cfg.keymap("device:phone2") is None
     host_config(load_raw(path), base_dir=tmp_path)  # still a config that loads
+
+
+def test_a_device_can_be_turned_off(tmp_path):
+    from curslink.config import parse_layout
+    from curslink.configedit import ConfigFile
+
+    cfg = ConfigFile(tmp_path / "c.toml")
+    cfg.add_device("mac", "Mac", [{"id": "main", "x": 0, "y": 0, "width": 1512, "height": 982}])
+    cfg.add_device("phone", "Pixel", [{"id": "phone", "x": 1512, "y": 0, "width": 411, "height": 914}])
+    assert cfg.device_enabled("phone")
+    cfg.set_device_enabled("phone", False)
+    assert not cfg.device_enabled("phone")
+    layout = parse_layout(cfg.raw())
+    assert not layout.devices["phone"].enabled and layout.devices["mac"].enabled
+    assert layout.screen("phone", "phone")  # still laid out
+    cfg.set_device_enabled("phone", True)
+    assert "enabled" not in cfg.raw()["devices"][1]
+    raw = cfg.raw()
+    raw["devices"][1]["enabled"] = "no"
+    with pytest.raises(ConfigError):
+        parse_layout(raw)

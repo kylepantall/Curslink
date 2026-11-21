@@ -134,6 +134,11 @@ class PynputCapture:
         # - a held button-up goes after HOLD_MAX_S, or at the next click.
         # took_back is set when one of them fires, for the router to catch up.
         self.loop_alive: Callable[[], bool] = lambda: True
+        # Windows: Ctrl+Alt+Delete or Task Manager in use (curslink.escapehatch).
+        from curslink.escapehatch import escape_wanted
+
+        self.escape_wanted: Callable[[], str | None] = escape_wanted
+        self._pc_mods: set[str] = set()  # ctrl/shift held, as this process's hooks heard them
         self.took_back = False
         self.hooks_lost = 0  # Windows: times the hooks were found gone (_watch_hooks)
         self._hook_heard_at = 0.0  # when the mouse hook (or the input helper) last reported a move
@@ -146,6 +151,9 @@ class PynputCapture:
         self._deaf_said: dict[str, float] = {}
         self._closed = False
         self._escapes: list[float] = []
+        # The take-back thread (_take_back_soon), started with the hooks.
+        self._take_back_wake = threading.Event()
+        self._take_back_why = ""
         # macOS: what keys typed here mean to a PC, where that differs (Option+D
         # types "∂" but is Alt+D to a PC; the Spotlight key is F4): the host's
         # key mapping reads it for keys going to Windows, Linux or Android.
@@ -165,6 +173,7 @@ class PynputCapture:
 
         self._handler = handler
         self._controller = mouse.Controller()
+        threading.Thread(target=self._take_back_worker, name="curslink-take-back", daemon=True).start()
         if self._mac:
             _mac_no_event_suppression()
         if self._shortcuts is not None:
@@ -187,6 +196,7 @@ class PynputCapture:
     def close(self) -> None:
         """Stop for good: the cursor shows again, and macOS's shortcuts work."""
         self._closed = True
+        self._take_back_wake.set()
         if self._helper is not None:
             self._helper.close()
         self.stop()
@@ -196,7 +206,8 @@ class PynputCapture:
         if self._hider is not None:
             self._hider.show()
 
-    def set_grab(self, grabbed: bool) -> None:
+    def set_grab(self, grabbed: bool, wait: float | None = None) -> None:
+        """``wait``: as for _restart (the safety nets pass one)."""
         if grabbed == self._grabbed:
             return
         if grabbed:
@@ -224,11 +235,59 @@ class PynputCapture:
             self._controller.position = self.park_at
         if self._hider is not None:
             (self._hider.hide if grabbed else self._hider.show)()
-        self._restart()
+        if self._suppress_live(grabbed):
+            return
+        self._restart(wait)
 
-    def _restart(self) -> None:
-        with self._restart_lock:  # the hooks' watchdog and the input helper restart them too
+    def set_cursor_hidden(self, hidden: bool) -> None:
+        """While input is here (not grabbed): hide the cursor, or show it
+        again. In a mirror of one of this computer's own apps, the pointer is
+        drawn in the mirror on the other screen; this one's cursor, over the
+        app's invisible window here, is only in the way."""
+        if self._grabbed:
+            return
+        if self._mac:
+            _mac_cursor_visible(not hidden)
+        elif self._hider is not None:
+            (self._hider.hide if hidden else self._hider.show)()
+
+    def _suppress_live(self, on: bool) -> bool:
+        """Windows: hold input back (or stop) with the hooks already in,
+        rather than new ones. True if that did it.
+
+        New hooks mean new threads, and a thread can't start while another
+        holds Windows' loader lock: on Kyle's PC (0.4.99) the head tracker's
+        ``import cv2`` sat in a DLL load for minutes, and the next switch
+        to the Mac stuck in starting the new mouse hook. The old hooks
+        were already out, the cursor already blank, and Escape had nothing
+        left to hear it. pynput's Windows hooks read ``_suppress`` at every
+        event (let_through uses it too), so flipping it is all a switch needs."""
+        if sys.platform != "win32" or not self._restart_lock.acquire(timeout=RESTART_WAIT_S):
+            return False
+        try:
+            with self._lock:
+                listeners = [x for x in (self._mouse_listener, self._key_listener) if x is not None]
+            if len(listeners) != 2 or not all(hasattr(x, "_suppress") and x.is_alive() and x.running
+                                              for x in listeners):
+                return False
+            for x in listeners:
+                x._suppress = on
+            return True
+        finally:
+            self._restart_lock.release()
+
+    def _restart(self, wait: float | None = None) -> bool:
+        """New hooks. With ``wait``, give up (False) if another thread has
+        been putting them back for that long: a safety net mustn't stick
+        behind the very thing it's there for."""
+        if not self._restart_lock.acquire(timeout=-1 if wait is None else wait):
+            log.warning("input: the hooks are still being put back elsewhere; not waiting for that")
+            return False
+        try:  # the hooks' watchdog and the input helper restart them too
             self._restart_now()
+        finally:
+            self._restart_lock.release()
+        return True
 
     def _restart_now(self) -> None:
         from pynput import keyboard, mouse
@@ -267,6 +326,12 @@ class PynputCapture:
                 )
             self._mouse_listener.start()
             self._key_listener.start()
+            if sys.platform == "win32" and not self._mac and suppress != self._grabbed:
+                # Input came home (or left) while these were starting, which
+                # can take a while (see _suppress_live): hold back what's
+                # wanted now, not what was wanted then.
+                for x in (self._mouse_listener, self._key_listener):
+                    x._suppress = self._grabbed
 
     # -- macOS event taps (run after pynput has called the callbacks) --------
     def let_through(self, inject) -> None:
@@ -340,10 +405,17 @@ class PynputCapture:
         so it's easy to find (the router brings input home there too)."""
         log.warning("input: %s; giving the mouse and keyboard back to this computer", why)
         self.took_back = True
+        # The cursor first: whatever below gets stuck, it's back.
+        if self._hider is not None:
+            self._hider.show()
+        if sys.platform == "win32":
+            from curslink.cursorhide import restore_windows
+
+            restore_windows()
         if self._held_up:
             self.release_held()
         if self._grabbed:
-            self.set_grab(False)
+            self.set_grab(False, wait=RESTART_WAIT_S)
         try:
             if self._mac:
                 _mac_warp(*self.park_at)
@@ -378,10 +450,25 @@ class PynputCapture:
         return self.park_at
 
     def _take_back_soon(self, why: str) -> None:
-        """take_back() from a listener's callback: on a thread of its own,
-        as it stops and restarts the very listener that's calling."""
-        if self._grabbed:
-            threading.Thread(target=self.take_back, args=(why,), name="curslink-take-back", daemon=True).start()
+        """take_back() from a listener's callback: on the take-back thread
+        (started up front), as it stops and restarts the very listener
+        that's calling. Not a new thread each time: starting one can wait
+        on Windows' loader lock, which is when this is needed most."""
+        if self._grabbed or self._held_up:
+            self._take_back_why = why
+            self._take_back_wake.set()
+
+    def _take_back_worker(self) -> None:
+        while not self._closed:
+            self._take_back_wake.wait()
+            self._take_back_wake.clear()
+            if self._closed:
+                return
+            if self._grabbed or self._held_up:
+                try:
+                    self.take_back(self._take_back_why)
+                except Exception:
+                    log.exception("input: couldn't give the mouse and keyboard back")
 
     def _watch_hooks(self) -> None:
         """Windows: while input is grabbed the hooks hold the cursor still
@@ -392,6 +479,7 @@ class PynputCapture:
         cursor wanders off the park point, put the hooks back."""
         seen: tuple[float, tuple[float, float]] | None = None  # (grab it's for, where the cursor sat)
         lost: list[float] = []
+        escape: tuple[float, str | None] | None = None  # (grab it's for, way out seen last)
         deaf = _DeafHook(self)
         while not self._closed:
             time.sleep(HOOK_CHECK_S)
@@ -399,6 +487,22 @@ class PynputCapture:
                 deaf.check()
                 continue
             deaf.reset()
+            way_out = self.escape_wanted() if sys.platform == "win32" else None
+            if escape is None or escape[0] != self._grabbed_at:
+                escape = (self._grabbed_at, way_out)  # Task Manager already in front isn't a way out
+            elif way_out and way_out != escape[1]:
+                # Ctrl+Alt+Delete (no hook ever sees it) or Task Manager
+                # coming up: Windows' own ways out free the cursor too.
+                self.take_back(f"{way_out} on this PC")
+                continue
+            else:
+                escape = (self._grabbed_at, way_out)
+            if not self.loop_alive():
+                # No hook callback needed: with the loop stuck mid-switch the
+                # hooks may not be in at all (0.4.99), so nothing would hear
+                # the mouse or Escape to notice.
+                self.take_back("Curslink stopped forwarding input")
+                continue
             if self._controller is None or time.monotonic() - self._grabbed_at < 0.5:
                 continue
             try:
@@ -427,8 +531,10 @@ class PynputCapture:
                 self.take_back("Windows kept dropping the input hooks")
                 continue
             try:
-                self._restart()
-                self._controller.position = self.park_at
+                if self._restart(wait=RESTART_WAIT_S):
+                    self._controller.position = self.park_at
+                else:
+                    self.take_back("the input hooks couldn't be put back")
             except Exception:
                 log.exception("input: couldn't put the input hooks back")
                 self.take_back("the input hooks couldn't be put back")
@@ -565,7 +671,7 @@ class PynputCapture:
         """The helper's hooks are in: put ours back in front of them, so the
         helper only gets what ours don't take (and holds back nothing ours do)."""
         if not self._closed:
-            self._restart()
+            self._restart(wait=RESTART_WAIT_S)
 
     def _helper_event(self, command: tuple) -> None:
         """Something the input helper's hooks heard (curslink.winhelper.watch).
@@ -647,6 +753,13 @@ class PynputCapture:
         if injected or self._handler is None:
             return
         name = key_to_name(key)
+        if not self._mac and name and family(name) in ("ctrl", "shift"):
+            (self._pc_mods.add if pressed else self._pc_mods.discard)(family(name))
+        if (not self._mac and self._grabbed and pressed and name == "esc"
+                and self._pc_mods >= {"ctrl", "shift"}):
+            # Ctrl+Shift+Esc (Task Manager) brings input home at once.
+            self._take_back_soon("Ctrl+Shift+Esc pressed")
+            return
         if not self._mac and (self._grabbed or self._held_up):
             # The same safety nets as the Mac's event tap (_mac_key_tap), on
             # the listener's own thread: Escape three times quickly always
@@ -757,6 +870,7 @@ ESCAPE_WINDOW_S = 1.5   # Escape three times within this: input comes home
 HOOK_CHECK_S = 0.25     # Windows: how often the parked cursor is checked (_watch_hooks)
 HOOK_DRIFT_PX = 24      # ... and how far off the park point means the hooks are gone
 HOOK_LOST_MAX = 4       # gone this often in 10 s: input comes home instead
+RESTART_WAIT_S = 1.0    # a safety net waits this long at most for hooks being put back elsewhere
 HELPER_FILL_S = 0.1     # Windows: helper moves count after our own hook heard none for this long
 DEAF_TICKS = 3          # Windows: checks in a row the cursor moved and the hook heard nothing (_DeafHook)
 DEAF_SAY_S = 60.0       # ... said at most this often per app in front
@@ -910,7 +1024,8 @@ def _mac_warp(x: float, y: float) -> None:
         log.debug("couldn't warp the cursor", exc_info=True)
 
 
-def _mac_post_move(x: int, y: int, held: set[str], last: tuple[int, int] | None) -> bool:
+def _mac_post_move(x: int, y: int, held: set[str], last: tuple[int, int] | None,
+                   clicks: "ClickCounter | None" = None) -> bool:
     """Move the cursor to (x, y) with a real mouse event, as a mouse would:
     mouse-dragged while a button is held (so a window being dragged moves,
     and a drag of files begins and moves), mouse-moved otherwise (so what's
@@ -934,6 +1049,14 @@ def _mac_post_move(x: int, y: int, held: set[str], last: tuple[int, int] | None)
         else:
             kind, button = Quartz.kCGEventMouseMoved, Quartz.kCGMouseButtonLeft
         ev = Quartz.CGEventCreateMouseEvent(None, kind, (float(x), float(y)), button)
+        if kind != Quartz.kCGEventMouseMoved:
+            # A real mouse's drag events carry the click count of the press
+            # that began them (1, or 2 for a double-click drag selecting by
+            # words); a created one may say 0, and an app can take that for
+            # a drag with no press behind it.
+            name = "left" if "left" in held else "right" if "right" in held else "middle"
+            count = clicks.held(name) if clicks is not None else 1
+            Quartz.CGEventSetIntegerValueField(ev, _MAC_CLICK_STATE, count)
         if last is not None:  # some apps (and games) read how far it moved
             Quartz.CGEventSetIntegerValueField(ev, _MAC_DELTA_X, int(x - last[0]))
             Quartz.CGEventSetIntegerValueField(ev, _MAC_DELTA_Y, int(y - last[1]))
@@ -941,6 +1064,82 @@ def _mac_post_move(x: int, y: int, held: set[str], last: tuple[int, int] | None)
         return True
     except Exception:  # pragma: no cover - macOS only
         log.debug("couldn't post the mouse move", exc_info=True)
+        return False
+
+
+_MAC_BUTTONS = {"left": (1, 2, 0), "right": (3, 4, 1), "middle": (25, 26, 2)}  # down, up, CGMouseButton
+_MAC_CLICK_STATE = 1                       # kCGMouseEventClickState
+
+
+class ClickCounter:
+    """Counts clicks the way the OS would for a real mouse: a press of the
+    same button soon enough after the last one, close enough to it, is the
+    next click of a double (or triple) click; its release carries the same
+    count. A Mac app sees a double click only from the click count on the
+    event (kCGMouseEventClickState), not from the timing, and a bare posted
+    press always says 1: 0.4.121 and before, double clicks driven from
+    another computer never registered on a Mac."""
+
+    SLOP_PX = 5
+
+    def __init__(self, interval: float = 0.5):
+        self.interval = interval
+        self._last: tuple[str, float, float, float, int, str] | None = None  # button, t, x, y, count, clock
+        self._held: dict[str, int] = {}
+
+    def press(self, button: str, x: float, y: float, now: float | None = None) -> int:
+        """``now``: when it was pressed on the host's mouse (the host's
+        clock), else when it got here."""
+        clock = "local" if now is None else "host"
+        now = time.monotonic() if now is None else now
+        count = 1
+        if self._last is not None:
+            b, t, lx, ly, n, c = self._last
+            # Only times on the same clock compare (a restarted host has a new one).
+            if (b == button and c == clock and 0 <= now - t <= self.interval
+                    and abs(x - lx) <= self.SLOP_PX and abs(y - ly) <= self.SLOP_PX):
+                count = n + 1
+        self._last = (button, now, x, y, count, clock)
+        self._held[button] = count
+        return count
+
+    def release(self, button: str) -> int:
+        return self._held.pop(button, 1)
+
+    def held(self, button: str) -> int:
+        """The click count of ``button``'s press, while it's held (1 if this
+        counter didn't see it go down)."""
+        return self._held.get(button, 1)
+
+
+def _mac_double_click_interval() -> float:
+    try:
+        from AppKit import NSEvent
+
+        return float(NSEvent.doubleClickInterval()) or 0.5
+    except Exception:  # pragma: no cover - macOS only
+        return 0.5
+
+
+def _mac_post_button(button: str, pressed: bool, clicks: ClickCounter, ts: float | None = None) -> bool:
+    """Press or let go of a mouse button where the cursor is, as a real
+    mouse would, with the click count set so double and triple clicks
+    work. False if it couldn't be posted."""
+    try:
+        import Quartz
+
+        down, up, number = _MAC_BUTTONS[button]
+        loc = Quartz.CGEventGetLocation(Quartz.CGEventCreate(None))
+        at = (float(loc.x), float(loc.y))
+        count = clicks.press(button, *at, now=ts) if pressed else clicks.release(button)
+        ev = Quartz.CGEventCreateMouseEvent(None, down if pressed else up, at, number)
+        Quartz.CGEventSetIntegerValueField(ev, _MAC_CLICK_STATE, count)
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
+        if count > 1:
+            log.debug("click %d of %s", count, button)
+        return True
+    except Exception:  # pragma: no cover - macOS only
+        log.debug("couldn't post the mouse button", exc_info=True)
         return False
 
 
@@ -994,10 +1193,12 @@ _mac_hides = 0     # CGDisplayHideCursor calls not yet matched by a show
 _mac_rehides = 0   # times it was found showing and hidden again, this time away
 # While hidden: how soon to look whether it's showing again (the first one
 # soon, after the system shortcuts are turned off), then how often.
-_MAC_HIDE_CHECKS_S = (0.05, 0.2)
+# (Every 0.05 s, not 0.2: going into a mirrored app, macOS shows it as the
+# mirror comes forward, and for 0.2 s it was a second pointer, Kyle 0.4.125.)
+_MAC_HIDE_CHECKS_S = (0.05, 0.05)
 # Hidden again this many times while away and still showing: macOS won't
 # have it, so stop (and say so) rather than pile up hides.
-_MAC_REHIDE_MAX = 50
+_MAC_REHIDE_MAX = 400  # (each time into a mirrored app can be one)
 
 
 def _mac_keep_hidden(gen: int) -> bool:
@@ -1127,7 +1328,8 @@ class PynputSink:
         if sys.platform == "win32" and _win_move(x, y):
             return
         if sys.platform == "darwin" and self.post_moves:
-            if _mac_post_move(x, y, self.__dict__.get("_down", set()), self._posted_at):
+            if _mac_post_move(x, y, self.__dict__.get("_down", set()), self._posted_at,
+                              self.__dict__.get("_clicks")):
                 self._posted_at = (x, y)
                 return
         if sys.platform == "darwin":
@@ -1151,6 +1353,18 @@ class PynputSink:
             return
         self.move_to(x, y)
 
+    def button_at(self, button: str, pressed: bool, ts: float) -> None:
+        """``button`` with when it went on the host's mouse (seconds, the
+        host's clock): a Mac counts a double click by the time between the
+        presses as they happened, not as they arrived. The network can bunch
+        a click and the press after it into a double click (a word selected
+        and dragged in place of a file) or spread a real one apart."""
+        self._button_ts = ts
+        try:
+            self.button(button, pressed)
+        finally:
+            self._button_ts = None
+
     def button(self, button: str, pressed: bool) -> None:
         from pynput import mouse
 
@@ -1161,6 +1375,12 @@ class PynputSink:
             return
         down = self.__dict__.setdefault("_down", set())
         (down.add if pressed else down.discard)(button)
+        if sys.platform == "darwin" and button in _MAC_BUTTONS:
+            clicks = self.__dict__.get("_clicks")
+            if clicks is None:
+                clicks = self._clicks = ClickCounter(_mac_double_click_interval())
+            if _mac_post_button(button, pressed, clicks, self.__dict__.get("_button_ts")):
+                return
         (self._mouse.press if pressed else self._mouse.release)(target)
 
     def scroll(self, dx: float, dy: float) -> None:
@@ -1269,6 +1489,7 @@ def press_left_here() -> None:
         at = mac_cursor()
         for kind in (Quartz.kCGEventLeftMouseUp, Quartz.kCGEventLeftMouseDown):
             ev = Quartz.CGEventCreateMouseEvent(None, kind, at, Quartz.kCGMouseButtonLeft)
+            Quartz.CGEventSetIntegerValueField(ev, _MAC_CLICK_STATE, 1)
             Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
             time.sleep(0.02)
     except Exception:  # pragma: no cover - macOS only
@@ -1292,6 +1513,7 @@ def _drag_move(x: int, y: int) -> None:
             for px in (x + 1, x):
                 ev = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventLeftMouseDragged, (px, y),
                                                     Quartz.kCGMouseButtonLeft)
+                Quartz.CGEventSetIntegerValueField(ev, _MAC_CLICK_STATE, 1)
                 Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
                 time.sleep(0.03)
         except Exception:  # pragma: no cover - macOS only
@@ -1323,6 +1545,7 @@ def _drag_release(x: int, y: int) -> None:
 
             ev = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventLeftMouseUp, (x, y),
                                                 Quartz.kCGMouseButtonLeft)
+            Quartz.CGEventSetIntegerValueField(ev, _MAC_CLICK_STATE, 1)
             Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
         except Exception:  # pragma: no cover - macOS only
             log.warning("couldn't let go of the drag on this Mac", exc_info=True)

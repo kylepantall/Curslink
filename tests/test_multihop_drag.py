@@ -165,7 +165,8 @@ async def test_a_mac_drag_can_wander_and_come_back_before_dropping(desk, tmp_pat
 def drag_on_pc(router, transport):
     to_pc(router)
     router.on_button("left", True)        # an Explorer drag starts on the PC
-    assert transport.to("pc", "button")[-1] == {"button": "left", "pressed": True}
+    sent = transport.to("pc", "button")[-1]
+    assert {k: sent[k] for k in ("button", "pressed")} == {"button": "left", "pressed": True}
 
 
 async def test_a_pc_drag_goes_straight_to_the_phone(desk):

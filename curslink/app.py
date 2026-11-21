@@ -15,7 +15,7 @@ from typing import Callable
 from curslink import events
 from curslink.config import AgentConfig, HostConfig, PairingConfig
 from curslink.gaze.confirm import FacingDetector, GazeArbiter
-from curslink.gaze.zones import Calibration, GazeClassifier, Target
+from curslink.gaze.zones import Calibration, GazeClassifier, JointClassifier, Target
 from curslink.inputs.keys import KeyMaps, os_kind
 from curslink.net.client import AgentClient, AgentSession, NotReady
 from curslink.net.client import Target as ConnectTarget
@@ -252,6 +252,24 @@ class HostRelays:
 
 LOOP_STALL_S = 1.5   # the loop that forwards input stuck this long: input goes home
 LOOP_BEAT_S = 0.2
+APP_BEAT_S = 1.0     # a "beat" event to the app this often, so it can tell this process is stuck
+
+
+def beat_to_app() -> asyncio.Task | None:
+    """Tell the app (``--events``) every APP_BEAT_S that the loop is going.
+    The app (curslink.gui.service) is a process of its own: if the beats
+    stop, it puts the cursor back and, stuck long enough, starts this
+    process again. Nothing in here can do that once the loop and the
+    threads are stuck (0.4.99)."""
+    if not events.channel.enabled:
+        return None
+
+    async def run() -> None:
+        while True:
+            events.emit("beat")
+            await asyncio.sleep(APP_BEAT_S)
+
+    return asyncio.get_running_loop().create_task(run())
 
 
 def watch_input_loop(capture, router) -> asyncio.Task:
@@ -390,6 +408,7 @@ async def run_host(cfg: HostConfig) -> None:
         active=router.active_device, screen=router.screen.id,
         gaze=tracker is not None or (cfg.gaze.enabled and router.gaze_paused), gaze_paused=router.gaze_paused,
     )
+    beat_to_app()
     camera = HostCamera(tracker, lambda: start_gaze(cfg, arbiter, loop) if cfg.gaze.enabled else None,
                         lambda: arbiter.set_camera(cfg.device_id, False), loop)
 
@@ -435,9 +454,18 @@ async def run_host(cfg: HostConfig) -> None:
             lineup_inbox.live(line[12:])
         elif line.startswith("fit "):
             fit_command(mirror, line[4:])
+        elif line.startswith("device "):
+            # The Layout page turned a device off or on: "device <id> on|off".
+            parts = line.split()
+            if len(parts) == 3 and parts[2] in ("on", "off"):
+                router.set_device_enabled(parts[1], parts[2] == "on")
         elif line == "head home":
             if head is not None:
                 head.follow.rehome()
+        elif line == "seat back":
+            if head is not None:
+                head.follow.put_back()
+                events.emit("seat", across=0, down=0, back=0, moved=[0, 0, 0])
         elif line == "pick on":
             # The Layout page is calibrating an edge: clicks on other computers are for it.
             router.picker = lambda data: events.emit("picked", **data)
@@ -789,14 +817,14 @@ def start_app_mirror(cfg: HostConfig, router: Router, server: HostServer, overla
         device = AppMirrorDevice(lambda t, **data: apps.on_message(router.local_id, t, data), submit, loop.call_later,
                                  skip=lambda: {p for p in (overlay.pid,) if p})
         local.on_captures = device.on_captures
-        chain_helper_lines(overlay, loop, device, ("app_view ",))
+        chain_helper_lines(overlay, loop, device, ("app_view ", "app_icon "))
 
     def release_local() -> None:
         if capture is not None and hasattr(capture, "inject_drag_end"):
             loop.run_in_executor(None, capture.inject_drag_end, "release")
 
     apps = AppMirrorHost(cfg.layout, router, server, device, changed=host.refresh, release_local=release_local,
-                         can_show_local=local is not None)
+                         can_show_local=local is not None, local_peer=local)
     host.apps = apps
     router.portal = apps
     router.on_any_button = apps.on_button
@@ -967,6 +995,78 @@ async def upgrade_path(cfg: AgentConfig, store: PairingStore, client: AgentClien
         if address is not None and client.path == "relay" and not session.active:
             log.info("network: %s answers on the LAN at %s; switching from the relay to a direct link",
                      peer.name, address)
+            client.reconnect()
+
+
+CABLE_GONE_EVERY_S = 2.0
+CABLE_LOOK_FIRST_S = 4.0   # after a cable link comes up: the host's end may take a few seconds
+CABLE_LOOK_MAX_S = 120.0   # then less and less often, while it doesn't answer there
+
+
+async def follow_cable(cfg: AgentConfig, store: PairingStore, client: AgentClient, session: AgentSession,
+                       every_s: float = CABLE_GONE_EVERY_S, first_s: float = CABLE_LOOK_FIRST_S,
+                       max_s: float = CABLE_LOOK_MAX_S, find=None, reachable=None, cable_networks=None,
+                       clock=time.monotonic) -> None:
+    """Keep the link to the host on a USB-C/Thunderbolt cable while there is one.
+
+    * Connected over the LAN and a cable link comes up (it's plugged in, or
+      macOS/Windows just gave it its 169.254.x.x address): when the host
+      answers on the cable, reconnect over it. Not while input is on this
+      device, so nothing is cut off mid-move; the reconnect takes well under
+      a second once it's back on the host.
+    * Connected over the cable and the cable link goes (unplugged): reconnect
+      straight away, over the LAN, rather than waiting for the old
+      connection to time out.
+
+    Everything to and from the host (control, pointer moves by UDP,
+    clipboard, files, App mirror) goes on that one connection and its UDP
+    path, so moving it moves all of them."""
+    from curslink.pairing import discovery
+
+    find = find or discovery.find
+    reachable = reachable or discovery.reachable
+    cable_networks = cable_networks or discovery.cable_networks
+    cable_host = ""      # the host's address while the link is on a cable
+    last_nets: list = []
+    wait_s = first_s     # until the next look for the host on the cable
+    look_at = 0.0
+    while True:
+        await asyncio.sleep(every_s)
+        if not client.path or client.path == "relay" or not client.host:
+            continue
+        try:
+            nets = await asyncio.to_thread(cable_networks)
+        except OSError:
+            continue
+        if nets != last_nets:  # a cable link came, went or changed: look again soon
+            last_nets, wait_s, look_at = nets, first_s, clock() + first_s
+        on_cable = bool(discovery.cable_addresses([client.host], nets))
+        if not on_cable and cable_host == client.host:
+            cable_host = ""
+            log.info("network: the cable link to the host (%s) went; reconnecting over the LAN", client.host)
+            client.reconnect()
+            continue
+        cable_host = client.host if on_cable else ""
+        if on_cable or not nets or session.active or clock() < look_at:
+            continue
+        look_at, wait_s = clock() + wait_s, min(wait_s * 2, max_s)
+        try:
+            peer = paired_host(cfg, store)
+            if peer is None:
+                continue
+            found = await find(peer.device_id, timeout=3.0)
+            if found is None or not found.control_port:
+                continue
+            cable = discovery.cable_addresses(found.addresses, nets)
+            if not cable:
+                continue
+            address = await reachable(cable, found.control_port, ssl=client.ssl_context)
+        except (OSError, NotReady, ValueError) as exc:
+            log.debug("network: looking for the host on the cable: %s", exc)
+            continue
+        if address is not None and client.path and not session.active:
+            log.info("network: %s answers on the cable at %s; moving the link from %s onto it",
+                     peer.name, address, client.host)
             client.reconnect()
 
 
@@ -1166,7 +1266,13 @@ def make_arbiter(cfg: HostConfig, router: Router) -> GazeArbiter:
     checked against agents' own cameras, or those cameras on their own."""
     classifier = None
     if cfg.gaze.enabled and cfg.gaze.calibration.exists():
-        classifier = GazeClassifier(Calibration.load(cfg.gaze.calibration), cfg.gaze.settings)
+        calibration = Calibration.load(cfg.gaze.calibration)
+        if calibration.views:
+            # Other devices' cameras were calibrated too: they all decide together.
+            classifier = JointClassifier(calibration, cfg.gaze.settings, local=cfg.device_id)
+            log.info("gaze: the cameras of %s decide together with this one", ", ".join(sorted(calibration.views)))
+        else:
+            classifier = GazeClassifier(calibration, cfg.gaze.settings)
     elif cfg.gaze.enabled:
         log.warning("%s does not exist; calibrate for the best gaze switching", cfg.gaze.calibration)
     arbiter = GazeArbiter(
@@ -1224,7 +1330,15 @@ def wire_agent_cameras(server: HostServer, arbiter: GazeArbiter) -> None:
         arbiter.on_facing(time.monotonic(), device_id, facing)
         events.emit("facing", device_id=device_id, facing=facing)
 
+    def on_pose(device_id: str, yaw: float, pitch: float) -> None:
+        if arbiter.suspended:
+            # The app is calibrating: it records this camera's view of each look beside the host's own.
+            events.emit("pose", device_id=device_id, yaw=yaw, pitch=pitch)
+            return
+        arbiter.on_pose(time.monotonic(), device_id, yaw, pitch)
+
     server.on_connect, server.on_disconnect, server.on_facing = on_connect, on_disconnect, on_facing
+    server.on_pose = on_pose
     for conn in server.connections.values():  # connected before gaze started
         arbiter.set_camera(conn.device_id, conn.camera)
     if server.connections:
@@ -1251,7 +1365,8 @@ class HeadCamera:
         from curslink.gaze import tracker as tracking
 
         tracking.head_listener = None
-        self.ticker.cancel()
+        if self.ticker is not None:
+            self.ticker.cancel()
         if self.tracker is not None:
             self.tracker.stop()
         self.follow.stop()
@@ -1263,38 +1378,131 @@ def head_home_path():
     return default_dir() / "head-home.json"
 
 
+def camera_seen_from_seat(device_id: str, head) -> None:
+    """Head tracking has just taken where the head is as home. If a line-up's
+    last step found the eyes with the phone minutes ago (curslink.seat),
+    that's the face at a known place: so it says where this computer's
+    camera is, which a later "Find with the camera" goes by."""
+    from curslink import seat
+
+    desk = seat.load()
+    if desk is None or desk.get("how") != "phone":
+        return
+    try:
+        age = time.time() - time.mktime(time.strptime(str(desk.get("when")), "%Y-%m-%dT%H:%M:%S"))
+    except ValueError:
+        return
+    if not 0 <= age <= 600:
+        return
+    mine = [k for k in desk["screens"] if k.split("/", 1)[0] == device_id]
+    camera = seat.locate_camera(desk, head, mine[0] if mine else None)
+    if camera is not None:
+        desk["camera"] = camera
+        seat.save(desk)
+        log.info("where you sit: this computer's camera placed against the eye point the phone found")
+
+
+HEAD_STATES = {
+    "no_mirror": "not running, mirror mode is off",
+    "no_overlap": "waiting for an overlap lined up with the phone camera",
+    "starting": "the camera is starting",
+    "watching": "the camera sees you",
+    "no_face": "the camera is on but sees no face",
+    "failed": "the camera didn't start",
+}
+HEAD_SEEN_S = 3.0  # a face this recently: watching
+HEAD_STARTING_S = 45.0  # the camera's libraries can take this long to load (22 s on Kyle's PC)
+
+
+def head_state(wanted: bool, now: float, seen_at: float | None, since: float, alive: bool | None) -> str:
+    """What head tracking's camera is doing (a key of HEAD_STATES).
+    ``alive``: is our own camera process running (None: gaze switching has
+    the camera); ``since``: when the camera was asked for."""
+    if not wanted:
+        return "no_overlap"
+    if seen_at is not None and now - seen_at < HEAD_SEEN_S:
+        return "watching"
+    if alive is False:
+        return "failed"
+    if seen_at is None and now - since < HEAD_STARTING_S:
+        return "starting"
+    return "no_face"
+
+
 def start_head_follow(cfg: HostConfig, mirror, loop: asyncio.AbstractEventLoop, own_camera: bool):
     """``[layout] follow_head`` (experimental): overlaps stay lined up as
     your head moves, by this computer's camera. Needs mirror mode on (it's
     the mirror and the pointer through it that follow)."""
-    if not cfg.follow_head:
+    if not cfg.follow_head and not getattr(cfg, "follow_seat", False):
         return None
+    camera_name = cfg.gaze.camera_name or f"camera {cfg.gaze.camera}"
     if mirror is None or not cfg.layout.mirror:
         log.info("head tracking is on but mirror mode isn't: nothing to keep lined up")
+        events.emit("head", state="no_mirror", camera=camera_name)
         return None
+    # ``[layout] follow_seat`` alone: slowly, once you've settled somewhere new.
+    slow = not cfg.follow_head
+
+    def seat_moved(was, now) -> None:
+        events.emit("seat", across=round(now[0]), down=round(now[1]), back=round(now[2]),
+                    moved=[round(n - w) for n, w in zip(now, was)])
     try:
         from curslink.gaze import tracker as tracking
-        from curslink.gaze.cameras import resolve
         from curslink.headfollow import HeadFollow
     except ImportError as exc:  # pragma: no cover - the gaze extra is missing
         log.error("head tracking needs the gaze extra (pip install curslink[gaze]): %s", exc)
         return None
     follow = HeadFollow(cfg.layout, cfg.device_id, mirror.refresh,
                         busy=lambda: mirror.tuning is not None or mirror.held is not None,
-                        home_path=head_home_path())
-    tracking.head_listener = lambda t, at: loop.call_soon_threadsafe(follow.sample, t, at)
-    tracker = None
-    if own_camera:
-        # Gaze switching is off, so nothing else has the camera open.
-        tracker = tracking.HeadPoseTracker(lambda *_sample: None, camera=resolve(cfg.gaze.camera, cfg.gaze.camera_name))
-        tracker.start()
+                        home_path=head_home_path(), slow=slow, moved=seat_moved if slow else None,
+                        home_set=lambda at: camera_seen_from_seat(cfg.device_id, at))
+    # What the camera is doing, for Settings to say under the switch: asked
+    # for and never seen to come on, it looked as if the switch did nothing.
+    seen: dict = {"at": None, "state": None, "since": time.monotonic()}
+
+    def heard(t, at) -> None:
+        seen["at"] = time.monotonic()
+        loop.call_soon_threadsafe(follow.sample, t, at)
+
+    tracking.head_listener = heard
+    head = HeadCamera(follow, None, None)
+
+    def report() -> None:
+        tracker = head.tracker
+        state = head_state(
+            wanted=follow.wanted(), now=time.monotonic(), seen_at=seen["at"], since=seen["since"],
+            alive=tracker.alive() if own_camera and hasattr(tracker, "alive") else None)
+        if state != seen["state"]:
+            seen["state"] = state
+            log.info("head tracking: %s (%s)", HEAD_STATES[state], camera_name)
+            events.emit("head", state=state, camera=camera_name,
+                        error=getattr(tracker, "error", None) if state == "failed" else None)
+
+    def camera_if_needed() -> None:
+        # Gaze switching is off, so nothing else has the camera open. Only
+        # once there's an overlap to follow, and in a process of its own
+        # (curslink.headcamera): loading OpenCV on a thread here froze
+        # Kyle's PC host in 0.4.98 to 0.4.100 (``import cv2`` sat in a DLL
+        # load for minutes, and no thread could start meanwhile).
+        if own_camera and head.tracker is None and follow.wanted():
+            from curslink.headcamera import HeadCameraProcess
+
+            log.info("head tracking: an overlap to follow, so starting this computer's camera")
+            head.tracker = HeadCameraProcess(cfg.gaze.camera, tracking.head_listener, cfg.gaze.camera_name)
+            head.tracker.start()
+            seen["since"] = time.monotonic()
 
     async def tick() -> None:
         while True:
             await asyncio.sleep(1.0)
+            camera_if_needed()
             follow.tick()
+            report()
 
-    return HeadCamera(follow, tracker, loop.create_task(tick()))
+    camera_if_needed()
+    report()
+    head.ticker = loop.create_task(tick())
+    return head
 
 
 def gaze_off_path():
@@ -1420,7 +1628,7 @@ async def run_agent(cfg: AgentConfig) -> None:
                                    skip=lambda: {p for p in (overlay.pid,) if p})
             session.app_mirror = apps
             mirror.on_captures = apps.on_captures
-            chain_helper_lines(overlay, loop, apps, ("app_view ",))
+            chain_helper_lines(overlay, loop, apps, ("app_view ", "app_icon "))
     clipboard = None
     if clipboard_on and overlay is not None:
         clipboard = start_clipboard(overlay, asyncio.get_running_loop(), cfg.clipboard_max_mb,
@@ -1439,7 +1647,11 @@ async def run_agent(cfg: AgentConfig) -> None:
         keeper.linked(state == "connected")
         if state == "connected" and client.host and not detail.startswith("relay"):
             peer = paired_host(cfg, store)
-            if peer is not None and peer.address != client.host:
+            from curslink.pairing.discovery import is_link_local
+
+            # Not a cable link's 169.254.x.x: it only works while the cable
+            # is in, and this is where to try when mDNS can't find the host.
+            if peer is not None and peer.address != client.host and not is_link_local(client.host):
                 store.set_address(peer.device_id, client.host)
         if state != "connected":
             events.emit("look", hide=True)  # the host can't take it down now
@@ -1486,8 +1698,13 @@ async def run_agent(cfg: AgentConfig) -> None:
     helpers = []
     if cfg.optimise and cfg.relay:
         helpers.append(asyncio.create_task(upgrade_path(cfg, store, client, session)))
+    if not cfg.host:
+        helpers.append(asyncio.create_task(follow_cable(cfg, store, client, session)))
     if events.channel.enabled:
         helpers.append(asyncio.create_task(report_network_agent(client, cfg.optimise, mdns)))
+    beats = beat_to_app()
+    if beats is not None:
+        helpers.append(beats)
     try:
         await asyncio.wait({runner, stopper}, return_when=asyncio.FIRST_COMPLETED)
         if runner.done():
@@ -1634,10 +1851,14 @@ class FacingCamera:
         self.tracker = tracker
         self.loop = loop
         self.refresh_s = refresh_s
+        # Told every sample's angles too, when someone reads them (an agent's host: client.report_pose).
+        self.pose: Callable[[float, float, float], None] | None = None
         self._ticker: asyncio.Task | None = None
 
     def on_sample(self, t: float, yaw: float, pitch: float) -> None:  # on the loop
         self._report(self.detector.update(t, yaw, pitch))
+        if self.pose is not None:
+            self.pose(t, yaw, pitch)
 
     def _report(self, changed: bool | None) -> None:
         if changed is None:
@@ -1685,6 +1906,7 @@ def start_facing(cfg: AgentConfig, client: AgentClient, loop: asyncio.AbstractEv
     tracker = HeadPoseTracker(on_sample, camera=resolve(cfg.gaze.camera, cfg.gaze.camera_name),
                               preview=cfg.gaze.preview)
     camera = FacingCamera(detector, client.report_facing, tracker, loop)
+    camera.pose = client.report_pose
     client.facing_source = lambda: detector.facing
     camera.start()
     log.info("using camera %d to tell the host when you're facing this device", cfg.gaze.camera)
@@ -1725,10 +1947,14 @@ async def resolve_host(cfg: AgentConfig, store: PairingStore, mdns: dict | None 
         if found is not None and found.control_port:
             from curslink.pairing.discovery import reachable
 
+            from curslink.pairing.discovery import cable_addresses
+
             # The host advertises all its addresses, some unreachable from
-            # here (VM bridges, VPNs): use one that answers.
-            # Last time's address first: it worked then.
-            order = sorted(found.addresses, key=lambda a: a != peer.address)
+            # here (VM bridges, VPNs): use one that answers. The other end
+            # of a USB-C/Thunderbolt cable first (it's the fastest link),
+            # then last time's address: it worked then.
+            cable = set(cable_addresses(found.addresses))
+            order = sorted(found.addresses, key=lambda a: (a not in cable, a != peer.address))
             address = await reachable(order, found.control_port, ssl=ctx)
             if address is None:
                 address = peer.address if peer.address in found.addresses else found.address
@@ -1768,6 +1994,7 @@ class Calibrator:
             from curslink.gaze.tracker import HeadPoseTracker as tracker_factory
         self._lock = threading.Lock()
         self._samples: list[tuple[float, float, float]] = []
+        self._heads: list[tuple[float, float, float]] = []  # where the head's been before the camera, mm
         self.latest: tuple[float, float] | None = None
         self.calibration = Calibration()
         self.tracker = tracker_factory(self._on_sample, camera=camera)
@@ -1777,13 +2004,40 @@ class Calibrator:
             self._samples.append((t, yaw, pitch))
             self.latest = (yaw, pitch)
 
+    def _on_head(self, _t: float, head: tuple[float, float, float]) -> None:
+        with self._lock:
+            self._heads = self._heads[-1999:] + [head]
+
+    def head(self) -> tuple[float, float, float] | None:
+        """Where the head has been before the camera, in the middle of all
+        the sightings (curslink.headfollow.mediapipe_head: right, down,
+        away, in mm), or None if it was hardly seen. For curslink.seat."""
+        with self._lock:
+            heads = list(self._heads)
+        if len(heads) < MIN_SAMPLES:
+            return None
+        return tuple(sorted(h[k] for h in heads)[len(heads) // 2] for k in range(3))
+
     def start(self) -> None:
         log.info("calibration: starting camera")
+        try:
+            from curslink.gaze import tracker as tracking
+
+            tracking.head_listener = self._on_head
+        except ImportError:  # (a test's stand-in tracker, without the gaze extra)
+            pass
         self.tracker.start()
 
     def stop(self) -> None:
         log.info("calibration: stopping camera")
         self.tracker.stop()
+        try:
+            from curslink.gaze import tracker as tracking
+
+            if tracking.head_listener == self._on_head:
+                tracking.head_listener = None
+        except ImportError:
+            pass
 
     def wait_for_face(self, timeout: float = 15.0) -> bool:
         deadline = time.monotonic() + timeout
@@ -1798,6 +2052,30 @@ class Calibrator:
             log.warning("calibration: no face within %.0fs", timeout)
         return self.latest is not None
 
+    def _watch(self, seconds: float, settle: float, patience: float) -> list[tuple[float, float]]:
+        """The head's (yaw, pitch) over the next ``seconds`` (longer, up to
+        ``patience`` more, while too few are in)."""
+        start = time.monotonic()
+        with self._lock:
+            self._samples.clear()
+        time.sleep(seconds)
+        deadline = start + seconds + patience
+        while True:
+            with self._lock:
+                samples = [(y, p) for t, y, p in self._samples if t >= start + settle]
+            if len(samples) >= GOOD_SAMPLES or time.monotonic() >= deadline:
+                return samples
+            time.sleep(0.1)
+
+    def look(self, seconds: float = 1.5, settle: float = 0.2, patience: float = 3.0) -> tuple[float, float] | None:
+        """Like :meth:`Calibrator.record`, for something that isn't a screen
+        (the camera itself, for curslink.seat): the head's (yaw, pitch) while
+        looking at it, kept out of the calibration. None if too few samples."""
+        samples = self._watch(seconds, settle, patience)
+        if len(samples) < MIN_SAMPLES:
+            return None
+        return (sum(y for y, _p in samples) / len(samples), sum(p for _y, p in samples) / len(samples))
+
     def record(self, target: Target, seconds: float = 1.5, settle: float = 0.2,
                patience: float = 3.0) -> tuple[float, float] | None:
         """Sample for ``seconds`` while the user looks at ``target``; returns
@@ -1808,16 +2086,7 @@ class Calibrator:
         then, so if too few samples are in after ``seconds`` it keeps going
         for up to ``patience`` more before giving up."""
         start = time.monotonic()
-        with self._lock:
-            self._samples.clear()
-        time.sleep(seconds)
-        deadline = start + seconds + patience
-        while True:
-            with self._lock:
-                samples = [(y, p) for t, y, p in self._samples if t >= start + settle]
-            if len(samples) >= GOOD_SAMPLES or time.monotonic() >= deadline:
-                break
-            time.sleep(0.1)
+        samples = self._watch(seconds, settle, patience)
         if len(samples) < MIN_SAMPLES:
             log.warning("calibration: only %d samples for %s in %.1fs, not recorded", len(samples), target,
                         time.monotonic() - start)

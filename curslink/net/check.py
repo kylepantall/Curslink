@@ -44,8 +44,13 @@ def _mac_ports() -> dict[str, str]:
 
 
 def interface_kind(name: str, port: str = "") -> str:
-    """``wifi``, ``wired``, ``vpn`` or ``other``, from an interface's name."""
+    """``wifi``, ``wired``, ``vpn``, ``cable`` (a USB-C/Thunderbolt link
+    straight to another computer) or ``other``, from an interface's name."""
+    from curslink.pairing.discovery import is_cable_name
+
     text = f"{port} {name}".lower()
+    if is_cable_name(text):
+        return "cable"
     if any(w in text for w in ("wi-fi", "wifi", "wlan", "wireless", "airport", "802.11")) or re.match(r"wl", name):
         return "wifi"
     if any(w in text for w in ("vpn", "tun", "tap", "wireguard", "utun", "tailscale", "zerotier", "ipsec")):
@@ -66,11 +71,23 @@ def interfaces() -> list[dict]:
     for adapter in ifaddr.get_adapters():
         name = adapter.nice_name or adapter.name
         for ip in adapter.ips:
-            if not isinstance(ip.ip, str) or ip.ip.startswith(("127.", "169.254.")):
+            if not isinstance(ip.ip, str) or ip.ip.startswith("127."):
                 continue
             port = ports.get(adapter.name, "")
-            found.append({"name": port or name, "device": adapter.name, "ip": ip.ip,
-                          "kind": interface_kind(str(adapter.name), port or str(name))})
+            kind = interface_kind(str(adapter.name), f"{port} {name}")
+            if ip.ip.startswith("169.254."):
+                from curslink.pairing.discovery import is_cable
+
+                if not is_cable(ip.ip, f"{adapter.name} {port} {name}"):
+                    continue  # Windows' self-assigned address on Wi-Fi Direct, Bluetooth, a VPN
+                kind = "cable"
+            entry = {"name": port or name, "device": adapter.name, "ip": ip.ip, "kind": kind}
+            if kind == "cable":
+                from curslink.pairing.discovery import is_cable_name
+
+                # A Thunderbolt Bridge / USB4 link, or an Ethernet cable straight between them.
+                entry["cable"] = "usb-c" if is_cable_name(f"{adapter.name} {port} {name}") else "ethernet"
+            found.append(entry)
     return found
 
 
@@ -82,6 +99,59 @@ def interface_for(ip: str, known: list[dict] | None = None) -> dict | None:
     if ip.startswith("::ffff:"):
         ip = ip[7:]
     return next((i for i in (interfaces() if known is None else known) if i["ip"] == ip), None)
+
+
+def brief(iface: dict | None) -> dict | None:
+    """What the other end needs to know of our interface: its kind and name."""
+    if not iface:
+        return None
+    out = {"kind": iface.get("kind", "other"), "name": iface.get("name", "")}
+    if iface.get("cable"):
+        out["cable"] = iface["cable"]
+    return out
+
+
+def _end(iface: dict | None) -> str:
+    """One end of a link in plain words: "Ethernet", "Wi-Fi", "a VPN (Tailscale)"."""
+    if not iface:
+        return ""
+    kind, name = iface.get("kind"), iface.get("name", "")
+    if kind == "wifi":
+        return "Wi-Fi"
+    if kind == "wired":
+        return "Ethernet"
+    if kind == "vpn":
+        return f"a VPN ({name})" if name else "a VPN"
+    if kind == "cable":
+        return "a USB-C cable" if iface.get("cable") == "usb-c" else "an Ethernet cable"
+    return name or ""
+
+
+def how_connected(link: dict) -> str:
+    """How this device talks to the other one, as plainly as can be said:
+    "USB-C cable to WKS82261", "Ethernet cable straight to WKS82261",
+    "Wi-Fi here, Ethernet on WKS82261", "Ethernet at both ends", "Through
+    the relay". ``link`` is a finished link report: ``interface`` is our
+    end, ``peer_interface`` the other end's (when it told us)."""
+    name = link.get("name") or ("the host" if link.get("device_id") == "host" else link.get("device_id") or "it")
+    if link.get("path") == "relay":
+        return f"Through the relay (over the internet) to {name}"
+    ours, theirs = link.get("interface") or {}, link.get("peer_interface") or {}
+    for end in (ours, theirs):
+        if end.get("kind") == "cable":
+            if end.get("cable") == "usb-c":
+                return f"USB-C cable to {name}"
+            return f"Ethernet cable straight to {name}"
+    here, there = _end(ours), _end(theirs)
+    if here and there:
+        text = f"{here} at both ends, here and on {name}" if here == there else f"{here} here, {there} on {name}"
+    elif here:
+        text = f"{here} here, to {name}"
+    elif there:
+        text = f"To {name}, which is on {there}"
+    else:
+        text = f"Over the network to {name}"
+    return text[0].upper() + text[1:]
 
 
 # ------------------------------------------------------------------ events
@@ -104,6 +174,9 @@ def finish(link: dict, ifaces: list[dict], mdns: bool | None = None) -> dict:
     """A link report with its interface, grade and tips filled in."""
     link = dict(link)
     link["interface"] = interface_for(link.get("local", ""), ifaces)
+    peer = link.get("peer_interface") or (link.get("agent") or {}).get("iface")
+    link["peer_interface"] = peer if isinstance(peer, dict) else None
+    link["how"] = how_connected(link)
     if mdns is not None:
         link["mdns"] = mdns
     link["grade"] = quality.grade(link.get("rtt") or {}, link.get("loss_pct"))
@@ -170,7 +243,8 @@ def summarise(check: dict) -> list[str]:
             lines.append("No other Curslink device answered.")
     ifaces = check.get("interfaces") or []
     if ifaces:
-        names = {"wifi": "Wi-Fi", "wired": "wired", "vpn": "VPN", "other": "other"}
+        names = {"wifi": "Wi-Fi", "wired": "wired", "vpn": "VPN", "cable": "cable straight to the other computer",
+                 "other": "other"}
         def one(i: dict) -> str:
             kind = names.get(i["kind"], i["kind"])
             show = kind and kind.lower() not in i["name"].lower() and kind != "other"

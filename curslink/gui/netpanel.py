@@ -12,8 +12,8 @@ from PySide6.QtWidgets import QFrame, QHBoxLayout, QVBoxLayout, QWidget
 from curslink.gui.widgets import Card, Toggle, button, label, pill, set_pill, text_block
 
 GRADES = {"good": ("Good", "on"), "fair": ("Fair", "wait"), "poor": ("Poor", "bad"), "unknown": ("Measuring", "off")}
-PATHS = {"udp": "Direct, pointer by UDP", "tcp": "Direct, TCP only", "relay": "Through the relay"}
-KINDS = {"wifi": "Wi-Fi", "wired": "wired", "vpn": "VPN", "other": ""}
+PATHS = {"udp": "Pointer by UDP", "tcp": "TCP only", "relay": "Through the relay"}
+KINDS = {"wifi": "Wi-Fi", "wired": "wired", "vpn": "VPN", "cable": "direct cable", "other": ""}
 
 
 def _ms(value) -> str:
@@ -22,10 +22,12 @@ def _ms(value) -> str:
 
 def describe(link: dict) -> tuple[str, str, list[str]]:
     """(heading, numbers line, extra lines) for one link."""
-    name = link.get("name") or ("The host" if link.get("device_id") == "host" else link.get("device_id", "?"))
-    heading = f"{name} · {PATHS.get(link.get('path'), 'Connecting')}"
+    from curslink.net.check import how_connected
+
+    # How the two are linked, plainly: "USB-C cable to WKS82261", "Wi-Fi here, Ethernet on WKS82261".
+    heading = link.get("how") or how_connected(link)
     rtt = link.get("rtt") or {}
-    parts = []
+    parts = [PATHS.get(link.get("path"), "Connecting")]
     if rtt.get("samples"):
         parts.append(f"Latency {_ms(rtt.get('p50_ms'))} (most {_ms(rtt.get('p95_ms'))})")
         parts.append(f"jitter {_ms(rtt.get('jitter_ms'))}")
@@ -37,8 +39,8 @@ def describe(link: dict) -> tuple[str, str, list[str]]:
     iface = link.get("interface") or {}
     if iface:
         kind = KINDS.get(iface.get("kind", ""), "")
-        parts.append(f"over {iface.get('name', '?')}" + (f" ({kind})" if kind and kind.lower() not in
-                                                         iface.get("name", "").lower() else ""))
+        parts.append(f"here on {iface.get('name', '?')}" + (f" ({kind})" if kind and kind.lower() not in
+                                                            iface.get("name", "").lower() else ""))
     extra = []
     reason = (link.get("tuning") or {}).get("reason")
     if link.get("optimise"):

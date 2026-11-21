@@ -215,6 +215,9 @@ async def test_probes_keep_the_radio_awake_only_while_input_is_here():
                          optimise=True)
     task = asyncio.create_task(client.run_once())
     await wait_for(lambda: server.is_connected("laptop"))
+    # The UDP path is attached a moment after the link is up (a slow runner
+    # got None here).
+    await wait_for(lambda: server.connections["laptop"].udp is not None)
     path = server.connections["laptop"].udp
     await wait_for(lambda: path.usable(server.udp.clock()))
     assert not client.udp.warming()

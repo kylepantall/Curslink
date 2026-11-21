@@ -28,6 +28,15 @@ log = logging.getLogger(__name__)
 STOPPED, STARTING, RUNNING, FAILED = "stopped", "starting", "running", "failed"
 # A child that ran this long before dying gets restarted rather than reported.
 RESTART_IF_UP_FOR_S = 30.0
+# A child that sends "beat" events (curslink.app.beat_to_app) and then goes
+# quiet this long is stuck: the cursor is put back (Windows' blank cursors
+# outlive it, see curslink.cursorhide) ...
+STUCK_SHOW_CURSOR_S = 4.0
+# ... and quiet this long, it's stopped and started again (its hooks go with it).
+STUCK_RESTART_S = 12.0
+WATCH_EVERY_MS = 1000
+# Ctrl+Alt+Delete or Task Manager with the child this quiet: restarted at once.
+STUCK_WAY_OUT_S = 2.0
 
 
 def service_command(role: str, config: Path) -> list[str]:
@@ -66,6 +75,24 @@ class Service(QObject):
         # Child threads can't touch Qt objects, so they hand over through these.
         self._line_seen.connect(self._on_line)
         self._exited.connect(self._on_exit)
+        # The watchdog: this app is a process of its own, so it still runs
+        # when the child is wedged (0.4.99: the host stuck mid-switch with
+        # the cursor blank and no hook left to hear Escape).
+        self._beat_at: float | None = None
+        self._watched_at = time.monotonic()
+        self._cursor_put_back = False
+        self._killed_stuck: subprocess.Popen | None = None
+        self._stuck_restarts: list[float] = []
+        # Windows: Ctrl+Alt+Delete or Task Manager coming up frees the cursor
+        # (curslink.escapehatch), from here too in case the child is stuck.
+        from curslink.escapehatch import escape_wanted
+
+        self.escape_wanted = escape_wanted
+        self._way_out: str | None = None
+        self._watchdog = QTimer(self)
+        self._watchdog.setInterval(WATCH_EVERY_MS)
+        self._watchdog.timeout.connect(self._watch)
+        self._watchdog.start()
 
     _line_seen = Signal(str)
     _exited = Signal(object, int)  # (the process, its exit code)
@@ -100,6 +127,8 @@ class Service(QObject):
             self._set_state(FAILED)
             return
         self._started_at = time.monotonic()
+        self._beat_at = None  # watched from its first beat on (older versions send none)
+        self._cursor_put_back = False
         log.info("started %s (pid %s): %s", role, self._proc.pid, " ".join(service_command(role, self.config)))
         self._set_state(STARTING)
         proc = self._proc
@@ -152,6 +181,9 @@ class Service(QObject):
 
     def _on_line(self, line: str) -> None:
         event = events.parse(line)
+        if event is not None and event["event"] == "beat":
+            self.beat()
+            return
         if event is None:
             if line.strip():
                 log.info("%s: %s", self.role or "service", line)
@@ -163,6 +195,64 @@ class Service(QObject):
         elif event["event"] == "log" and event.get("level") in ("warning", "error", "critical"):
             self.tail.append(event.get("message", ""))
         self.event.emit(event)
+
+    def beat(self, now: float | None = None) -> None:
+        """The child's loop is going (a ``beat`` event)."""
+        now = time.monotonic() if now is None else now
+        if self._cursor_put_back:
+            log.info("%s is answering again after %.1f s", self.role, now - (self._beat_at or now))
+        self._beat_at = now
+        self._cursor_put_back = False
+
+    def _watch(self, now: float | None = None) -> None:
+        """Every WATCH_EVERY_MS: has the child stopped beating?"""
+        now = time.monotonic() if now is None else now
+        late = now - self._watched_at > 3 * WATCH_EVERY_MS / 1000
+        self._watched_at = now
+        proc = self._proc
+        way_out = self.escape_wanted()
+        came_up, self._way_out = way_out if way_out != self._way_out else None, way_out
+        if came_up:
+            from curslink.cursorhide import restore_windows
+
+            log.info("%s on this PC: putting the cursor back", came_up)
+            restore_windows()
+        if proc is None or self._beat_at is None or self._stopping or proc.poll() is not None:
+            return
+        if came_up and now - self._beat_at >= STUCK_WAY_OUT_S:
+            # The user is asking for a way out and the child isn't answering:
+            # don't make them wait for STUCK_RESTART_S.
+            log.error("%s (pid %s) isn't answering (%.0f s) and %s came up: starting it again",
+                      self.role, proc.pid, now - self._beat_at, came_up)
+            self._beat_at = None
+            self._killed_stuck = proc
+            try:
+                proc.kill()
+            except OSError:
+                pass
+            return
+        if late:
+            # This app was stuck itself, or the computer slept: the child
+            # missed nothing it could have sent; start counting again.
+            self._beat_at = now
+            return
+        quiet = now - self._beat_at
+        if quiet >= STUCK_SHOW_CURSOR_S and not self._cursor_put_back:
+            self._cursor_put_back = True
+            log.warning("%s (pid %s) hasn't answered for %.0f s: putting the cursor back",
+                        self.role, proc.pid, quiet)
+            from curslink.cursorhide import restore_windows
+
+            restore_windows()
+        if quiet >= STUCK_RESTART_S:
+            log.error("%s (pid %s) has been stuck for %.0f s: stopping it and starting it again",
+                      self.role, proc.pid, quiet)
+            self._beat_at = None
+            self._killed_stuck = proc
+            try:
+                proc.kill()
+            except OSError:
+                pass
 
     def _on_exit(self, proc: subprocess.Popen, code: int) -> None:
         if proc is not self._proc:
@@ -190,7 +280,16 @@ class Service(QObject):
             return
         last = [line for line in self.tail if line.strip()]
         self.error = last[-1] if last else f"Curslink stopped unexpectedly (exit code {code})."
-        if up_for >= RESTART_IF_UP_FOR_S and self.role and self.config:
+        stuck, self._killed_stuck = self._killed_stuck is proc, None
+        if stuck:
+            now = time.monotonic()
+            self._stuck_restarts = [t for t in self._stuck_restarts if now - t < 300.0] + [now]
+            if len(self._stuck_restarts) > 3:
+                log.error("%s keeps getting stuck: not starting it again by itself", self.role)
+                self.error = "Curslink kept getting stuck, so it was stopped. Start it again from the app."
+                stuck = False
+                up_for = 0.0
+        if (stuck or up_for >= RESTART_IF_UP_FOR_S) and self.role and self.config:
             log.warning("service exited with %s after %.0fs; restarting", code, up_for)
             role, config = self.role, self.config
             QTimer.singleShot(2000, lambda: self.start(role, config))

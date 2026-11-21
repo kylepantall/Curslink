@@ -392,3 +392,67 @@ def test_screen_box_only_on_windows(monkeypatch):
     assert overlay.screen_box(-3076, 788) is None
     monkeypatch.setattr(overlay.sys, "platform", "win32")
     assert overlay.screen_box(-3076, 788) == (-3440, 17, 3440, 1440)
+
+
+def leaning_layout():
+    """The laptop in front of the monitor, lined up by camera turned in: its
+    left edge leans, 40 px further right at the top than at the bottom."""
+    from curslink.layout import Fit
+
+    w, h = 1512, 982
+    fx, fy = 1800, 900
+    quad = (fx + 40, fy, fx + w, fy, fx + w, fy + h, fx, fy + h)
+    fit = Fit(("pc", "main"), ("mac", "main"), fx, fy, 1.0, quad=quad)
+    return Layout.from_devices([MON, MACBOOK], allow_overlap=True, pointer_through=True, mirror=True, fits=[fit])
+
+
+def test_bar_follows_a_leaning_edge():
+    lay = leaning_layout()
+    # On the laptop near its left edge, a third of the way down: heading onto the monitor.
+    hint = find_hint(lay, "mac", 1805, 1200, everyone)
+    assert hint is not None and hint.target.device_id == "pc" and hint.side == "left"
+    assert hint.target_side == "right" and hint.tlean is not None
+    # The real edge runs from x 1840 at the laptop's top (y 900) to 1800 at its
+    # bottom; the monitor (bottom y 1440) shows the part from y 900 to 1440:
+    # x 1840 down to 1818. The bar's straight line goes through the middle of
+    # that (x 1829), leaning 11 px either way.
+    rx, ry, rw, rh = hint.trect
+    assert rx + rw == pytest.approx(1829, abs=1)
+    assert (hint.ta, hint.tb) == (pytest.approx(900, abs=1), pytest.approx(1440, abs=1))
+    assert hint.tlean == (pytest.approx(11, abs=1), pytest.approx(-11, abs=1))
+    sent = Sent()
+    edges = EdgeIndicator(lay, everyone, sent, name=lambda d: d, kind=lambda d: "mac")
+    edges.update("mac", 1805, 1200)
+    assert sent.last("pc")["lean"] == list(hint.tlean)
+    assert "lean" not in sent.last("mac")  # the laptop's own edge is straight
+    # Square on: no lean.
+    assert find_hint(overlap_layout(), "mac", 1805, 1200, everyone).tlean is None
+
+
+def test_helper_shears_the_bar_along_a_leaning_edge():
+    QtWidgets = pytest.importorskip("PySide6.QtWidgets")
+    from PySide6.QtGui import QImage, QPainter
+
+    from curslink.edgeoverlay import THICK, EdgeOverlay
+
+    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    ov = EdgeOverlay(lambda x, y: (x, y))
+    ov.handle({"role": "to", "rect": [0, 0, 1000, 800], "side": "right", "a": 100, "b": 700, "at": 400,
+               "near": 1, "lean": [60, 0]})
+    settle(ov)
+    bar = ov.bar
+    g = bar.geometry()
+    assert g.height() == 600 and g.width() > THICK
+    assert bar.lean == pytest.approx((1060 - g.x(), 1000 - g.x()), abs=1)
+    img = QImage(g.width(), g.height(), QImage.Format.Format_ARGB32_Premultiplied)
+    img.fill(0)
+    p = QPainter(img)
+    bar.draw(p, 1.0)
+    p.end()
+
+    def brightest_x(y):
+        return max(range(img.width()), key=lambda x: img.pixelColor(x, y).alpha())
+
+    # The glow's edge (its brightest column) moves left going down, with the edge.
+    top, bottom = brightest_x(300), brightest_x(500)
+    assert top - bottom == pytest.approx(20, abs=4)

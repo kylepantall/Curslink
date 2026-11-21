@@ -121,10 +121,34 @@ rectangle: the line-up measures that shape, and the mirror and the pointer
 go by it. (What lines up still depends on where you look from. **Settings >
 Overlapping screens > Follow my head** is an experiment that watches your
 head with this computer's camera and keeps the overlap lined up as you
-move.) Without the
+move.) The pattern step also measures the frame (bezel) round the screen
+in front: with **Settings > Overlapping screens > Allow for the frame round
+the screen in front** on, that screen shows everything it and its frame
+hide of the one behind, so a line of text never runs under the frame.
+
+The very last step finds **where you sit**. The phone was held out in front
+of you for the scan, and with a big setup you sit further back than that,
+so the overlap would be aimed at the wrong place. The patterns stay up a
+few seconds longer: sit back the way you normally sit and rest the top of
+the phone on the bridge of your nose, camera facing the screens. It buzzes
+when it has found you, and every overlap is aimed from your eyes instead
+(**Skip this step** leaves them as scanned). Under the layout, a **Where
+you sit** card then shows how far back you are, your eye level against the
+main screen's top edge, how much the screen in front hides, and what moving
+something would change (switch the suggestions off under **Settings >
+Overlapping screens**). No phone to hand? **Find with the camera…** on that
+card looks for you with this computer's camera instead: look at the camera,
+then at each screen (it's the gaze calibration pass, with one step added);
+that's rougher than the phone. **Settings > Overlapping screens > Keep
+overlaps aimed at where I sit** has the camera notice when you've settled
+somewhere new for half a minute and aims the overlap from there, telling
+you when it does.
+
+A line-up that passes these checks is saved by itself; one that doesn't
+(or a single photo) is left for you to check and press **Save layout**.
+Without the
 app, take one photo of the desk with any camera and choose it there: that
-works too, but one photo can't tell how far away each screen is. Check the
-result and press **Save layout**.
+works too, but one photo can't tell how far away each screen is.
 
 **From the command line:**
 
@@ -237,6 +261,16 @@ Windows only takes them from a real keyboard.
 
 **Is my typing safe on the network?** Yes. Everything is encrypted, and
 only devices you've paired can connect. See [Security](#security).
+
+**Can two computers use a cable between them?** Yes, when the cable makes a
+network: a Thunderbolt or USB4 cable with Thunderbolt Bridge on a Mac and
+the USB4 P2P or Thunderbolt Networking adapter on Windows, or an Ethernet
+cable straight between them. Curslink finds the other computer on the
+cable, moves the link onto it (when the pointer is back on the host, so
+nothing is cut off) and goes back to the LAN within a few seconds of it
+being unplugged. Settings > Network shows which one is in use. Mac to
+Windows over USB-C often doesn't link up at all: if neither computer shows
+the other in its network settings, a plain wired LAN does as well.
 
 **Wayland?** Not yet; Wayland blocks global input capture. Use an X11
 session for now.

@@ -89,17 +89,41 @@ def test_layout_page_saves_moves(desktop, qapp):
     assert next(d for d in desktop.config().devices() if d["id"] == "laptop")["screens"][0]["y"] == 250
 
 
-def test_theme_modes_and_looks(desktop, qapp, monkeypatch):
+def test_one_curslink_look_on_every_platform(desktop, qapp, monkeypatch):
     from curslink.gui import theme
 
-    for look in ("win", "mac", "linux"):
-        monkeypatch.setenv("CURSLINK_LOOK", look)
+    seen = {}
+    for plat in ("win", "mac", "linux"):
+        monkeypatch.setenv("CURSLINK_LOOK", plat)
         for mode in ("light", "dark"):
             theme.manager().set_mode(mode)
             th = theme.current()
-            assert th.platform == look and th.dark == (mode == "dark")
-            assert "QPushButton#primary" in theme.stylesheet(th)
+            assert th.platform == plat and th.dark == (mode == "dark") and th.look == theme.LOOK
+            sheet = theme.stylesheet(th)
+            assert "QPushButton#primary" in sheet
+            # the same colours, sizes and style sheet whatever the platform...
+            size = dict(th.size)
+            assert size.pop("mac_top") == (theme.MAC_TOP if plat == "mac" else 0)  # ...but room for the Mac's buttons
+            assert seen.setdefault(mode, (th.tokens, size, sheet)) == (th.tokens, size, sheet)
+            # and solid surfaces of its own: nothing of the platform's behind the window
+            assert th.window_bg == th.tokens["win"] and th.side_bg == th.tokens["side"]
+    assert seen["light"][0]["accent"] != seen["dark"][0]["accent"]
+    # the accent is the icon's link blue, and text on it reads
+    for mode in ("light", "dark"):
+        t = seen[mode][0]
+
+        def lum(c):
+            q = theme.qcolor(c)
+            f = [v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4 for v in (q.redF(), q.greenF(), q.blueF())]
+            return 0.2126 * f[0] + 0.7152 * f[1] + 0.0722 * f[2]
+
+        a, b = sorted((lum(t["accent"]), lum(t["accent_ink"])))
+        assert (b + 0.05) / (a + 0.05) >= 4.5
+        a, b = sorted((lum(t["ink"]), lum(t["card"])))
+        assert (b + 0.05) / (a + 0.05) >= 7
     theme.manager().set_mode("system")
+    # no transparency setting: there's nothing behind the window to show
+    assert not hasattr(desktop.window.pages["settings"], "glass")
 
 
 def test_camera_picker_keeps_the_name(qapp):
@@ -431,11 +455,11 @@ def test_a_screen_the_camera_couldnt_see_is_tried_again_not_skipped(desktop, qap
     name = page.targets[0][1]
     page.recorded(name, None)
     assert page.state == "ready" and page.step == 0 and name not in page.results
-    assert "couldn't see your face" in page.prompt_detail.text()
+    assert "could see your face" in page.prompt_detail.text()
     page.state = "recording"
     page.recorded(name, (1.0, 2.0))
     assert page.step == 1 and page.results[name] == (1.0, 2.0)
-    assert "couldn't see" not in page.prompt_detail.text()
+    assert "could see your face" not in page.prompt_detail.text()
 def test_menu_bar_item_with_no_height_counts_as_placed(desktop, monkeypatch):
     # macOS 26 reports the placed menu bar item as 38 x 0; closing the
     # window must still hide Curslink to the menu bar.
@@ -553,6 +577,133 @@ def test_overlap_shows_on_the_real_monitor_while_editing(desktop, qapp):
     assert hint.showing
     hint.show({"hide": True})
     assert not hint.showing
+
+
+def test_a_line_up_just_measured_shows_as_measured_before_it_is_saved(desktop, qapp):
+    """After a line-up, "Check it and press Save layout": what's on the
+    screens meanwhile is the overlap as measured (its leaning shape on the
+    monitor behind, and the mirror by it), not the layout's rectangles and
+    the overlap saved before."""
+    import json
+
+    from curslink.gui.overlaphint import OverlapHint, shapes_for
+    from curslink.lineup import Result
+    from PySide6.QtGui import QGuiApplication
+
+    page, home, laptop = _host_with_laptop(desktop)
+    page.isVisible = lambda: True
+    sent = []
+    desktop.service.send = sent.append
+    desktop.service.is_alive = lambda: True
+    hx, hy, hw, hh = home.layout_rect()
+    _lx, _ly, lw, lh = laptop.layout_rect()
+    quad = [hw - 300.0, hh - 200.0, hw + 400.0, hh - 230.0, hw + 420.0, hh + 300.0, hw - 310.0, hh + 330.0]
+    fit = {"behind": home.key, "front": laptop.key, "x": hw - 300.0, "y": hh - 215.0, "scale": 0.5, "quad": quad,
+           "eye": [hw / 2, hh / 3, 3000.0], "depth": [1000.0, 800.0, 850.0, 1050.0], "mm": 0.25}
+    result = Result({home.key: (hx, hy), laptop.key: (hx + hw - 400, hy + hh - 300)}, [(home.key, laptop.key)], [],
+                    [fit], found=[home.key, laptop.key], missing=[], reference=home.key)
+    page.apply_lineup(result)
+    # The service is shown the overlap at once: mirror mode and the pointer go by it.
+    cmd, = [json.loads(c[4:]) for c in sent if c.startswith("fit ")]
+    assert cmd == {k: fit[k] for k in ("behind", "front", "x", "y", "scale", "quad", "eye", "depth", "mm")}
+    # On the monitor behind: the leaning shape, with the rectangle round it for an older Curslink.
+    me = desktop.config().get("host", "device_id")
+    (entry,) = page.hint_payload()[me]["screens"]
+    region, = entry["regions"]
+    assert region["quad"] == quad and region["rect"] == [hw - 310, hh - 230, 310, 230]
+    shape, = shapes_for(QGuiApplication.primaryScreen(), entry)
+    assert shape is not None and shape.count() == 4
+    assert page.hint is not None and page.hint.showing
+    page.hint.windows[next(iter(page.hint.windows))].grab()  # paints the shape without error
+    hint = OverlapHint()
+    assert shapes_for(QGuiApplication.primaryScreen(), {"size": [100, 100], "regions": [
+        {"rect": [0, 0, 10, 10]}, {"rect": [0, 0, 10, 10], "quad": "no"}]}) == [None, None]
+    hint.hide()
+    # Moved by hand afterwards, it's the layout's rectangle again (that overlap isn't what was measured).
+    page.scene.clearSelection()
+    laptop.setSelected(True)
+    page.spins["x"].setValue(laptop.layout_rect()[0] + 40)
+    assert "quad" not in page.hint_payload()[me]["screens"][0]["regions"][0]
+    # Dropped without saving: the service goes back to the overlap as saved (here: none).
+    sent.clear()
+    page.load()
+    back, = [json.loads(c[4:]) for c in sent if c.startswith("fit ")]
+    assert back == {"behind": home.key, "front": laptop.key, "reset": True} and not page.previewed
+    # Saved: nothing to put back, the service starts again with it.
+    page.apply_lineup(result)
+    sent.clear()
+    page.save()
+    assert not [c for c in sent if c.startswith("fit ")] and not page.previewed
+    assert desktop.config().fits()[0]["quad"] == quad
+
+
+def test_a_line_up_that_passed_its_checks_is_saved_without_asking(desktop, qapp):
+    """A line-up whose lines across the joins agreed and whose pattern joined
+    up is saved there and then (Kyle, 0.4.100: nothing to press). One that
+    didn't pass, or that would save other changes along with it, still waits
+    for Save layout."""
+    from curslink.gui.pages.layout import lineup_passed
+    from curslink.lineup import Result
+
+    joined = {"state": "joined", "joins": 1, "left": 1.2, "moved": 30.0}
+    assert lineup_passed({"state": "checked", "lines": 6, "joins": 2, "step": 1.0})
+    assert lineup_passed({"state": "checked", "lines": 6, "joins": 2, "step": 1.0, "seam": joined})
+    assert lineup_passed({"state": "none", "lines": 0, "joins": 0, "step": None, "seam": joined})
+    assert not lineup_passed(None) and not lineup_passed({"state": "none", "lines": 0, "joins": 0, "step": None})
+    assert not lineup_passed({"state": "part", "lines": 6, "joins": 2, "step": 9.0, "seam": joined})
+    assert not lineup_passed({"state": "unseen", "lines": 6, "joins": 2, "step": None})
+    assert not lineup_passed({"state": "checked", "lines": 6, "joins": 2, "step": 1.0, "seam": {**joined, "state": "part"}})
+
+    page, home, laptop = _host_with_laptop(desktop)
+    home_key, laptop_key = home.key, laptop.key
+    saves = []
+    real = desktop.config_saved
+    desktop.config_saved = lambda *a, **k: (saves.append(1), real(restart=False))[1]
+    hx, hy, hw, hh = home.layout_rect()
+    fit = {"behind": home_key, "front": laptop_key, "x": hw - 300.0, "y": hh - 215.0, "scale": 0.5,
+           "bezel": [30.0, 28.0, 30.0, 0.0]}
+
+    def result(check):
+        return Result({home_key: (hx, hy), laptop_key: (hx + hw - 400, hy + hh - 300)}, [(home_key, laptop_key)], [],
+                      [dict(fit)], found=[home_key, laptop_key], missing=[], reference=home_key, check=check)
+
+    passed = {"state": "checked", "lines": 6, "joins": 2, "step": 1.0, "seam": joined}
+    # Still moving when it stopped: shown, and left to be checked and saved.
+    page.apply_lineup(result({**passed, "seam": {**joined, "state": "part"}}))
+    assert page.dirty and not saves and "press Save layout" in page.lineup_note.text()
+    page.load()
+    # Something else was waiting to be saved: the line-up doesn't save that for you.
+    page.scene.clearSelection()
+    home_item = next(i for i in page.items if i.key == home_key)
+    home_item.setSelected(True)
+    page.spins["x"].setValue(home_item.layout_rect()[0] + 10)
+    assert page.dirty
+    page.apply_lineup(result(passed))
+    assert page.dirty and not saves and "press Save layout" in page.lineup_note.text()
+    page.load()
+    # Passed, with nothing else pending: saved, the frame round the laptop with it.
+    page.apply_lineup(result(passed))
+    assert saves == [1] and not page.dirty and page.lineup_result is None
+    assert "so it's saved" in page.lineup_note.text() and "press Save layout" not in page.lineup_note.text()
+    saved, = desktop.config().fits()
+    assert saved["x"] == hw - 300.0 and list(saved["bezel"]) == [30.0, 28.0, 30.0, 0.0]
+
+
+def test_bezels_switch_in_settings(desktop, qapp):
+    desktop.window.pages["setup"].create()
+    cfg = desktop.config()
+    cfg.set("layout", "allow_overlap", True)
+    cfg.set("layout", "mirror", True)
+    cfg.save()
+    desktop.config_saved(restart=False)
+    settings = desktop.window.pages["settings"]
+    settings.load()
+    assert not settings.bezels_row.isHidden() and not settings.bezels.isChecked()
+    settings.bezels.click()
+    assert desktop.config().get("layout", "bezels") is True
+    from curslink.config import parse_layout
+
+    assert parse_layout(desktop.config().raw()).bezels
 
 
 def test_no_widget_opens_as_a_stray_window(desktop, qapp):
@@ -1088,7 +1239,9 @@ def test_settings_network_card_shows_each_link_and_the_check(desktop, qapp):
     desktop.service.event.emit({"event": "network", "links": [link]})
     qapp.processEvents()
     row = card.rows_by_id["laptop"]
-    assert "Work laptop" in row.heading.text() and "UDP" in row.heading.text()
+    # The heading says how the two are linked; the path is on the line under it.
+    assert row.heading.text() == "Wi-Fi here, to Work laptop"
+    assert "UDP" in row.numbers.text()
     assert "Latency 12 ms" in row.numbers.text() and "loss 1.6%" in row.numbers.text()
     assert "Wi-Fi" in row.numbers.text() and "twice" in row.extra.text()
     assert row.grade.text() == "Fair" and not card.empty.isVisibleTo(card)
@@ -1671,6 +1824,7 @@ def test_live_line_up_ends_with_lines_across_the_joins(desktop, qapp, tmp_path):
     from curslink import lineup
 
     page, home, laptop = _host_with_laptop(desktop)
+    home_key, laptop_key = home.key, laptop.key
     sent = []
     desktop.service.send = sent.append
     page.start_lineup()
@@ -1723,12 +1877,14 @@ def test_live_line_up_ends_with_lines_across_the_joins(desktop, qapp, tmp_path):
         qapp.processEvents()
         time.sleep(0.01)
     assert page.lineup is None and sent[-1] == 'lineup {"hide":true}'
-    true = lineup.arrange(flow.screens, true_solution(desk, home.key, places[0][0]))
+    true = lineup.arrange(flow.screens, true_solution(desk, home_key, places[0][0]))
+    # It passed its check, so it was saved there and then (the page loaded again from the config).
+    laptop = next(i for i in page.items if i.key == laptop_key)
     x, y, *_ = laptop.layout_rect()
-    assert (x, y) == pytest.approx(true.positions[laptop.key], abs=8)
-    # The page says the check ran, and how close it got.
-    assert page.lineup_result.check["state"] == "checked"
-    assert "Joins checked with" in page.lineup_note.text()
+    assert (x, y) == pytest.approx(true.positions[laptop_key], abs=8)
+    assert page.lineup_result is None and not page.dirty
+    # The page says the check ran, how close it got, and that it's saved.
+    assert "Joins checked with" in page.lineup_note.text() and "so it's saved" in page.lineup_note.text()
 
     from curslink.gui.pages.layout import check_note
 
@@ -1758,6 +1914,7 @@ def test_live_line_up_joins_a_pattern_across_an_overlap(desktop, qapp, tmp_path)
     flow.check_settle = 0.0
     flow.check_hold = 0.0
     flow.seam_hold = 0.6  # (5 s for a person to look at the joined blocks: here just long enough to see it happen)
+    flow.seat_step = False  # (the last step, where you sit, has a test of its own)
     _hx, _hy, hw, hh = home.layout_rect()
     _lx, _ly, lw, lh = laptop.layout_rect()
     desk = Desk([(home.key, home.device_id, hw, hh, 600, (0, 0, 0), 0, 0),
@@ -1808,9 +1965,12 @@ def test_live_line_up_joins_a_pattern_across_an_overlap(desktop, qapp, tmp_path)
         qapp.processEvents()
         time.sleep(0.01)
     assert page.lineup is None and sent[-1] == 'lineup {"hide":true}'
-    assert page.lineup_result.check["seam"]["state"] == "joined"
-    assert "pattern joined up" in page.lineup_note.text()
-    assert page.lineup_result.fits[0] == seam.fits()[0]
+    assert "pattern joined up" in page.lineup_note.text() and "so it's saved" in page.lineup_note.text()
+    # Joined, so saved there and then, with no Save layout to press: the overlap as the pattern left it.
+    assert page.lineup_result is None and not page.dirty
+    saved, = desktop.config().fits()
+    assert [float(v) for v in saved["quad"]] == pytest.approx(seam.fits()[0]["quad"], abs=0.06)
+    assert len(saved["eye"]) == 3 and len(saved["depth"]) == 4
 
 
 def test_settings_sections_in_the_sidebar_and_gaze_settings_on_calibrate(desktop, qapp):
@@ -1842,3 +2002,568 @@ def test_settings_sections_in_the_sidebar_and_gaze_settings_on_calibrate(desktop
     assert settings.sections["overlap"].isAncestorOf(settings.mirror_card)
     assert settings.sections["sharing"].isAncestorOf(settings.clipboard_card)
     assert "overlap" in settings.section_keys("host") and "overlap" not in settings.section_keys("agent")
+
+
+def test_layout_page_turns_a_device_off(desktop, qapp):
+    from curslink.config import host_config
+
+    page, home, laptop = _host_with_laptop(desktop)
+    sent = []
+    desktop.service.send = sent.append
+    desktop.service.is_alive = lambda: True
+    page.scene.clearSelection()
+    home.setSelected(True)
+    assert page.use_row.isHidden()  # this computer can't be turned off
+    page.scene.clearSelection()
+    laptop.setSelected(True)
+    assert not page.use_row.isHidden() and page.use_toggle.isChecked()
+    page.use_toggle.setChecked(False)
+    assert sent == ["device laptop off"] and laptop.off and not page.dirty
+    assert not host_config(desktop.config().raw()).layout.devices["laptop"].enabled
+    assert "turned off" in laptop.text.text()
+    page.load()
+    laptop = next(i for i in page.items if i.device_id == "laptop")
+    assert laptop.off
+    page.scene.clearSelection()
+    laptop.setSelected(True)
+    page.use_toggle.setChecked(True)
+    assert sent[-1] == "device laptop on" and not laptop.off
+    assert desktop.config().device_enabled("laptop")
+
+
+def test_layout_page_draws_a_leaning_screen(desktop, qapp):
+    from curslink.gui.pages.layout import lean_corners
+
+    assert lean_corners({"x": 10, "y": 20, "scale": 0.5}, 1000, 600) is None  # no quad: square on
+    square = [10, 20, 510, 20, 510, 320, 10, 320]
+    assert lean_corners({"x": 10, "y": 20, "scale": 0.5, "quad": square}, 1000, 600) is None
+    leaning = [10, 30, 510, 20, 500, 320, 15, 300]
+    corners = lean_corners({"x": 10, "y": 20, "scale": 0.5, "quad": leaning}, 1000, 600)
+    assert corners[0] == pytest.approx((0.0, 10 / 300)) and corners[2] == pytest.approx((490 / 500, 1.0))
+
+    page, home, laptop = _host_with_laptop(desktop)
+    hx, hy, hw, hh = home.layout_rect()
+    cfg = desktop.config()
+    cfg.set("layout", "allow_overlap", True)
+    cfg.move_screen("laptop", laptop.screen["id"], hx + hw - 300, hy + hh - 300)
+    cfg.set_screen_z("laptop", laptop.screen["id"], 1)
+    w, h = laptop.screen["width"], laptop.screen["height"]
+    fx, fy = hw - 300, hh - 300
+    quad = [fx + 40, fy, fx + w, fy + 30, fx + w - 20, fy + h, fx, fy + h - 10]
+    cfg.set_fit(f"{home.device_id}/{home.screen['id']}", f"laptop/{laptop.screen['id']}", fx, fy, 1.0, quad=quad)
+    cfg.save()
+    page.load()
+    laptop = next(i for i in page.items if i.device_id == "laptop")
+    home = next(i for i in page.items if i.device_id != "laptop")
+    assert laptop.lean is not None and home.lean is None
+    assert laptop.lean[0] == pytest.approx((40 / w, 0.0))
+    shape = laptop.lean_polygon()
+    assert shape.boundingRect().width() == pytest.approx(laptop.rect().width())
+    # moved clear of the screen behind: back to a plain rectangle
+    page.scene.clearSelection()
+    laptop.setSelected(True)
+    page.spins["x"].setValue(hx + hw + 50)
+    assert laptop.lean is None
+
+
+def test_live_line_up_ends_by_finding_where_you_sit(desktop, qapp, tmp_path, monkeypatch):
+    """After the pattern step the patterns stay up, the phone goes to the
+    eyes of someone sitting back, and the overlap is aimed from there: saved,
+    with the desk, and shown on the Layout page's card."""
+    import time
+
+    cv2 = pytest.importorskip("cv2")
+    import numpy as np
+    from lineup_desk import Camera, Desk, figure_of_eight, render, true_solution
+
+    from curslink import lineup, seat
+
+    page, home, laptop = _host_with_laptop(desktop)
+    assert page.seat_card.isHidden()  # (no line-up yet)
+    # (A slow machine reads a frame in seconds: it mustn't run out of patience, or of sightings recent enough.)
+    monkeypatch.setattr(seat, "GIVE_UP_S", 3600.0)
+    monkeypatch.setattr(seat, "KEPT_S", 600.0)
+    sent = []
+    desktop.service.send = sent.append
+    page.start_lineup()
+    flow = page.lineup
+    flow.check_settle = 0.0
+    flow.check_hold = 0.0
+    flow.seam_hold = 0.3
+    _hx, _hy, hw, hh = home.layout_rect()
+    _lx, _ly, lw, lh = laptop.layout_rect()
+    desk = Desk([(home.key, home.device_id, hw, hh, 600, (0, 0, 0), 0, 0),
+                 (laptop.key, "laptop", lw, lh, 340, (40, 160, -240), 0, 15)])
+    home_key, laptop_key = home.key, laptop.key
+    page._on_service_event({"event": "lineup_sizes", "devices": {
+        home.device_id: [{"x": 0, "y": 0, "width": hw, "height": hh, "width_mm": 600.0, "height_mm": 600.0 * hh / hw}],
+        "laptop": [{"x": 0, "y": 0, "width": lw, "height": lh, "width_mm": 340.0, "height_mm": 340.0 * lh / lw}]}})
+    places = figure_of_eight(30, (0, 0, -900), reach=(15, 10, 8), aim=(0, 60, 0))
+    lens = np.array((-20.0, -30.0, -1230.0))  # sitting back, the phone on the bridge of the nose
+    rng = np.random.default_rng(5)
+    cam = Camera()
+    titles, hints, answer, seated_at = [], [], None, None
+    for seq in range(200):
+        at, target, roll = places[seq % len(places)]
+        if flow.seat_shown:
+            seated_at = seated_at if seated_at is not None else seq
+            # (a second or so getting there, then held)
+            k = min(1.0, (seq - seated_at) / 4)
+            at = np.array(at) + (lens - np.array(at)) * k + rng.normal(0, 2, 3) * (k == 1.0)
+            showing, lines, patterns = lineup.check_plan(flow.planned), None, None
+        else:
+            after = flow.sent_lines is not None or flow.sent_patterns is not None
+            showing = flow.seam_showing or (lineup.check_plan(flow.planned) if after else flow.planned)
+            lines, patterns = None if flow.sent_patterns is not None else flow.sent_lines, flow.sent_patterns
+        frame = render(desk, showing, cam, cam.look(at, target, roll), seed=seq, shown=seq, lines=lines,
+                       patterns=patterns)
+        path = tmp_path / f"frame{seq}.jpg"
+        path.write_bytes(cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])[1].tobytes())
+        page._on_service_event({"event": "lineup_photo", "id": flow.id, "device": "phone", "path": str(path),
+                                "seq": seq, "focal": 1200.0})
+        deadline = time.monotonic() + 20
+        answer = None
+        while answer is None and time.monotonic() < deadline:
+            qapp.processEvents()
+            time.sleep(0.005)
+            answer = next((json.loads(c[len("lineup_live "):]) for c in sent
+                           if c.startswith("lineup_live ") and json.loads(c[len("lineup_live "):]).get("seq") == seq),
+                          None)
+        assert answer is not None
+        titles.append(flow.dialog.title.text())
+        hints.append(answer["hint"])
+        if seated_at is not None and seq == seated_at + 1:
+            # the last step, which can be left out
+            assert flow.dialog.use_button.text() == "Skip this step" and "4 Your seat" in flow.dialog.steps.text()
+            assert "✓ Pattern" in flow.dialog.steps.text()
+            assert not answer.get("done") and not answer.get("buzz")
+            time.sleep(0.05)
+        if answer.get("done"):
+            break
+        if seated_at is not None:
+            time.sleep(0.12)  # (a phone's frame rate: held still for a second is a few frames)
+    assert seated_at is not None and answer.get("done") and answer.get("buzz")
+    assert "Now show me where you sit" in titles and titles.index("Now show me where you sit") > titles.index(
+        "Joining up the overlap")
+    assert any("bridge of your nose" in h for h in hints)
+    # the phone is told how far back that is: 1230 mm to the lens and 20 more to the eyes
+    assert answer["hint"].startswith("Got you: 12") and answer["hint"].endswith("cm from screen 1")
+    # the screens went back to their check patterns alone for it
+    told = [json.loads(c[len("lineup "):]) for c in sent if c.startswith("lineup {") and '"devices"' in c]
+    entry = told[-1]["devices"]["laptop"]["screens"][0]
+    assert entry["lines"] == [] and "pattern" not in entry
+    found = flow.live.seat
+    assert found.moved and found.eye is not None
+    deadline = time.monotonic() + 30
+    while page.lineup is not None and time.monotonic() < deadline:
+        qapp.processEvents()
+        time.sleep(0.01)
+    assert page.lineup is None and not page.dirty
+    note = page.lineup_note.text()
+    assert "so it's saved" in note and "aimed at where you sit, 12" in note and "cm back" in note
+    # saved: the desk, and the overlap as seen from the seat, not from where the phone was held for the scan
+    saved = seat.load()
+    assert saved["how"] == "phone" and saved["moved_mm"] > 20
+    ref = desk.screens[home_key]
+    eye_mm = ref["r"] @ (np.array(saved["eye"]) * ref["mm"]) + ref["t"]
+    assert eye_mm == pytest.approx(lens - (0, 0, seat.LENS_TO_EYE_MM), abs=25)
+    fit, = desktop.config().fits()
+    truth = lineup._Desk(true_solution(desk, home_key, eye_mm)).lean(home_key, laptop_key)
+    scan = lineup._Desk(true_solution(desk, home_key, places[0][0])).lean(home_key, laptop_key)
+    quad = np.array([float(v) for v in fit["quad"]])
+    assert np.abs(quad - truth["quad"]).max() < 15 < np.abs(quad - scan["quad"]).max()
+    # and the card under the layout says so
+    card = page.seat_card
+    assert not card.isHidden() and "Measured with your phone" in card.source.text()
+    assert card.summary["distance"][0] in ("124 cm", "125 cm", "126 cm")
+    assert "further back than where the phone was held" in card.summary["distance"][1]
+    assert card.tiles["moved"][0].isVisibleTo(card) and not card.reset_button.isHidden()
+    card.side.grab()  # the side view paints
+    assert card.side.shape["front"] is not None and card.side.shape["scan"] is not None
+    # "Aim from the scan again" puts it back, and says so
+    card.reset_button.click()
+    qapp.processEvents()
+    assert seat.load()["how"] == "scan" and "aimed from where the phone was held" in page.lineup_note.text()
+    back = np.array([float(v) for v in desktop.config().fits()[0]["quad"]])
+    assert np.abs(back - scan["quad"]).max() < 15
+    assert page.seat_card.reset_button.isHidden() and "Not measured yet" in page.seat_card.source.text()
+
+
+def _saved_desk(desktop, how="scan"):
+    """A layout with a laptop in front of the host's screen, and the desk a line-up would have left for it."""
+    from lineup_desk import Desk, true_solution
+
+    from curslink import lineup, seat
+
+    page, home, laptop = _host_with_laptop(desktop)
+    _hx, _hy, hw, hh = home.layout_rect()
+    _lx, _ly, lw, lh = laptop.layout_rect()
+    desk = Desk([(home.key, home.device_id, hw, hh, 600, (0, 0, 0), 0, 0),
+                 (laptop.key, "laptop", lw, lh, 340, (40, 160, -240), 0, 15)])
+    layout = [{"key": i.key, "device": i.device_id, "x": i.layout_rect()[0], "y": i.layout_rect()[1],
+               "width": i.layout_rect()[2], "height": i.layout_rect()[3],
+               "width_mm": desk.sizes()[i.key][0], "height_mm": desk.sizes()[i.key][1]} for i in (home, laptop)]
+    result = lineup.arrange(layout, true_solution(desk, home.key, (0, 0, -700)))
+    page.apply_lineup(result)
+    page.save()
+    assert not page.dirty and seat.load() is not None
+    if how != "scan":
+        d = seat.load()
+        seat.save({**d, "how": how})
+    return desktop.window.pages["layout"], desk, home.key, laptop.key
+
+
+def test_the_seat_card_and_its_settings(desktop, qapp):
+    pytest.importorskip("cv2")
+    from curslink import seat
+
+    page, _desk, home_key, _laptop_key = _saved_desk(desktop)
+    card = page.seat_card
+    assert not card.isHidden() and "Not measured yet" in card.source.text() and card.reset_button.isHidden()
+    assert card.summary["main"] == home_key and card.summary["distance"][0] == "70 cm"
+    assert card.tips.count() >= 1 and not card.tips_title.isHidden()
+    settings = desktop.window.pages["settings"]
+    cfg = desktop.config()
+    cfg.set("layout", "mirror", True)
+    cfg.save()
+    desktop.config_saved(restart=False)
+    settings.load()
+    assert not settings.seat_tips_row.isHidden() and settings.seat_tips.isChecked()
+    assert not settings.follow_seat_row.isHidden() and not settings.follow_seat.isChecked()
+    assert settings.seat_back.isHidden()
+    settings.seat_tips.click()
+    qapp.processEvents()
+    assert desktop.config().get("layout", "seat_tips") is False
+    assert page.seat_card.tips.count() == 0 and page.seat_card.tips_title.isHidden() and not page.seat_card.isHidden()
+    settings.follow_seat.click()
+    qapp.processEvents()
+    assert desktop.config().get("layout", "follow_seat") is True
+    settings.load()
+    assert not settings.seat_back.isHidden()
+    from curslink.config import _follow_head
+
+    assert _follow_head(desktop.config().raw().get("layout", {}), "follow_seat") is True
+    # The host says what the camera is doing, and Settings repeats it under the switches.
+    assert settings.head_note.isHidden()
+    desktop._on_calibrating({"event": "head", "state": "no_overlap", "camera": "USB2.0 IR UVC WebCam"})
+    assert not settings.head_note.isHidden() and "Line up with a camera" in settings.head_note.text()
+    desktop._on_calibrating({"event": "head", "state": "watching", "camera": "USB2.0 IR UVC WebCam"})
+    assert "USB2.0 IR UVC WebCam) is on and sees you" in settings.head_note.text()
+    sent = []
+    desktop.service.send = sent.append
+    settings.seat_back.click()
+    assert sent == ["seat back"]
+    # the host says it re-aimed: a note from the tray, with how far you moved
+    said = []
+    desktop.tray.say = lambda title, text: said.append((title, text))
+    desktop.service.event.emit({"event": "seat", "across": 0, "down": 0, "back": 140, "moved": [0, 0, 140]})
+    desktop.service.event.emit({"event": "seat", "across": 0, "down": 0, "back": 0, "moved": [0, 0, -140]})  # put back
+    assert len(said) == 1 and said[0][0] == "You've moved back 14 cm" and "Put it back" in said[0][1]
+    # a desk whose screens have since gone isn't shown
+    d = seat.load()
+    seat.save({**d, "screens": {**d["screens"], "gone/main": d["screens"][home_key]}})
+    page.refresh_seat()
+    assert page.seat_card.isHidden()
+
+
+def test_calibrating_finds_where_you_sit_without_a_phone(desktop, qapp, monkeypatch):
+    """A desk from a line-up adds a first step to calibration, looking at the
+    camera; the pass then says where you sit and aims the overlaps from there."""
+    pytest.importorskip("cv2")
+    import math
+
+    from curslink import seat
+    from curslink.gaze.zones import Calibration, Target
+    from curslink.gui.pages import calibrate
+
+    page_l, desk, home_key, laptop_key = _saved_desk(desktop)
+    page = desktop.window.pages["calibrate"]
+    monkeypatch.setattr(calibrate, "in_background", lambda *a, **k: None)  # (no camera here)
+    page.begin()
+    assert page.desk is not None and page.targets[0][1] == calibrate.CAMERA_NAME and len(page.targets) == 3
+    page.state = "ready"
+    page.show_state()
+    assert page.prompt.text() == "Look straight at the camera" and "point your nose" in page.prompt_detail.text()
+    assert page.list_card.rows.count() == 3
+    page.cancel()
+    page.begin()
+    assert [n for _t, n in page.targets].count(calibrate.CAMERA_NAME) == 1  # (not added twice)
+    page.cancel()
+
+    d = seat.load()
+    mm = d["mm"]
+    camera = seat.assumed_camera(d, home_key)
+    ref = desk.screens[home_key]
+    eye = list(ref["r"].T @ ([-20.0, -30.0, -1100.0] - ref["t"]) / ref["mm"])
+    head = tuple(sum(camera["r"][a][i] * (eye[i] - camera["at"][i]) for i in range(3)) * mm for a in range(3))
+
+    def look(target):
+        v = [target[i] - eye[i] for i in range(3)]
+        n = math.sqrt(sum(c * c for c in v))
+        return math.degrees(math.atan2(v[0], v[2])), math.degrees(math.asin(v[1] / n))
+
+    class FakeCal:
+        calibration = Calibration()
+
+        def head(self):
+            return head
+
+    for key in (home_key, laptop_key):
+        yaw, pitch = look(seat.centre(d["screens"][key]))
+        for _ in range(5):
+            FakeCal.calibration.add(Target(*key.split("/", 1)), yaw, pitch)
+    before = [float(v) for v in desktop.config().fits()[0]["quad"]]
+    page.begin(seat_only=True)
+    assert page.seat_only and page.desk is not None
+    page.results[calibrate.CAMERA_NAME] = look(camera["at"])
+    said = page.finish_seat(FakeCal())
+    assert said.startswith("You sit about 1") and "aimed from there now" in said and "rougher than the phone" in said
+    new = seat.load()
+    assert new["how"] == "camera" and math.dist(new["eye"], eye) * mm < 60
+    assert [float(v) for v in desktop.config().fits()[0]["quad"]] != pytest.approx(before, abs=5)
+    page.cancel()
+    desktop.config_changed.emit()
+    assert "Found with this computer's camera" in page_l.seat_card.source.text()
+    # no face seen: nothing found, nothing changed
+    page.desk = seat.load()
+
+    class NoFace(FakeCal):
+        def head(self):
+            return None
+
+    assert "wasn't found" in page.finish_seat(NoFace())
+    # once the phone has found the eyes this pass places the camera against them instead
+    seat.save({**seat.load(), "how": "phone"})
+    page.desk = seat.load()
+    assert "already measured with the phone" in page.finish_seat(FakeCal())
+    kept = seat.load()
+    assert kept["how"] == "phone" and kept["eye"] == new["eye"] and kept["camera"]["how"] == "found"
+    assert kept["camera"]["at"] == pytest.approx([new["eye"][i] - (eye[i] - camera["at"][i]) for i in range(3)], abs=1e-3)
+    # with no line-up to go by, "Find with the camera" says what's needed first
+    seat.seat_path().unlink()
+    page.begin(seat_only=True)
+    assert page.state == "error" and "Line up your screens with the phone camera first" in page.message
+
+
+def test_a_camera_saved_from_the_old_list_gets_the_name_that_goes_with_its_number(desktop):
+    desktop.window.pages["setup"].create()
+    cfg = desktop.config()
+    cfg.set("gaze", "camera", 0)
+    cfg.set("gaze", "camera_name", "USB2.0 IR UVC WebCam")
+    cfg.save()
+    desktop.rename_cameras(["USB2.0 FHD UVC WebCam", "USB2.0 IR UVC WebCam"])
+    cfg = desktop.config()
+    assert (cfg.get("gaze", "camera"), cfg.get("gaze", "camera_name")) == (0, "USB2.0 FHD UVC WebCam")
+    assert cfg.get("gaze", "camera_list") == "mf"
+    # Once: a pick made since is left alone, the infrared one included.
+    cfg.set("gaze", "camera", 1)
+    cfg.set("gaze", "camera_name", "USB2.0 IR UVC WebCam")
+    cfg.save()
+    desktop.rename_cameras(["USB2.0 FHD UVC WebCam", "USB2.0 IR UVC WebCam"])
+    assert desktop.config().get("gaze", "camera_name") == "USB2.0 IR UVC WebCam"
+
+
+# -- setting up, a step at a time (curslink.gui.guide) ---------------------------------------
+def test_first_run_on_a_mac_asks_for_its_permissions_before_the_guide_moves_on(desktop, qapp, monkeypatch):
+    from curslink import macperms
+
+    monkeypatch.setattr(macperms, "missing", lambda role: ["accessibility"])
+    w = desktop.window
+    w.pages["setup"].create()
+    qapp.processEvents()
+    # Status asks for the permissions; the guide is on all the same, waiting at its devices step
+    assert w.stack.currentWidget() is w.pages["status"] and desktop.prefs.guide == "devices"
+    assert w.guide_bar.isVisibleTo(w) and "Add your other devices" in w.guide_bar.heading.text()
+
+
+def test_first_run_goes_on_to_the_guide_and_each_step_says_where_it_stands(desktop, qapp, monkeypatch):
+    from curslink import macperms
+    from curslink.gui import guide
+
+    monkeypatch.setattr(macperms, "missing", lambda role: [])  # a Mac asks for its permissions first, below
+    w = desktop.window
+    assert not w.guide_bar.isVisibleTo(w)  # nothing to guide before this computer is set up
+    w.pages["setup"].create()
+    qapp.processEvents()
+    # a host goes straight on to adding its devices, with the guide's bar across the top
+    assert desktop.prefs.guide == "devices" and w.stack.currentWidget() is w.pages["devices"]
+    assert w.guide_bar.isVisibleTo(w) and "Add your other devices" in w.guide_bar.heading.text()
+    assert "STEP 2 OF 2" in w.guide_bar.eyebrow.text()  # alone, there's nothing to place or try yet
+    states = {s.key: s.state for s in guide.steps(desktop)}
+    assert states == {"computer": "done", "devices": "todo", "desk": "none", "seat": "none", "looking": "none",
+                      "try": "none"}
+    cfg = desktop.config()
+    cfg.add_device("laptop", "Work laptop", [{"id": "main", "x": 1920, "y": 0, "width": 1512, "height": 982}])
+    cfg.save()
+    desktop.config_saved(restart=False)
+    qapp.processEvents()
+    states = {s.key: s.state for s in guide.steps(desktop)}
+    assert states["devices"] == "done" and states["desk"] == "todo" and states["seat"] == "none"
+    assert "STEP 2 OF 5" in w.guide_bar.eyebrow.text() and "Work laptop" in w.guide_bar.ticks.text()
+    # Continue: on to the desk, on the Layout page, with the scan as the thing to press
+    desktop.guide.forward()
+    qapp.processEvents()
+    assert desktop.prefs.guide == "desk" and w.stack.currentWidget() is w.pages["layout"]
+    assert w.guide_bar.action.text() == "Scan with my phone" and w.guide_bar.action.objectName() == "primary"
+    started = []
+    monkeypatch.setattr(w.pages["layout"], "start_lineup", lambda: started.append(1))
+    w.guide_bar.action.click()
+    assert started == [1]
+    # placed by hand and continued: the seat step isn't needed (nothing overlaps), so looking is next
+    desktop.guide.forward()
+    assert desktop.prefs.guide == "looking" and w.stack.currentWidget() is w.pages["calibrate"]
+    assert {s.key: s.state for s in guide.steps(desktop)}["desk"] == "done"
+    desktop.guide.back()
+    assert desktop.prefs.guide == "desk"
+    desktop.guide.forward()
+    desktop.guide.forward(skip=True)
+    assert desktop.prefs.guide == "try" and {s.key: s.state for s in guide.steps(desktop)}["looking"] == "skipped"
+    # Try it: each device ticks itself off as the pointer arrives
+    assert "○ Work laptop" in w.guide_bar.ticks.text() and w.guide_bar.next.text() == "Finish"
+    me = desktop.config().get("host", "device_id")
+    desktop.status.apply({"event": "switch", "from": me, "to": "laptop", "screen": "main", "reason": "edge"})
+    qapp.processEvents()
+    assert "✓ Work laptop" in w.guide_bar.ticks.text()
+    desktop.guide.forward()
+    qapp.processEvents()
+    assert desktop.prefs.guide == "" and not w.guide_bar.isVisibleTo(w)
+    assert guide.complete(guide.steps(desktop))
+
+
+def test_an_overlap_brings_in_the_seat_step_and_the_status_card_lists_them(desktop, qapp, monkeypatch):
+    from curslink.gui import guide
+
+    w = desktop.window
+    w.pages["setup"].create()
+    cfg = desktop.config()
+    cfg.add_device("laptop", "Work laptop")
+    cfg.replace_screens("laptop", [{"id": "main", "x": 100, "y": 100, "width": 1512, "height": 982}])
+    cfg.set("layout", "allow_overlap", True)
+    cfg.save()
+    desktop.config_saved(restart=False)
+    qapp.processEvents()
+    me = desktop.config().get("host", "device_id")
+    pairs = guide.overlaps(desktop.config())
+    assert len(pairs) == 1 and pairs[0][1] == "laptop/main" and pairs[0][0].startswith(me + "/")
+    steps = {s.key: s for s in guide.steps(desktop)}
+    assert steps["seat"].state == "todo" and "1 overlap to line up" in steps["seat"].detail
+    tuned = []
+    monkeypatch.setattr(w.pages["layout"], "tune_fit", lambda b, f: tuned.append((b, f)))
+    desktop.guide.go("seat")
+    w.guide_bar.action.click()
+    assert tuned == [pairs[0]] and w.stack.currentWidget() is w.pages["layout"]
+    # joined: the fit is saved, and continuing counts it as done
+    cfg = desktop.config()
+    cfg.set_fit(*pairs[0], 200.0, 600.0, 1.0, quad=[200, 600, 1712, 600, 1712, 1582, 200, 1582])
+    cfg.save()
+    desktop.config_saved(restart=False)
+    desktop.guide.forward()
+    assert {s.key: s.state for s in guide.steps(desktop)}["seat"] == "done"
+    # the Status page lists the steps, with what's left to do
+    desktop.guide.close()
+    w.show_page("status")
+    qapp.processEvents()
+    card = w.pages["status"].setup_card
+    assert card.isVisibleTo(w)
+    row, title, detail, state, again = card.step_rows["seat"]
+    assert title.text() == "Your seat" and state.text() == "Done" and again.text() == "Line up again"
+    assert card.resume_row.isVisibleTo(w) and "left" in card.resume_text.text()
+    card.resume_button.click()
+    assert desktop.prefs.guide == "desk"  # the first step still to do (the desk was never placed)
+
+
+def test_an_agent_has_no_guide(desktop, qapp):
+    w = desktop.window
+    w.pages["setup"].agent_choice.setChecked(True)
+    w.pages["setup"].create()
+    qapp.processEvents()
+    assert desktop.role == "agent" and desktop.prefs.guide == ""
+    assert not w.guide_bar.isVisibleTo(w)
+    w.show_page("status")
+    assert not w.pages["status"].setup_card.isVisibleTo(w)
+
+
+def test_calibrating_records_a_look_only_another_devices_camera_saw(desktop, qapp, monkeypatch):
+    """Kyle's desk, 2026-11-16: with a bright window behind him the PC's camera lost his face
+    whenever he turned to the Mac, three tries running, while the Mac's own camera watched him
+    look straight at it. The step stopped there. Now the Mac's view of each look is recorded."""
+    import time as clock
+
+    from curslink.gaze.zones import Calibration
+
+    desktop.window.pages["setup"].create()
+    cfg = desktop.config()
+    cfg.add_device("mac", "Work Mac")
+    cfg.save()
+    desktop.config_saved(restart=False)
+    page = desktop.window.pages["calibrate"]
+    page.load_targets()
+    monkeypatch.setattr(desktop.service, "send", lambda line: None)
+
+    class Cal:
+        calibration = Calibration()
+        latest = None
+
+        def stop(self):
+            pass
+
+    page.calibrator = Cal()
+    page.state = "recording"
+    page.step = next(i for i, (t, _n) in enumerate(page.targets) if t.device_id == "mac")
+    target, name = page.targets[page.step]
+    page.record_from = clock.monotonic() - 1.0
+    for _ in range(12):  # the host passes on what the Mac's camera sees
+        desktop.service.event.emit({"event": "pose", "device_id": "mac", "yaw": 2.0, "pitch": -5.0})
+    assert page.helping() == ["Work Mac"]
+    page.recorded(name, None, target)  # this computer's camera saw nothing
+    assert page.results[name] == (2.0, -5.0) and getattr(page, "retry", None) is None
+    assert Cal.calibration.centroids("mac") == {target: (2.0, -5.0)} and not Cal.calibration.centroids()
+    page.cancel()
+
+
+def test_mac_window_moves_by_its_top_strip(desktop, qapp, monkeypatch):
+    """macOS: the window's widgets run up under its buttons, so presses on
+    the top strip that no widget takes have to move the window (0.4.125
+    couldn't be dragged by its title bar at all)."""
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+
+    from curslink.gui import native, theme
+
+    moves, zooms = [], []
+    monkeypatch.setattr(native, "start_move", lambda w: moves.append(w) or True)
+    monkeypatch.setattr(native, "title_double_click", lambda w: zooms.append(w))
+    w = desktop.window
+    w.unified_title = True
+    w.pages["setup"].create()
+    w.show_page("status")
+    w.show()
+    qapp.processEvents()
+
+    def press(point, double=False):
+        target = w.childAt(point) or w
+        local = target.mapFrom(w, point)
+        if double:
+            QTest.mouseDClick(target, Qt.MouseButton.LeftButton, pos=local)
+        else:
+            QTest.mousePress(target, Qt.MouseButton.LeftButton, pos=local)
+            QTest.mouseRelease(target, Qt.MouseButton.LeftButton, pos=local)
+        qapp.processEvents()
+
+    top = QPoint(w.side.width() + 200, 10)  # the empty top of the page
+    press(top)
+    assert moves == [w]
+    press(QPoint(w.side.width() + 200, theme.MAC_TOP + 200))  # page body: no move
+    assert moves == [w]
+    nav = w.nav_buttons["status"]
+    w.side.layout().setContentsMargins(10, 0, 10, 12)  # a button in the strip keeps its press
+    qapp.processEvents()
+    at = nav.mapTo(w, QPoint(5, 5))
+    if at.y() < theme.MAC_TOP:
+        press(at)
+        assert moves == [w]
+    press(top, double=True)
+    assert zooms == [w]
+    w.unified_title = False  # Windows and Linux keep their own title bars
+    press(top)
+    assert len(moves) <= 2

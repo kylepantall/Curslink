@@ -386,11 +386,22 @@ class NativeDrop:
     def _end(self, drop: Drop) -> None:
         self.receiver.targets.pop(drop.id, None)
         self.popups.quiet.discard(drop.id)
+        self.popups.toasts.pop(drop.id, None)
+        if not drop.done and drop.id in self.receiver.active:
+            # Its files were coming ahead of the drop: the rest is cancelled.
+            self.popups.ignored.add(drop.id)
         if drop.phase in ("starting", "dragging") and drop.native:
             self.helper("nativedrag cancel")
             self.helper("card hide")
             if drop.phase == "dragging":
                 self.cancel_drag()
+                if self.end_watch:
+                    # A Mac's AppKit drag can outlive the Escape and button-up
+                    # (0.4.98: still going when the next drag came, which had
+                    # to end it first): the helper ends it itself, on its
+                    # own window, so it isn't dropped where the pointer is
+                    # (0.4.101: a cancelled drag copied into Finder).
+                    self.helper("nativedrag abort")
         else:
             self.helper("card hide")
         shutil.rmtree(drop.staging, ignore_errors=True)

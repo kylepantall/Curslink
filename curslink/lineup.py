@@ -22,6 +22,7 @@ packaged app) and only :func:`find_screens` and :func:`marker_bits` use it.
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass, field
 
@@ -45,6 +46,9 @@ JOIN = 0.18
 # Screens sharing more than this share of the smaller one's area overlap; less
 # is a bezel over a bezel, so they only meet.
 OVERLAP = 0.03
+
+
+log = logging.getLogger(__name__)
 
 
 class LineupError(RuntimeError):
@@ -320,6 +324,10 @@ class Result:
     joins: list[tuple[str, str, str | None]] = field(default_factory=list)
     # How the check at the end went (Live.check_summary), None if there wasn't one.
     check: dict | None = None
+    # The desk in 3D and the eye point the fits are aimed from (curslink.seat),
+    # kept with the layout so the overlaps can be aimed again without a scan.
+    # None from a single photo (which can't tell how far away anything is).
+    desk: dict | None = None
 
 
 def _span(a0: float, a1: float, b0: float, b1: float) -> tuple[float, float] | None:
@@ -493,9 +501,23 @@ class _Desk:
         e = (B.r.T @ (np.asarray(self.sol.eye, np.float64) - B.t)) / B.scale
         p = ((F.corners() - B.t) @ B.r) / B.scale
         depth = -p[:, 2]
-        if -e[2] > 0 and np.all(depth >= 0) and np.all(depth < 0.9 * -e[2]):
+        if B.bend:
+            # A curved screen's corners are in that plane and its glass is
+            # behind it, the middle most (centimetres on a wide one): a
+            # laptop's top edge near the middle of the glass is *behind* the
+            # plane, and well in front of the glass it's seen against. How
+            # far before the glass there, then (0.4.100 left these out for
+            # Kyle's curved monitor, so head tracking had nothing to follow).
+            from curslink.lineup_scene import bent
+
+            across = np.clip(quad[:, 0] / B.width, 0.0, 1.0)
+            depth = depth + bent(across, B.bend)[1] * B.width
+        if -e[2] > 0 and np.all(depth > -0.1 * -e[2]) and np.all(depth < 0.9 * -e[2]):
             out["eye"] = [float(e[0]), float(e[1]), float(-e[2])]
-            out["depth"] = [float(d) for d in depth]
+            out["depth"] = [float(max(0.0, d)) for d in depth]
+        else:
+            log.info("line-up: %s before %s: can't say where it's seen from (eye %.0f px away, corners %s px before "
+                     "it), so head tracking can't follow it", front, behind, -e[2], [round(float(d)) for d in depth])
         return out
 
     def _fitted_quad(self, F, B):
@@ -715,10 +737,13 @@ def arrange(screens: list[dict], solution) -> Result:
                 continue
             links.append({"a": a, "a_side": side, "a_span": a_span, "b": b, "b_side": OPP[side], "b_span": b_span})
             joins.append((a, b, side))
+    from curslink import seat
+
     return Result(final, fronts, links, fits, found=keys, missing=missing, reference=ref, joins=joins,
                   errors={k: float(poses[k].error) for k in keys},
                   stance={k: desk.stance(k) for k in keys},
-                  views=solution.frames, rms=solution.rms)
+                  views=solution.frames, rms=solution.rms,
+                  desk=seat.from_solution(solution, _world_mm(solution, mm, info)))
 
 
 def overlap_of(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> tuple[int, int, int, int] | None:
@@ -741,6 +766,16 @@ def push_apart(rect: tuple[int, int, int, int], others: list[tuple[int, int, int
         dx, dy = min(moves, key=lambda m: abs(m[0]) + abs(m[1]))
         x, y = x + dx, y + dy
     return x, y
+
+
+def _world_mm(solution, mm: dict[str, tuple[float, float]], info: dict[str, dict]) -> float | None:
+    """The size of one unit of the solved desk (a pixel of its reference
+    screen) in mm, from whichever screens say how big they are."""
+    each = sorted(mm[k][0] / float(info[k]["width"]) / float(sp.scale) for k, sp in solution.screens.items()
+                  if k in mm and k in info and sp.scale > 0)
+    if solution.reference in mm and solution.reference in info:
+        return mm[solution.reference][0] / float(info[solution.reference]["width"])
+    return each[len(each) // 2] if each else None
 
 
 def _sizes_mm(screens: list[dict]) -> dict[str, tuple[float, float]]:
@@ -777,9 +812,11 @@ def line_up(photo: bytes, screens: list[dict], planned: dict[str, dict], referen
         raise LineupError("Curslink couldn't find the patterns in that photo. Get every screen in the picture, "
                           "close enough that the patterns are sharp, and try again")
     try:
-        return arrange(screens, scene.solve())
+        result = arrange(screens, scene.solve())
     except SceneError as exc:
         raise LineupError(str(exc)) from exc
+    result.desk = None  # (one photo: no depth worth keeping)
+    return result
 
 
 # -- live: frame after frame from a phone moved about ------------------------------
@@ -826,6 +863,7 @@ class Live:
         self.solution = None  # the curslink.lineup_scene.Solution it's from
         self.check = None  # curslink.lineup_check.Check, once the scan is done
         self.seam = None  # curslink.lineup_seam.Seam, after that: each overlap's pattern joined up
+        self.seat = None  # curslink.seat.PhoneSeat, last: the phone at the eyes of someone sitting back
         self._locator = None
         self.error = ""
         self.fresh = False  # a new view since the last solve
@@ -1024,6 +1062,59 @@ class Live:
         self.result.check = self.check_summary()
         return moved
 
+    # ---- last of all: where you sit (curslink.seat) ----
+    def start_seat(self):
+        """After the pattern: the phone is to be held at the eyes of someone
+        sitting as they usually sit, and found by the patterns still up
+        (:func:`check_plan`). None if there's no overlap to aim (nothing
+        depends on where the eyes are) or it can't be done."""
+        from curslink import seat
+        from curslink.lineup_check import Check
+
+        if self.seat is None and self.aligned and self.solution is not None and self.scene is not None \
+                and self.result is not None and self.result.desk is not None \
+                and any(f.get("quad") is not None for f in self.result.fits):
+            solution = self.check.sol if self.check is not None else self.solution
+            if self._locator is None:
+                self._locator = self.check or Check(solution, self.result, check_plan(self.planned), self.scene.intr,
+                                                    self.scene.image_size)
+            self.seat = seat.PhoneSeat(solution, seat.mm_of(self.result.desk))
+        return self.seat
+
+    def seat_frame(self, gray) -> bool:
+        """A frame taken in that last step. True once the eyes are found:
+        every overlap's fit is then aimed from there (``result.fits``), and
+        ``result.desk`` says where that is."""
+        from curslink import seat
+
+        if self.seat is None or self.scene is None or self.seat.done:
+            return False
+        sightings = read_frame(gray, check_plan(self.planned), self.dims, self.scene.tolerance, thorough=False,
+                               curved=self.scene.curved)
+        self.frames += 1
+        self.last_seen = [s.key for s in sightings]
+        if not self.seat.sight(self._locator.locate(sightings) if sightings else None):
+            return False
+        # (The desk as the check left it; the fits as the pattern step did.)
+        check = self.result.check
+        desk = self.result.desk
+        self.result.desk, self.result.fits = seat.seated(desk, self.result.fits, self.seat.eye, "phone")
+        self.result.check = check
+        return True
+
+    def seat_summary(self, names: dict[str, str] | None = None) -> str:
+        """Where the eyes were found, in a few words (for the phone and the computer)."""
+        from curslink import seat
+
+        desk = self.result.desk if self.result is not None else None
+        if self.seat is None or self.seat.eye is None or desk is None:
+            return ""
+        mm = seat.mm_of(desk)
+        if mm is None:
+            return "Got you"
+        main = seat.main_screen(desk, self.result.fits)
+        return f"Got you: {seat.distance(desk, main) * mm / 10:.0f} cm from {(names or {}).get(main, 'your main screen')}"
+
     def check_summary(self) -> dict | None:
         """How the check went, for the Layout page: ``{"state", "lines",
         "joins", "step"}``. ``state``: "none" (no two screens meet where a
@@ -1044,6 +1135,13 @@ class Live:
     def hint(self, numbers: dict[str, object] | None = None) -> str:
         """What to do next, in a few words (for the phone's screen)."""
         numbers = numbers or {}
+        if self.seat is not None:
+            if self.seat.eye is not None:
+                return self.seat_summary({k: f"screen {n}" for k, n in numbers.items() if n})
+            if self.seat.gave_up:
+                return "Lined up"
+            return ("Last step: sit back as you normally sit and rest the top of the phone on the bridge of your "
+                    "nose, camera facing your screens. It buzzes when it has you")
         if self.seam is not None:
             if self.seam.done:
                 return "Lined up"
@@ -1164,7 +1262,7 @@ class PhotoInbox:
 
     def live(self, payload: str) -> None:
         """``lineup_live {"device": ..., "id": ..., "seq", "progress", "hint",
-        "screens", "done"}``: how it's going, to the phone sending the frames."""
+        "screens", "buzz", "done"}``: how it's going, to the phone sending the frames."""
         import json
 
         from curslink.protocol import LINEUP_CAMERA_FEATURE
@@ -1188,6 +1286,8 @@ class PhotoInbox:
         screens = data.get("screens") if isinstance(data.get("screens"), list) else []
         out["screens"] = [[s[0], str(s[1])] for s in screens[:MAX_SCREENS]
                           if isinstance(s, list) and len(s) == 2 and isinstance(s[0], int)]
+        if data.get("buzz"):
+            out["buzz"] = True  # the phone is against a face: it says "got you" by shaking
         if data.get("done"):
             out["done"] = True
         self._send(device_id, "lineup_live", **out)
